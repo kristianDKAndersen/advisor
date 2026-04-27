@@ -1,0 +1,45 @@
+{
+  "agent": "Advisor",
+  "effortLevel": "high",
+  "thinking": {
+    "enabled": true
+  },
+   "permissions": {
+    "allow": [
+      "WebFetch",
+      "WebSearch",
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(node *)",
+      "Bash(bin/summon *)",
+      "Bash(./bin/summon *)",
+      "Bash(bash bin/summon *)",
+      "Bash(chmod *)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/session-start.js"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "CLAUDE_CODE_NO_FLICKER": "1"
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "./.claude/hooks/statusline.sh",
+    "padding": 1
+  }
+}

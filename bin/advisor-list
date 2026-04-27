@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+// advisor-list — enumerate all sessions under ~/.advisor/runs/
+//
+// Works from any cwd (hence the walk — there's no central aggregated index,
+// each session owns its own meta.json and we read them all). Newest first.
+//
+// Usage:
+//   advisor-list                   # default table
+//   advisor-list --json            # machine-readable
+//   advisor-list --repo <path>     # filter to sessions invoked from <path>
+//   advisor-list --agent <name>    # filter by agent
+
+const path = require('path');
+const session = require(path.join(path.resolve(__dirname, '..'), 'lib', 'session.js'));
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        out[k] = next;
+        i++;
+      } else {
+        out[k] = true;
+      }
+    }
+  }
+  return out;
+}
+
+function ago(iso) {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function truncate(s, n) {
+  s = String(s || '');
+  return s.length <= n ? s : s.slice(0, n - 1) + '…';
+}
+
+const args = parseArgs(process.argv);
+let sessions = session.listSessions();
+
+if (args.repo) {
+  const want = path.resolve(args.repo);
+  sessions = sessions.filter((s) => s.repo === want);
+}
+if (args.agent) {
+  sessions = sessions.filter((s) => s.agent === args.agent);
+}
+
+if (args.json) {
+  process.stdout.write(JSON.stringify(sessions, null, 2) + '\n');
+  process.exit(0);
+}
+
+if (sessions.length === 0) {
+  console.log('No sessions found at ' + session.RUNS_ROOT);
+  process.exit(0);
+}
+
+// Pretty table
+console.log(
+  ['SID', 'AGENT', 'AGE', 'REPO', 'TASK'].map((h, i) => {
+    const widths = [22, 13, 10, 30, 40];
+    return h.padEnd(widths[i]);
+  }).join('')
+);
+console.log('─'.repeat(22 + 13 + 10 + 30 + 40));
+
+for (const s of sessions) {
+  const row = [
+    truncate(s.sid, 21).padEnd(22),
+    truncate(s.agent, 12).padEnd(13),
+    truncate(ago(s.created_at), 9).padEnd(10),
+    truncate(s.repo || '—', 29).padEnd(30),
+    truncate(s.task || '—', 40)
+  ].join('');
+  console.log(row);
+}
+console.log(`\n${sessions.length} session${sessions.length === 1 ? '' : 's'} under ${session.RUNS_ROOT}`);

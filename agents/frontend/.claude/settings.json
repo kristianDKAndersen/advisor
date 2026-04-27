@@ -1,0 +1,22 @@
+{
+  "agent": "frontend",
+  "model": "sonnet",
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob",
+      "WebFetch",
+      "Bash(ls *)",
+      "Bash(open *)",
+      "Bash(node *)",
+      "Bash(bash *)",
+      "Bash(mkdir *)"
+    ]
+  }
+}

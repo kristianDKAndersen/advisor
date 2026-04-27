@@ -1,0 +1,18 @@
+{
+  "agent": "code-reviewer",
+  "model": "sonnet",
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Write",
+      "Bash(node *)",
+      "Bash(bash *)",
+      "Bash(ls *)"
+    ]
+  }
+}

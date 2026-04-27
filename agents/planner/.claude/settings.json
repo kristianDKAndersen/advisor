@@ -1,0 +1,21 @@
+{
+  "agent": "planner",
+  "model": "sonnet",
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Write",
+      "Edit",
+      "WebSearch",
+      "WebFetch",
+      "Bash(node *)",
+      "Bash(bash *)",
+      "Bash(ls *)"
+    ]
+  }
+}

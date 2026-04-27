@@ -1,0 +1,20 @@
+{
+  "agent": "philpsych",
+  "model": "sonnet",
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob",
+      "WebSearch",
+      "WebFetch",
+      "Bash(node *)",
+      "Bash(bash *)"
+    ]
+  }
+}

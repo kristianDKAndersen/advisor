@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# summon — provision a worker session and open it in a new macOS Terminal tab.
+#
+# Usage:
+#   bin/summon --agent <name> --task "<brief>" --goal "<done condition>" [--sid <id>]
+#
+# Prints the JSON metadata from lib/summon.js on stdout so the Advisor can parse it.
+
+set -euo pipefail
+
+AGENT=""
+TASK=""
+GOAL=""
+SID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent) AGENT="$2"; shift 2 ;;
+    --task)  TASK="$2";  shift 2 ;;
+    --goal)  GOAL="$2";  shift 2 ;;
+    --sid)   SID="$2";   shift 2 ;;
+    -h|--help)
+      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--sid <id>]"
+      exit 0
+      ;;
+    *) echo "Unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$AGENT" || -z "$TASK" || -z "$GOAL" ]]; then
+  echo "Missing required flag. Run --help for usage." >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Provision workspace + channel + bootstrap prompt.
+NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
+[[ -n "$SID" ]] && NODE_ARGS+=(--sid "$SID")
+META=$(node "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
+
+# Parse paths out of the JSON (node one-liner, no deps).
+extract() { echo "$META" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).$1)"; }
+SID=$(extract sid)
+LAUNCH_SH=$(extract launchScript)
+
+# Wrap $LAUNCH_SH for safe embedding inside the do-script shell command.
+# The AppleScript string itself is double-quoted, but Terminal then re-parses
+# the contents as a shell command — so we need shell-level quoting around the
+# path to survive spaces. We also escape single quotes (rare but real, e.g.
+# /Users/O'Brien/...) using the standard '\'' bash trick.
+#
+# launch.sh is a plain path — no embedded quotes in the osascript string.
+# The script itself handles cd + claude + $(cat prompt) in a normal shell.
+#
+# Window-handling note: if Terminal isn't already running, `activate` cold-launches it
+# and macOS auto-opens a blank window. A naked `do script` then opens a SECOND window,
+# leaving an empty terminal behind. We detect the cold-start case and reuse window 1.
+LAUNCH_SH_QUOTED="'${LAUNCH_SH//\'/\'\\\'\'}'"
+
+if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+  osascript \
+    -e "set wasRunning to application \"Terminal\" is running" \
+    -e "tell application \"Terminal\"" \
+    -e "activate" \
+    -e "if wasRunning then" \
+    -e "do script \"bash $LAUNCH_SH_QUOTED\"" \
+    -e "else" \
+    -e "delay 0.2" \
+    -e "do script \"bash $LAUNCH_SH_QUOTED\" in window 1" \
+    -e "end if" \
+    -e "end tell" >/dev/null
+  echo "[summon] opened Terminal tab — agent=$AGENT sid=$SID" >&2
+else
+  echo "[summon] non-macOS or no osascript. Run this in a new terminal:" >&2
+  echo "  bash $LAUNCH_SH_QUOTED" >&2
+fi
+
+# Emit the full JSON on stdout for the Advisor to consume.
+echo "$META"
