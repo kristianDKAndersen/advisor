@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# close-worker-tab — close the Terminal tab that ran a given worker session.
+#
+# Usage: close-worker-tab <sid>
+#
+# Called by the Advisor after receiving a worker's `result` or after sending
+# `terminate`. Idempotent — safe if the worker already self-closed its tab.
+
+set -u
+
+sid="${1:-}"
+[[ -z "$sid" ]] && exit 0
+
+# Resolve runDir: primary location, then repo-local fallback.
+runDir="$HOME/.advisor/runs/$sid"
+if [[ ! -d "$runDir" ]]; then
+  advisorRepo="$(dirname "$(dirname "$0")")"
+  runDir="$advisorRepo/.advisor-runs/$sid"
+fi
+[[ ! -d "$runDir" ]] && exit 0
+
+# Defense in depth: kill any lingering claude processes whose argv contains sid.
+ps -ax -o pid=,comm=,args= 2>/dev/null | while IFS= read -r line; do
+  comm_field=$(awk '{print $2}' <<<"$line")
+  pid_field=$(awk '{print $1}' <<<"$line")
+  if [[ "$comm_field" == "claude" ]] && grep -qF "$sid" <<<"$line"; then
+    kill -KILL "$pid_field" 2>/dev/null || true
+  fi
+done
+
+ttyFile="$runDir/tty.txt"
+[[ ! -f "$ttyFile" ]] && exit 0
+
+myTTY=$(tr -d '[:space:]' < "$ttyFile")
+[[ -z "$myTTY" ]] && exit 0
+
+if [[ "$(uname)" != "Darwin" ]]; then
+  exit 0
+fi
+if ! command -v osascript >/dev/null 2>&1; then
+  exit 0
+fi
+
+osascript - "$myTTY" <<'EOF'
+on run argv
+  set myTTY to item 1 of argv
+  tell application "Terminal"
+    set found to false
+    repeat with w in windows
+      try
+        repeat with t in tabs of w
+          if tty of t is myTTY then
+            set found to true
+            if (count tabs of w) > 1 then
+              close t saving no
+            else
+              close w saving no
+            end if
+            exit repeat
+          end if
+        end repeat
+      end try
+      if found then exit repeat
+    end repeat
+  end tell
+end run
+EOF

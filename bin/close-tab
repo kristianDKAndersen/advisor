@@ -20,32 +20,35 @@ fi
 myTTY=$(tty 2>/dev/null) || true
 [[ "$myTTY" != /dev/* ]] && { _pt=$(ps -o tty= -p "$PPID" 2>/dev/null | tr -d ' '); [[ "$_pt" =~ ^tty ]] && myTTY="/dev/$_pt"; }
 [[ -z "$myTTY" ]] && exit 0   # headless / non-TTY: no-op
+parent_name=$(ps -o comm= -p $PPID 2>/dev/null | awk -F'/' '{print $NF}')
+if [[ "$parent_name" == "claude" || "$parent_name" == "node" ]]; then
+  kill -TERM $PPID 2>/dev/null || true
+  sleep 0.5
+  kill -0 $PPID 2>/dev/null && kill -KILL $PPID 2>/dev/null || true
+fi
 osascript - "$myTTY" <<'EOF' &
 on run argv
   set myTTY to item 1 of argv
   tell application "Terminal"
     set found to false
     repeat with w in windows
-      repeat with t in tabs of w
-        if tty of t is myTTY then
-          set found to true
-          if (count tabs of w) > 1 then
-            close t
-          else
-            close w
+      try
+        repeat with t in tabs of w
+          if tty of t is myTTY then
+            set found to true
+            if (count tabs of w) > 1 then
+              close t saving no
+            else
+              close w saving no
+            end if
+            exit repeat
           end if
-          exit repeat
-        end if
-      end repeat
+        end repeat
+      end try
       if found then exit repeat
     end repeat
   end tell
 end run
 EOF
 disown 2>/dev/null || true
-parent_name=$(ps -o comm= -p $PPID 2>/dev/null | awk -F'/' '{print $NF}')
-if [[ "$parent_name" == "claude" || "$parent_name" == "node" ]]; then
-  sleep 0.2
-  kill -TERM $PPID 2>/dev/null || true
-fi
 exit

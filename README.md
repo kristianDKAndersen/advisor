@@ -12,6 +12,18 @@ Worker agents live under `agents/<name>/CLAUDE.md`. Each defines its role, allow
 bin/summon <agent-name> "<brief>"
 ```
 
+Available agents:
+
+| Agent | Role |
+|-------|------|
+| `researcher` | Web search and synthesis |
+| `coder` | Implements fixes from a spec |
+| `code-reviewer` | Reviews code for issues |
+| `evaluator` | Quality-checks worker output |
+| `frontend` | UI/component work |
+| `planner` | Task decomposition |
+| `creative` | Ground/Explode/Forge protocol — use when the obvious solution is suspect or a design discussion has fixated; not for routine brainstorms |
+
 ## Prerequisites
 
 **macOS Terminal.app profile configuration** — required for `bin/close-tab` to work.

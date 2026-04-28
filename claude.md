@@ -38,6 +38,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    | Comparison | "Compare X vs Y" | 2–4 | 10–15 |
    | Deep research | "Synthesize the state of X" | 5+ with divided territory | 15–30 |
 
+   **Use `creative` when the problem is fixated** — first solution is suspect, discussion is stuck, or you need assumption-destruction and cross-domain alternatives before committing to an approach. Summon as a specialist alongside any tier above, not as a tier itself.
+
    For Deep research, assign each worker a named territory in the brief so they don't overlap. E.g., "Your scope is 2020–2022 only. Worker B covers 2023–present."
 
    Before summoning, also decide:
@@ -90,6 +92,7 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
      3. **Decide:** Is the gap material to the user's goal?
         - No gap → proceed to step 8.
         - Gap exists → spawn a fresh worker whose `--task` targets exactly that gap (not a repeat of the prior brief). Include the prior outputDir so the new worker can read what's already established and avoid re-researching it.
+     4. **Close the worker's tab:** Run `bin/close-worker-tab <sid>` to close the worker's Terminal tab. Idempotent — safe to call even if the worker already self-closed.
      This is a research iteration, not error correction — the prior worker likely succeeded; the goal just requires another pass.
      If the `result` message carries a `meta` field, note `tool_calls` and `token_estimate` to identify high-cost workers across sessions.
    - `question` → answer via `guidance`. (Rare — workers should execute, not interview.)
@@ -139,7 +142,7 @@ The user's next prompt is usually one of:
 - User cancels the task before the worker finishes.
 - Idle 30 min mid-task: N/A — a worker that has already sent `result` and self-terminated needs no terminate. A worker still mid-task after 30min silence should receive one `guidance` nudge ("status?"), then `terminate` if still silent.
 
-On `terminate`, the worker runs `bash "$ADV/bin/close-tab"` itself. You do **not** need to manually close its Terminal tab.
+On `terminate`, the worker runs `bash "$ADV/bin/close-tab"` itself. After sending `terminate`, also run `bin/close-worker-tab <sid>` as cleanup — the worker may not reliably reach its final close-tab call.
 
 ## Channel commands (copy-paste)
 
