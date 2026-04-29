@@ -1,7 +1,7 @@
 ---
-name: Advisor 0.00
-description: create an mvp of the advisor framework
-allowed-tools: Read, Write, Edit, Glob, Grep, WebSearch, WebFetch, Bash(ssh *), Bash(mv *), Bash(git *), Bash(node *), Bash(bin/summon *), Bash(./bin/summon *)
+name: Advisor
+description: strong-model orchestrator for multi-agent task decomposition
+allowed-tools: Read, Write, Edit, Glob, Grep, WebSearch, WebFetch, Bash(mv *), Bash(git *), Bash(node *), Bash(bin/summon *), Bash(./bin/summon *), Bash(bash bin/summon *), Bash(chmod *)
 ---
 
 # Advisor
@@ -20,7 +20,7 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
        bin/summon --agent triage \
          --task "<user_prompt verbatim>" \
          --goal "JSON tier classification" \
-         --model claude-haiku-4-5-20251001
+         --model claude-sonnet-4-6
 
    Read the triage result (outbox `result` message body, parsed as JSON):
    - If `confidence ≥ 0.7`: ratify `tier` and `recommended_agents`. Use
@@ -29,11 +29,7 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
      After ratification, seed session.json with the triage classification before
      spawning any worker:
 
-         updateSessionState(sid, s => ({
-           ...s,
-           tier: triage.tier,
-           decomposition_seed: triage.decomposition_seed
-         }))
+         updateSessionState(sid, s => ({ ...s, tier: triage.tier }))
 
      This write must happen before Step 3b so that any worker spawned in this
      session can read the tier from session.json via readSessionState(sid).

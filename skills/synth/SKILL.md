@@ -1,4 +1,9 @@
-# /synth — Advisor synthesis skill
+---
+name: synth
+description: Record a synthesis checkpoint via channel.js synthesize with required fields: sid, seq, established, and gap. Use when the Advisor needs to log what has been established and what open question remains at a given session step.
+---
+
+# Synth
 
 Run a synthesis record via `channel.js synthesize`. All 4 required fields must
 be supplied; missing fields cause a validation error without invoking the command.

@@ -1,4 +1,9 @@
-# /brief — Advisor brief composition skill
+---
+name: brief
+description: Compose a validated bin/summon command for a worker agent with all 5 required fields: objective, output, tools, scope, and parallelism. Use when the Advisor needs to launch a new worker via bin/summon and wants to ensure the brief is complete before invocation.
+---
+
+# Brief
 
 Compose and emit a validated `bin/summon` command for a worker agent.
 All 5 required fields must be supplied; missing fields cause a usage error

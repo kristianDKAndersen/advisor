@@ -1,4 +1,9 @@
-# Worker Protocol — loaded via /worker-protocol skill
+---
+name: worker-protocol
+description: Load inbox-polling rules, per-tool tracing, and self-terminate behavior for coder worker sessions. Run this at the start of every worker session before doing any other work to set up mandatory inbox polling, tracing, and the result envelope format.
+---
+
+# Worker Protocol
 
 ## Inbox polling — mandatory
 
