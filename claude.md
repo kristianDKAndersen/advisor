@@ -12,7 +12,39 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
 
 1. **Receive** the user's prompt.
 2. **Clarify the goal.** If the done-condition is vague, ask the user **ONE** clarifying question to lock it. Don't guess — the worker cannot recover if the goal is wrong.
-3. **Decompose. Default: delegate.** Restate task + goal in one sentence.
+3. **Decompose. Default: delegate.**
+
+   **Triage pre-pass (Step 3a):** Before decomposing, summon the triage agent to
+   classify the task:
+
+       bin/summon --agent triage \
+         --task "<user_prompt verbatim>" \
+         --goal "JSON tier classification" \
+         --model claude-haiku-4-5-20251001
+
+   Read the triage result (outbox `result` message body, parsed as JSON):
+   - If `confidence ≥ 0.7`: ratify `tier` and `recommended_agents`. Use
+     `decomposition_seed` as your decomposition starting point.
+
+     After ratification, seed session.json with the triage classification before
+     spawning any worker:
+
+         updateSessionState(sid, s => ({
+           ...s,
+           tier: triage.tier,
+           decomposition_seed: triage.decomposition_seed
+         }))
+
+     This write must happen before Step 3b so that any worker spawned in this
+     session can read the tier from session.json via readSessionState(sid).
+
+   - If `confidence < 0.7`: discard the triage output. Proceed with your own
+     decomposition judgment — do not surface the low-confidence triage output
+     to workers or include it in briefs.
+
+   After ratification, proceed to Step 3b (spawn workers per the decomposition).
+
+   **Step 3b:** Restate task + goal in one sentence.
    Then apply the default: **summon a worker unless you can prove the task is
    a single lookup or two-tool-call read.** The bar for "do it yourself" is
    low — one Glob, one Read, one Grep. Anything beyond that, delegate.
@@ -57,7 +89,7 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    This survives context compression. If the session resumes after a break,
    read the plan file rather than reconstructing from conversation history.
 4. **Pick an agent.** `Glob agents/*/CLAUDE.md`, `Read` the candidates, pick by role description. Do not invent agent names.
-5. **Write the brief, then summon.** A brief missing any of these four fields produces duplicated work, gaps, or misinterpretation:
+5. **Write the brief, then summon.** Use `/brief` to compose the brief — it validates all 5 required fields (objective, output, tools, scope, parallelism) and emits the `bin/summon` command. A brief missing any of these four fields produces duplicated work, gaps, or misinterpretation:
    - **Objective:** one sentence on what to answer (not the topic — the question)
    - **Output format:** what the deliverable looks like (bullet list of findings? markdown report? JSON? exact file name?)
    - **Tools/sources:** which tool to reach for first; which sources are authoritative vs. to be avoided
@@ -86,7 +118,7 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    Repeat until all workers have sent `result`, or until 10 minutes have elapsed — then proceed to Step 7 synthesis with whatever partial results are available. The single-worker `tail` path remains the default for Fact-tier tasks.
 7. **Steer.** React to each worker message:
    - `progress` → usually acknowledge mentally, wait for more. Intervene only if the worker is clearly off-track.
-   - `result`   → When a worker delivers result, the channel.js output appends a SYNTHESIS REQUIRED block with a pre-filled `synthesize` command. The result body is a structured envelope — read `body.summary` (≤200 char outcome), `body.paths` (absolute file paths to deliverables), `body.verdict` (`complete`|`partial`|`blocked`). Legacy string bodies display as before. Fill the four fields (established, gap, material, next_action) and run it BEFORE spawning a new worker, sending guidance, or proceeding to Step 8.
+   - `result`   → When a worker delivers result, the channel.js output appends a SYNTHESIS REQUIRED block with a pre-filled `synthesize` command. The result body is a structured envelope — read `body.summary` (≤200 char outcome), `body.paths` (absolute file paths to deliverables), `body.verdict` (`complete`|`partial`|`blocked`). Legacy string bodies display as before. Fill the four fields (established, gap, material, next_action) and run it BEFORE spawning a new worker, sending guidance, or proceeding to Step 8. Use `/synth` to run synthesis — it validates required fields before invoking `channel.js synthesize` and prevents malformed synthesis records.
 
      **After synthesis, drop the result from context.** Do not re-quote the result body inline. Do not include result body content in any subsequent tool call arguments or narrative. The synthesis record (established, gap, material, next_action, key_quotes) is the complete interface to this worker's output. If a later step genuinely requires the full content, read the file at the path in `body.paths[0]` — do not reconstruct it from memory. Progress messages from this worker are also evicted at synthesis time — they are absorbed into `established`; do not re-read them.
 
@@ -113,6 +145,13 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
 8. **Report to the user.** Synthesize the worker's findings in your own words + cite key evidence from the outbox. If the task produced files, run `ls -la <outputDir>` and list the deliverables with their absolute paths so the user can open them. End with: `— via <agent>, session <sid>` so the user can audit `.advisor-runs/<sid>/`.
 9. **Record `outputDir` for follow-up.** Remember `outputDir` so you can pass it to a fresh worker if the user iterates. The worker has self-terminated. See the Iteration section for how to handle follow-ups.
 
+## Recovery after compression
+
+On resume or after context compression, call `readSessionState(sid)` before
+reconstructing from scrollback — `session.json` has the last known `tier`,
+`decomposition` status, and `next_action`, and is cheaper to read than
+re-parsing the full channel history.
+
 ## Iteration
 
 After a `result` is delivered, the worker self-terminates and closes its own Terminal tab. There is no in-session refinement. **Every follow-up — even a tiny change like "make the heading bigger" — requires spawning a fresh worker.**
@@ -127,7 +166,14 @@ The user's next prompt is usually one of:
 
 - **New artifact / new goal** ("now build a pricing page" — different deliverable, possibly different agent). → Spawn a fresh worker, possibly with a different agent type.
 
-- **Prompt file edits** (CLAUDE.md, agent prompts) → After a worker delivers the edited file, do a step-through before closing: pick a recent representative task, mentally trace through the new prompt, verify it still produces the right decomposition and brief structure. If the edit touches delegation logic or worker spawning behavior, spawn a verification worker: `bin/summon --agent researcher --task "Review the diff at <outputDir>/CLAUDE.md.diff. Walk through a representative research task under the new prompt and flag any unintended behavior changes." --goal "Pass/fail verdict on whether the edit is safe to merge."` Prompt changes that pass are then committed; those that fail are iterated before merging.
+- **Prompt file edits** (CLAUDE.md, agent prompts) → After a worker delivers the edited file, do a step-through before closing: pick a recent representative task, mentally trace through the new prompt, verify it still produces the right decomposition and brief structure. If the edit touches delegation logic or worker spawning behavior, verify with `diff-walker`:
+
+  When verifying a CLAUDE.md prompt edit, summon `diff-walker` with:
+  - `old_prompt`: text of CLAUDE.md before the edit
+  - `new_prompt`: text of CLAUDE.md after the edit
+  - corpus path: `~/.advisor/runs/*/meta.json`
+
+  The diff-walker returns `cascade-report.md` in `$OUTPUT_DIR` with PASS/FAIL per task on 4 axes. Review FAILs before merging the prompt change.
 
 - **Conversational closure** ("thanks", "looks good", "we're done"). → No action needed; the worker already terminated.
 

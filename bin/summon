@@ -12,6 +12,7 @@ AGENT=""
 TASK=""
 GOAL=""
 SID=""
+MODEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,8 +20,9 @@ while [[ $# -gt 0 ]]; do
     --task)  TASK="$2";  shift 2 ;;
     --goal)  GOAL="$2";  shift 2 ;;
     --sid)   SID="$2";   shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--sid <id>]"
+      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--sid <id>] [--model <model>]"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -37,7 +39,8 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Provision workspace + channel + bootstrap prompt.
 NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
-[[ -n "$SID" ]] && NODE_ARGS+=(--sid "$SID")
+[[ -n "$SID"   ]] && NODE_ARGS+=(--sid   "$SID")
+[[ -n "$MODEL" ]] && NODE_ARGS+=(--model "$MODEL")
 META=$(node "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
 
 # Install worker-protocol skill into user's Claude skills dir if not present.
@@ -47,6 +50,22 @@ if [ ! -d "$HOME/.claude/skills/worker-protocol" ]; then
     cp -r "$ROOT/skills/worker-protocol" "$HOME/.claude/skills/" \
     && echo "[summon] installed worker-protocol skill to ~/.claude/skills/" >&2 \
     || echo "[summon] warn: could not install worker-protocol skill — workers will use inline fallback" >&2
+fi
+
+# Install brief skill into user's Claude skills dir if not present.
+if [ ! -d "$HOME/.claude/skills/brief" ]; then
+  mkdir -p "$HOME/.claude/skills" && \
+    cp -r "$ROOT/skills/brief" "$HOME/.claude/skills/" \
+    && echo "[summon] installed brief skill to ~/.claude/skills/" >&2 \
+    || echo "[summon] warn: could not install brief skill" >&2
+fi
+
+# Install synth skill into user's Claude skills dir if not present.
+if [ ! -d "$HOME/.claude/skills/synth" ]; then
+  mkdir -p "$HOME/.claude/skills" && \
+    cp -r "$ROOT/skills/synth" "$HOME/.claude/skills/" \
+    && echo "[summon] installed synth skill to ~/.claude/skills/" >&2 \
+    || echo "[summon] warn: could not install synth skill" >&2
 fi
 
 # Parse paths out of the JSON (node one-liner, no deps).
