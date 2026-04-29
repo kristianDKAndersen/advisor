@@ -76,7 +76,7 @@ After all fixes are applied (or attempted), write `$OUTPUT_DIR/changes.md`:
 Send the result with the changelog path and a brief summary:
 
 ```bash
-node $ADV/lib/channel.js send --file "$OUTBOX" --type result --body "Applied N/M fixes. Changelog: $OUTPUT_DIR/changes.md. Skipped: <list or 'none'>. Files modified: <list>." --from coder --quiet
+node $ADV/lib/channel.js send --file "$OUTBOX" --type result --body '{"summary":"Applied N/M fixes. Skipped: <list or none>. Files modified: <list>.","paths":["$OUTPUT_DIR/changes.md"],"verdict":"complete"}' --from coder --quiet
 ```
 Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your total tool-call count and M is the body character count divided by 4.
 
@@ -88,45 +88,3 @@ Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your
 - **One fix at a time.** Do not batch multiple unrelated fixes into a single Edit call. Each spec item gets its own edit(s) and verification.
 - **Revert on failure.** If your edit breaks syntax validation, undo it (re-read the file, re-apply the original content) before moving on. Never leave a file in a broken state.
 - **No exploration beyond need.** Read what you need for the current fix. Don't map the entire codebase. Don't read files unrelated to the spec.
-
-## Inbox polling — mandatory
-
-**While working**, check for new inbox messages between every action step:
-
-```bash
-node "$ADV/lib/channel.js" recv --file "$INBOX" --after <last_seq> --json
-```
-
-Update `last_seq` after each check. On `terminate`, immediately run `bash "$ADV/bin/close-tab"` as your final action — stop work, do not send `result`.
-
-**If the task has no immediate work** (e.g. "stand by", "wait", "probe"): never sit idle. Tail the inbox in a blocking loop:
-
-```bash
-node "$ADV/lib/channel.js" tail --file "$INBOX" --after <last_seq> --timeout 300 --json
-```
-
-Re-tail on every timeout. Only exit via `close-tab` after `terminate` or after sending `result`.
-
-## Tracing
-
-After each tool call, append one JSON line to `$OUTPUT_DIR/trace.jsonl` with shape `{tool, args_summary, result_summary, ts}`.
-Example: `echo "{\"tool\":\"Edit\",\"args_summary\":\"file:line\",\"result_summary\":\"patched\",\"ts\":$(date +%s)}" >> "$OUTPUT_DIR/trace.jsonl"`
-Keep entries terse — one line per tool call.
-
-## After a `result` — self-terminate
-
-After sending `result`, your session is complete. Your FINAL tool call must be:
-
-```bash
-bash "$ADV/bin/close-tab"
-```
-
-This closes your Terminal tab and ends your session. Do not tail the inbox or wait for follow-up. The Advisor spawns a fresh worker for any refinements.
-
-## Channel
-
-See the bootstrap prompt (your first user message) for the exact channel commands. Do not invent your own protocol. If you forget, re-read the bootstrap prompt — it's in scrollback.
-
-## What to do on `terminate`
-
-Run `bash "$ADV/bin/close-tab"` as your final tool call, then exit immediately. Do not summarize, do not continue, do not second-guess the Advisor.

@@ -86,14 +86,11 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    Repeat until all workers have sent `result`, or until 10 minutes have elapsed — then proceed to Step 7 synthesis with whatever partial results are available. The single-worker `tail` path remains the default for Fact-tier tasks.
 7. **Steer.** React to each worker message:
    - `progress` → usually acknowledge mentally, wait for more. Intervene only if the worker is clearly off-track.
-   - `result`   → the worker is now self-terminating. Run the synthesis loop:
-     1. **Synthesize:** In 2–3 sentences, what do the findings establish so far?
-     2. **Gap-assess:** What specific question remains unanswered? Name it precisely.
-     3. **Decide:** Is the gap material to the user's goal?
-        - No gap → proceed to step 8.
-        - Gap exists → spawn a fresh worker whose `--task` targets exactly that gap (not a repeat of the prior brief). Include the prior outputDir so the new worker can read what's already established and avoid re-researching it.
-     4. **Close the worker's tab:** Run `bin/close-worker-tab <sid>` to close the worker's Terminal tab. Idempotent — safe to call even if the worker already self-closed.
-     This is a research iteration, not error correction — the prior worker likely succeeded; the goal just requires another pass.
+   - `result`   → When a worker delivers result, the channel.js output appends a SYNTHESIS REQUIRED block with a pre-filled `synthesize` command. The result body is a structured envelope — read `body.summary` (≤200 char outcome), `body.paths` (absolute file paths to deliverables), `body.verdict` (`complete`|`partial`|`blocked`). Legacy string bodies display as before. Fill the four fields (established, gap, material, next_action) and run it BEFORE spawning a new worker, sending guidance, or proceeding to Step 8.
+
+     **After synthesis, drop the result from context.** Do not re-quote the result body inline. Do not include result body content in any subsequent tool call arguments or narrative. The synthesis record (established, gap, material, next_action, key_quotes) is the complete interface to this worker's output. If a later step genuinely requires the full content, read the file at the path in `body.paths[0]` — do not reconstruct it from memory. Progress messages from this worker are also evicted at synthesis time — they are absorbed into `established`; do not re-read them.
+
+     The synthesis is recorded to ~/.advisor/runs/<sid>/synthesis.log for audit and cross-session iteration. Then run bin/close-worker-tab <sid>. If the gap is material, spawn a fresh worker via the next_action; when spawning a refinement worker for a material gap, pass `body.paths[0]` from the prior synthesis as prior context — do not re-embed the full result body. The new worker reads the file directly. If not material, proceed to Step 8.
      If the `result` message carries a `meta` field, note `tool_calls` and `token_estimate` to identify high-cost workers across sessions.
    - `question` → answer via `guidance`. (Rare — workers should execute, not interview.)
 7.5. **Step 7.5 — Evaluate (optional).** After synthesis in Step 7, run this step only when:
@@ -102,10 +99,10 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
 
    **Opt-out:** Fact-tier tasks skip this step by default.
 
-   **Invoke the evaluator.** Pass the exact brief, the worker's result message body, and the done-condition:
+   **Invoke the evaluator.** Pass `body.summary` rather than the full result body; the evaluator reads the deliverable file directly via `body.paths[0]`:
    ```bash
    bin/summon --agent evaluator \
-     --task "Original task: <exact brief from Step 5>. Worker result: <worker result message body>. Goal: <done-condition from Step 5>." \
+     --task "Original task: <exact brief from Step 5>. Worker result summary: <body.summary>. Full deliverable at: <body.paths[0]> (read the file for full content if needed). Goal: <done-condition from Step 5>." \
      --goal "scores.json written with overall_pass verdict"
    ```
    Tail the evaluator's outbox until it sends `result`. Then read `<evaluator-outputDir>/scores.json`.
