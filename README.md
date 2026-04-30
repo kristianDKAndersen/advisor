@@ -87,6 +87,13 @@ skills/
 | `code-reviewer` | Reviews code for defects on multiple quality dimensions; produces `review.md`; never writes code |
 | `coder` | Implements fixes from a structured spec; edits files in `$REPO` in place; produces `changes.md` |
 | `creative` | Ground / Explode / Forge three-phase protocol for breaking fixation and generating non-obvious alternatives |
+| `creative-constraintist` | Council persona — deliberate-scarcity stance; invents brutal constraints (no notifications, no screen, 8 seconds) and solves under each |
+| `creative-futurist`      | Council persona — temporal-inversion stance; works backward from a 30-year future or 30-year past |
+| `creative-mapper`        | Obviousness Mapper — enumerates obvious solutions and their close variants for the council pipeline; outputs forbidden-ideas.md + assumptions.md |
+| `creative-naturalist`    | Council persona — biological-analogy stance; ideas grounded in mechanisms from biology (mycorrhiza, swarm, immune system, succession, …) |
+| `creative-oracle`        | Council persona — oblique-stimulus stance; draws random domain words and forces metaphorical connection |
+| `creative-synthesizer`   | External Forger — receives goal + 3 persona idea-files only; selects/recombines/stress-tests; MUST NOT add new ideas; produces council-result.md |
+| `creative-systematist`   | Council persona — combinatorial / morphological-analysis stance; decomposes problem into orthogonal axes and combines unusual cells |
 | `diff-walker` | Cascade-tests a CLAUDE.md prompt edit against a corpus of real tasks on 4 axes; produces `cascade-report.md` |
 | `evaluator` | Scores a worker result on 5 rubric dimensions (factual accuracy, citation precision, completeness, source quality, tool efficiency); produces `scores.json` |
 | `frontend` | Builds self-contained frontend deliverables (landing pages, components, static sites); verifies in browser before reporting |
@@ -94,6 +101,27 @@ skills/
 | `planner` | Decomposes a task into a structured execution plan with subtasks, dependencies, and machine-verifiable DoD criteria; produces `plan.md` |
 | `researcher` | Executes research tasks (library evaluation, trend scan, fact-finding); cites every non-trivial claim; produces structured reports |
 | `triage` | Classifies a user prompt into a tier and emits a JSON decomposition seed; invoked via `--model claude-sonnet-4-6` for compatibility with auto mode |
+
+## Creative Council Mode (opt-in)
+
+A heavier, multi-worker pipeline for severely fixated problems. Default for the fixated tier remains the single `creative` worker; Council Mode is invoked only when the user explicitly asks for council / go-wide / big-thoughts mode, or when the advisor judges fixation is severe AND the user has authorized council previously in this session.
+
+Pipeline (advisor-orchestrated; workers cannot chain):
+
+```
+C1  creative-mapper           → forbidden-ideas.md + assumptions.md
+     ↓
+C2  pick 3 of 5 personas (parallel) — each reads forbidden-ideas.md as hard exclusions
+    creative-naturalist · creative-systematist · creative-futurist · creative-oracle · creative-constraintist
+     ↓ 3 idea files
+C3  creative-synthesizer       → council-result.md  (External Forger; NEVER sees persona briefs)
+     ↓
+C4  advisor synthesis → report to user
+```
+
+Persona-selection rule: pick 3 personas that address DISTINCT failure modes of the obvious baseline. Default fall-back when no specific failure mode is evident: naturalist + constraintist + oracle (biological + scarcity + oblique).
+
+Cost: 5 workers, ~3-5 min wall clock. Path-plumbing: NEVER pass relative paths; always extract absolute paths from `body.paths` and forward them verbatim. Persona briefs MUST embed the absolute forbidden-ideas path; the synthesizer brief MUST embed the 3 absolute persona-output paths AND MUST NOT include the persona briefs.
 
 ## Skills catalog
 

@@ -32,7 +32,8 @@ Emit exactly one JSON object in this shape:
   - `fixated` — the question contains its own framing that may bias the answer
 
 - **recommended_agents** — list agent names that exist in `agents/` directory:
-  researcher, coder, creative, evaluator, frontend, philpsych, planner, diff-walker (once T-8.1 lands), triage
+  researcher, coder, creative, evaluator, frontend, philpsych, planner, diff-walker (once T-8.1 lands), triage,
+  creative-mapper, creative-naturalist, creative-systematist, creative-futurist, creative-oracle, creative-constraintist, creative-synthesizer
 
 - **decomposition_seed** — one sentence describing the decomposition strategy. If this field is empty string, you MUST set `confidence ≤ 0.3`.
 
@@ -59,6 +60,7 @@ Emit exactly one JSON object in this shape:
 | "Compare X vs Y", "Which is better for Z?" | `comparison` |
 | "Research X comprehensively", multi-step synthesis | `deep_research` |
 | Question presupposes its own answer ("Why is X always bad?") | `fixated` |
+| `fixated` + prompt contains "go wide", "council", "big thoughts", or "really stuck" | `fixated` — seed `brief_seeds` with: "Invoke Creative Council Mode: spawn creative-mapper first, then 3 parallel personas, then creative-synthesizer." |
 
 When confidence is low (border cases), choose `deep_research` — it is the safest over-estimate tier.
 
