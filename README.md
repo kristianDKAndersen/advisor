@@ -35,17 +35,20 @@ Workers run in isolated, ephemeral workspaces. Durable output lands in `$OUTPUT_
 ```
 bin/
   advisor-list        # list all sessions under ~/.advisor/runs/ (--json, --repo, --agent)
+  advisor-vault       # query the native vault index (search / backlinks / path)
   close-tab           # close current macOS Terminal tab (called by workers on self-terminate)
   close-worker-tab    # close a specific worker's tab by SID (called by Advisor post-result)
   summon              # provision + open a worker session in a new Terminal tab
 lib/
   channel.js          # append-only JSONL channel: send / recv / tail / synthesize
   session.js          # session plumbing: IDs, workspaces, session.json, output-dir logic
-  summon.js           # Node core: provisions workspace, composes bootstrap prompt, writes launch.sh
+  summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh
+  vault.js            # native vault writer + FTS5 search (synthesis notes, session notes, lessons)
 agents/
   code-reviewer/      # (each contains CLAUDE.md that defines the worker's role)
   coder/
   creative/
+  deep-researcher/
   diff-walker/
   evaluator/
   frontend/
@@ -55,6 +58,7 @@ agents/
   triage/
 skills/
   brief/              # /brief — validates fields and emits bin/summon command
+  extract-lesson/     # /extract-lesson — post-mortem analyst; writes negative-polarity lesson notes
   synth/              # /synth — validates fields and runs channel.js synthesize
   worker-protocol/    # /worker-protocol — inbox polling, tracing, self-terminate rules
 .claude/
@@ -71,6 +75,11 @@ skills/
   bootstrap-prompt.txt  # prompt passed to the worker's claude invocation
   launch.sh             # shell entry point opened by osascript
   tty.txt               # worker's tty path (used by close-worker-tab)
+~/.advisor/vault/
+  synthesis/<sid>-<seq>.md  # one note per synthesize call (auto-written)
+  sessions/<sid>.md         # one note per session (auto-written by lib/session.js)
+  lessons/<sid>-<agent>-<seq>.md  # negative-polarity lesson notes (written by /extract-lesson)
+  .cache/index.sqlite       # FTS5 BM25 index over all notes
 ```
 
 ## Quick start
@@ -86,14 +95,8 @@ skills/
 |-------|------|
 | `code-reviewer` | Reviews code for defects on multiple quality dimensions; produces `review.md`; never writes code |
 | `coder` | Implements fixes from a structured spec; edits files in `$REPO` in place; produces `changes.md` |
-| `creative` | Ground / Explode / Forge three-phase protocol for breaking fixation and generating non-obvious alternatives |
-| `creative-constraintist` | Council persona — deliberate-scarcity stance; invents brutal constraints (no notifications, no screen, 8 seconds) and solves under each |
-| `creative-futurist`      | Council persona — temporal-inversion stance; works backward from a 30-year future or 30-year past |
-| `creative-mapper`        | Obviousness Mapper — enumerates obvious solutions and their close variants for the council pipeline; outputs forbidden-ideas.md + assumptions.md |
-| `creative-naturalist`    | Council persona — biological-analogy stance; ideas grounded in mechanisms from biology (mycorrhiza, swarm, immune system, succession, …) |
-| `creative-oracle`        | Council persona — oblique-stimulus stance; draws random domain words and forces metaphorical connection |
-| `creative-synthesizer`   | External Forger — receives goal + 3 persona idea-files only; selects/recombines/stress-tests; MUST NOT add new ideas; produces council-result.md |
-| `creative-systematist`   | Council persona — combinatorial / morphological-analysis stance; decomposes problem into orthogonal axes and combines unusual cells |
+| `creative` | Runs the `creative-thinking` skill, which orchestrates mapper → 3 of 5 cognitive-persona subagents in parallel → synthesizer via the Task tool; auto-routes to Solo Mode for trivially scoped problems |
+| `deep-researcher` | Heavyweight three-phase investigation (Discovery → Bias Audit → Synthesis); fans out to `bias-auditor` + `report-architect` subagents via Task tool; produces a structured, bias-audited report |
 | `diff-walker` | Cascade-tests a CLAUDE.md prompt edit against a corpus of real tasks on 4 axes; produces `cascade-report.md` |
 | `evaluator` | Scores a worker result on 5 rubric dimensions (factual accuracy, citation precision, completeness, source quality, tool efficiency); produces `scores.json` |
 | `frontend` | Builds self-contained frontend deliverables (landing pages, components, static sites); verifies in browser before reporting |
@@ -102,36 +105,36 @@ skills/
 | `researcher` | Executes research tasks (library evaluation, trend scan, fact-finding); cites every non-trivial claim; produces structured reports |
 | `triage` | Classifies a user prompt into a tier and emits a JSON decomposition seed; invoked via `--model claude-sonnet-4-6` for compatibility with auto mode |
 
-## Creative Council Mode (opt-in)
+## Creative Council Mode
 
-A heavier, multi-worker pipeline for severely fixated problems. Default for the fixated tier remains the single `creative` worker; Council Mode is invoked only when the user explicitly asks for council / go-wide / big-thoughts mode, or when the advisor judges fixation is severe AND the user has authorized council previously in this session.
+The `creative` agent runs the council internally via the **`creative-thinking` skill** (agent-scoped at `agents/creative/.claude/skills/creative-thinking/`). The advisor's only job is to `bin/summon --agent creative` once — no advisor-side persona orchestration.
 
-Pipeline (advisor-orchestrated; workers cannot chain):
+Pipeline (run inside the creative agent via the Task tool, enabled by `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `agents/creative/.claude/settings.json`):
 
 ```
-C1  creative-mapper           → forbidden-ideas.md + assumptions.md
+mapper  →  forbidden-ideas.md + assumptions.md + persona-plan.md
      ↓
-C2  pick 3 of 5 personas (parallel) — each reads forbidden-ideas.md as hard exclusions
-    creative-naturalist · creative-systematist · creative-futurist · creative-oracle · creative-constraintist
+3 of 5 personas in parallel (each reads forbidden-ideas.md as hard exclusions)
+    naturalist · systematist · futurist · oracle · constraintist
      ↓ 3 idea files
-C3  creative-synthesizer       → council-result.md  (External Forger; NEVER sees persona briefs)
+synthesizer (External Forger — sees only the 3 persona idea files, not the briefs)
      ↓
-C4  advisor synthesis → report to user
+council-result.md
 ```
 
-Persona-selection rule: pick 3 personas that address DISTINCT failure modes of the obvious baseline. Default fall-back when no specific failure mode is evident: naturalist + constraintist + oracle (biological + scarcity + oblique).
-
-Cost: 5 workers, ~3-5 min wall clock. Path-plumbing: NEVER pass relative paths; always extract absolute paths from `body.paths` and forward them verbatim. Persona briefs MUST embed the absolute forbidden-ideas path; the synthesizer brief MUST embed the 3 absolute persona-output paths AND MUST NOT include the persona briefs.
+**Escape hatch — Solo Mode:** The skill auto-routes to Solo Mode (no subagents, no fan-out) when the prompt is ≤ 15 words with no domain anchor, or contains "quick check" / "evaluate an idea" / "don't overthink" phrasing. Council is the default behavior for all other prompts; the "opt-in" framing no longer applies.
 
 ## Skills catalog
 
-Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a slash command:
+Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a slash command. The `creative-thinking` skill is **agent-scoped** — it lives at `agents/creative/.claude/skills/creative-thinking/`, not in the top-level `skills/` directory, and is only available within the `creative` agent's session.
 
 | Skill | Purpose |
 |-------|---------|
 | `/brief` | Validates 5 required fields (objective, output, tools, scope, parallelism) then emits a `bin/summon` command |
 | `/synth` | Validates 4 required fields (sid, seq, established, gap) then invokes `channel.js synthesize` |
+| `/extract-lesson` | Post-mortem analyst — turns a `verdict=blocked, material=yes` synthesis into a negative-polarity lesson note in the vault; auto-triggered on the 2nd evaluator failure for the same task shape |
 | `/worker-protocol` | Loads inbox-polling rules, tracing cadence, and self-terminate behavior into a worker session |
+| `/creative-thinking` | **Agent-scoped** (creative agent only) — orchestrates mapper → 3 of 5 cognitive-persona subagents in parallel → synthesizer via the Task tool; returns `council-result.md`; auto-routes to Solo Mode for trivially scoped prompts |
 
 ## Channel protocol
 
@@ -151,7 +154,7 @@ Each session has two append-only JSONL files: `inbox.jsonl` (Advisor → worker)
 **SYNTHESIS REQUIRED block:** When `recv` or `tail` returns an unsynth'd `result`, `channel.js` prints a pre-filled `synthesize` command. Fill the four fields and run it (or use `/synth`) before any other action. Synthesis is logged to `synthesis.log`.
 
 ```bash
-node lib/channel.js synthesize \
+bun lib/channel.js synthesize \
   --sid <sid> --seq <seq> \
   --established '<what the findings establish>' \
   --gap '<remaining question or "none">' \
@@ -196,6 +199,22 @@ bin/summon --agent <name> \
 ```
 
 Pass the previous `outputDir` in the task so the new worker can read and update the existing deliverable.
+
+## Self-healing — lesson vault
+
+The advisor learns from failure across sessions via a Reflexion-style post-mortem channel. When a worker delivers `verdict=blocked` with `material=yes`, `lib/channel.js synthesize --verdict blocked` emits a `LESSON EXTRACTION REQUIRED` block. The `/extract-lesson` skill turns the failure into a negative-polarity lesson note (one heuristic, one trigger, one anti-pattern) and writes it to `~/.advisor/vault/lessons/`.
+
+Before writing a brief, the advisor queries the vault:
+
+```bash
+bin/advisor-vault search --text '<3 keywords from task type>'
+```
+
+Matching `[lesson]` entries are appended as a `Prior failure constraints:` block at the bottom of the brief, so the new worker inherits the constraint without rediscovering the failure mode.
+
+**Trigger threshold:** lesson extraction is auto-triggered on the **2nd or subsequent** `overall_pass: false` evaluator verdict for the same task shape in a session — a single failure is treated as task-specific noise. Lessons are always negative-polarity (what to avoid); positive-polarity success notes are not stored.
+
+The vault is backed by an FTS5 SQLite index at `~/.advisor/vault/.cache/index.sqlite` and indexes synthesis records, session notes, and lessons. All three are written automatically — no manual indexing step.
 
 ## Guardrails summary
 
