@@ -11,6 +11,8 @@
       "Write",
       "Grep",
       "Glob",
+      "Skill",
+      "Task",
       "Bash(bash *)",
       "Bash(ls *)",
       "Bash(python3 *)",
