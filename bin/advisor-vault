@@ -1,0 +1,53 @@
+#!/usr/bin/env bun
+// bin/advisor-vault — query the native vault index
+// Usage:
+//   advisor-vault search --text "prior art" [--limit 10]
+//   advisor-vault backlinks --note "sessions/1777631574-208ed7"
+//   advisor-vault path
+
+import { searchNotes, backlinks, listDue, listUnresolved, VAULT_ROOT } from '../lib/vault.js';
+
+const args = process.argv.slice(2);
+const cmd = args[0];
+
+function getFlag(flag, fallback) {
+  const idx = args.indexOf(flag);
+  return idx !== -1 ? args[idx + 1] : fallback;
+}
+
+if (cmd === 'search') {
+  const text = getFlag('--text', args[1]);
+  const limit = parseInt(getFlag('--limit', '10'), 10);
+  if (!text) { console.error('Usage: advisor-vault search --text <query> [--limit N]'); process.exit(1); }
+  const results = searchNotes(text, limit);
+  if (!results.length) { console.log('No results.'); process.exit(0); }
+  for (const r of results) {
+    console.log(`${r.path}  [${r.type}] ${r.created_at}`);
+    console.log(`  ${r.snippet}`);
+  }
+} else if (cmd === 'backlinks') {
+  const note = getFlag('--note', args[1]);
+  if (!note) { console.error('Usage: advisor-vault backlinks --note <name>'); process.exit(1); }
+  const bl = backlinks(note);
+  console.log(bl.length ? bl.join('\n') : '(no backlinks)');
+} else if (cmd === 'path') {
+  console.log(VAULT_ROOT);
+} else if (cmd === 'due') {
+  const today = new Date().toISOString().slice(0, 10);
+  const window = parseInt(getFlag('--window', '14'), 10);
+  const rows = listDue(today, window);
+  if (!rows.length) { console.log('(no due reminders)'); process.exit(0); }
+  for (const r of rows) {
+    const preview = (r.established || r.body || '').replace(/\n/g, ' ').slice(0, 80);
+    console.log(`${r.due_date}  ${r.path} — ${preview}`);
+  }
+} else if (cmd === 'unresolved') {
+  const rows = listUnresolved();
+  if (!rows.length) { console.log('(no unresolved links)'); process.exit(0); }
+  for (const r of rows) {
+    console.log(`${r.source} -> ${r.target}`);
+  }
+} else {
+  console.error('Usage: advisor-vault <search|backlinks|path|due|unresolved> [options]');
+  process.exit(1);
+}
