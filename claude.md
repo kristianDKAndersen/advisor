@@ -68,20 +68,7 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
 
    **Use `creative` when the problem is fixated** — first solution is suspect, discussion is stuck, or you need assumption-destruction and cross-domain alternatives before committing to an approach. Summon as a specialist alongside any tier above, not as a tier itself.
 
-   **Creative Council Mode (opt-in):** A heavier, multi-worker pipeline for severely fixated problems. Default for fixated tier remains the legacy single `creative` worker. Do NOT silently upgrade.
-
-   Trigger: User explicitly asks for council / go-wide / big-thoughts mode, OR the advisor judges the problem is severely fixated AND the user has authorized council previously in this session.
-
-   Pipeline (advisor-orchestrated; workers cannot chain):
-
-   1. **Step C1** — Spawn `agent=creative-mapper`. Wait for result. Parse `body.paths[0]` as `forbiddenPath` (absolute path to `forbidden-ideas.md`).
-   2. **Step C2** — Pick 3 of {creative-naturalist, creative-systematist, creative-futurist, creative-oracle, creative-constraintist} that address distinct failure modes of the obvious baseline; default fall-back when no specific failure mode is evident: naturalist + constraintist + oracle (biological + scarcity + oblique). Spawn all 3 in parallel; **each brief MUST embed the absolute `forbiddenPath` from C1** with explicit instruction to read it and treat its contents as hard exclusions. Poll all 3 outboxes via `recv` until all return `result`.
-   3. **Step C3** — Collect `body.paths[0]` from each of the 3 persona results (3 absolute paths). Spawn `agent=creative-synthesizer` with a task that includes the original user goal AND the 3 absolute paths. The synthesizer brief MUST NOT include the persona briefs — External Forger isolation is the point.
-   4. **Step C4** — Synthesizer returns `council-result.md`. Advisor runs normal Step 7 synthesis on it and reports to user.
-
-   Path plumbing rule: NEVER pass relative paths. Always extract absolute paths from `body.paths` and forward them verbatim in subsequent briefs.
-
-   Cost: 5 workers (1 mapper + 3 personas + 1 synthesizer). Wall-clock ≈ 3–5 min (serial on mapper, then parallel personas, then synthesizer). Confirm with user before invoking unless they explicitly asked for council.
+   **Creative Council Mode:** The `creative` agent now runs the council internally via the `creative-thinking` skill, using the Task tool to fan out subagents (mapper → 3 of 5 personas in parallel → synthesizer). The advisor's only job is to `bin/summon --agent creative` once — no advisor-side pipeline orchestration required.
 
    For Deep research, assign each worker a named territory in the brief so they don't overlap. E.g., "Your scope is 2020–2022 only. Worker B covers 2023–present."
 
@@ -100,7 +87,15 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    This survives context compression. If the session resumes after a break,
    read the plan file rather than reconstructing from conversation history.
 4. **Pick an agent.** `Glob agents/*/CLAUDE.md`, `Read` the candidates, pick by role description. Do not invent agent names.
-5. **Write the brief, then summon.** Use `/brief` to compose the brief — it validates all 5 required fields (objective, output, tools, scope, parallelism) and emits the `bin/summon` command. A brief missing any of these four fields produces duplicated work, gaps, or misinterpretation:
+5. **Write the brief, then summon.**
+
+   **Before writing the brief, query the lesson vault:**
+   ```bash
+   bin/advisor-vault search --text '<3 keywords from task type>'
+   ```
+   Filter the results for entries marked `[lesson]` in the output. If any `[lesson]` entries have `task_type` keywords that match the current task, append a `Prior failure constraints:` section at the bottom of the brief with each lesson's `## Heuristic` text (read the lesson file at the returned path). Omit the section entirely if no matching lessons are found — do not inject empty or irrelevant lessons.
+
+   Use `/brief` to compose the brief — it validates all 5 required fields (objective, output, tools, scope, parallelism) and emits the `bin/summon` command. A brief missing any of these four fields produces duplicated work, gaps, or misinterpretation:
    - **Objective:** one sentence on what to answer (not the topic — the question)
    - **Output format:** what the deliverable looks like (bullet list of findings? markdown report? JSON? exact file name?)
    - **Tools/sources:** which tool to reach for first; which sources are authoritative vs. to be avoided
@@ -116,15 +111,15 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    Returns JSON: `{sid, workspace, outputDir, channelDir, inbox, outbox, promptFile, ...}`. Remember these paths — you'll need them for every subsequent call in this session. `outputDir` is where the worker writes any files; check it when evaluating deliverables.
 6. **Observe the outbox:**
    ```bash
-   node lib/channel.js tail --file <outbox> --after <last_seq> --timeout 60 --json
+   bun lib/channel.js tail --file <outbox> --after <last_seq> --timeout 60 --json
    ```
    Track the last `seq` so you don't reprocess old messages.
 
    **Multiple workers (Comparison / Deep-research tier):** When running parallel workers, switch from `tail` (blocking) to `recv` (non-blocking) and poll all outboxes in a round-robin loop:
    ```bash
    # Poll two workers without blocking:
-   node lib/channel.js recv --file <outbox1> --after <seq1> --json
-   node lib/channel.js recv --file <outbox2> --after <seq2> --json
+   bun lib/channel.js recv --file <outbox1> --after <seq1> --json
+   bun lib/channel.js recv --file <outbox2> --after <seq2> --json
    ```
    Repeat until all workers have sent `result`, or until 10 minutes have elapsed — then proceed to Step 7 synthesis with whatever partial results are available. The single-worker `tail` path remains the default for Fact-tier tasks.
 7. **Steer.** React to each worker message:
@@ -153,6 +148,16 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    **Interpret `scores.json`** (shape: `{factual_accuracy, citation_precision, completeness, source_quality, tool_efficiency, overall_pass, rationale}`):
    - `overall_pass: true` (all five dimensions > 0.6 AND completeness > 0.8) → proceed to Step 8. Append a one-sentence quality note: "Quality check passed — completeness <score>, factual_accuracy <score>."
    - `overall_pass: false` → before reporting, spawn a refinement worker targeting the failed dimensions (any dimension ≤ 0.6, or completeness ≤ 0.8). Include the prior `outputDir` so the worker reads what's already established. After the refinement worker delivers, run one optional re-evaluation pass, then proceed to Step 8.
+
+     **2-failure lesson extraction:** If this is the 2nd or subsequent `overall_pass: false` verdict for the same task shape in this session (check `session.json` `decomposition` array for prior entries with `status: 'complete'` where synthesis led to a failed evaluation), trigger lesson extraction before spawning the refinement worker:
+     ```
+     /extract-lesson \
+       --synthesis-log ~/.advisor/runs/<sid>/synthesis.log \
+       --synthesis-seq <seq> \
+       --agent <agent> \
+       --evaluator-scores <evaluator-outputDir>/scores.json
+     ```
+     The lesson note is written to `~/.advisor/vault/lessons/` and will be retrieved automatically in future sessions at Step 5. Do not trigger on the first failure — a single failure may be task-specific noise.
 8. **Report to the user.** Synthesize the worker's findings in your own words + cite key evidence from the outbox. If the task produced files, run `ls -la <outputDir>` and list the deliverables with their absolute paths so the user can open them. End with: `— via <agent>, session <sid>` so the user can audit `.advisor-runs/<sid>/`.
 9. **Record `outputDir` for follow-up.** Remember `outputDir` so you can pass it to a fresh worker if the user iterates. The worker has self-terminated. See the Iteration section for how to handle follow-ups.
 
@@ -204,17 +209,29 @@ From this folder (the Advisor's cwd):
 
 ```bash
 # Send guidance (mid-task only — before the worker has sent result)
-node lib/channel.js send --file <inbox> --type guidance --body "..." --from advisor
+bun lib/channel.js send --file <inbox> --type guidance --body "..." --from advisor
 
 # Terminate (mid-task abort — worker closes its own Terminal tab on receipt)
-node lib/channel.js send --file <inbox> --type terminate --body "..." --from advisor
+bun lib/channel.js send --file <inbox> --type terminate --body "..." --from advisor
 
 # Non-blocking read of outbox since seq N
-node lib/channel.js recv --file <outbox> --after <N> --json
+bun lib/channel.js recv --file <outbox> --after <N> --json
 
 # Block up to 60s for new outbox messages since seq N
-node lib/channel.js tail --file <outbox> --after <N> --timeout 60 --json
+bun lib/channel.js tail --file <outbox> --after <N> --timeout 60 --json
 ```
+
+## Vault commands (read-only memory)
+
+The native vault indexes every synthesis record and session note into `~/.advisor/vault/` as Markdown files with YAML frontmatter, backed by an FTS5 SQLite index. These commands are read-only and safe to run at any time from the advisor repo root.
+
+```bash
+bin/advisor-vault search --text <keyword>    # BM25 full-text search across all notes
+bin/advisor-vault backlinks --note <name>    # list notes that wikilink to <name>
+bin/advisor-vault path                       # print the vault root path
+```
+
+The vault is populated automatically during `bun lib/channel.js synthesize` and when sessions are created via `bin/summon`. Each synthesis note lands at `~/.advisor/vault/synthesis/<sid>-<seq>.md` with frontmatter fields `type`, `sid`, `seq`, `established`, `gap`, `material`, and `next_action`.
 
 ## Guardrails
 
