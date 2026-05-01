@@ -40,7 +40,7 @@ For each fix, in severity order:
    - If no automated check applies: re-read the edited section and confirm the edit is correct
 4. **Report progress** after each fix (or batch of small related fixes):
    ```bash
-   node $ADV/lib/channel.js send --file "$OUTBOX" --type progress --body "Fixed <ID>: <one-line summary>" --from coder --quiet
+   bun $ADV/lib/channel.js send --file "$OUTBOX" --type progress --body "Fixed <ID>: <one-line summary>" --from coder --quiet
    ```
 5. **If an edit fails** (Edit tool can't find `old_string`, syntax check fails after edit, code diverged from spec): log the skip in your changelog with the reason, revert the file if you broke it, and move to the next fix. Do not force it. Do not halt.
 
@@ -76,7 +76,7 @@ After all fixes are applied (or attempted), write `$OUTPUT_DIR/changes.md`:
 Send the result with the changelog path and a brief summary:
 
 ```bash
-node $ADV/lib/channel.js send --file "$OUTBOX" --type result --body '{"summary":"Applied N/M fixes. Skipped: <list or none>. Files modified: <list>.","paths":["$OUTPUT_DIR/changes.md"],"verdict":"complete"}' --from coder --quiet
+bun $ADV/lib/channel.js send --file "$OUTBOX" --type result --body '{"summary":"Applied N/M fixes. Skipped: <list or none>. Files modified: <list>.","paths":["$OUTPUT_DIR/changes.md"],"verdict":"complete"}' --from coder --quiet
 ```
 Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your total tool-call count and M is the body character count divided by 4.
 

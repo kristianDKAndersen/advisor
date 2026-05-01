@@ -41,7 +41,7 @@ Do NOT invoke `node ... synthesize` when any required field is missing.
 ## Invocation (all required fields present)
 
 ```bash
-node "$ADV/lib/channel.js" synthesize \
+bun "$ADV/lib/channel.js" synthesize \
   --sid "<sid>" --seq "<seq>" \
   --established "<established>" \
   --gap "<gap>" \
@@ -62,7 +62,7 @@ node "$ADV/lib/channel.js" synthesize \
 Invokes:
 
 ```bash
-node "$ADV/lib/channel.js" synthesize \
+bun "$ADV/lib/channel.js" synthesize \
   --sid "1777470000-abc123" --seq "3" \
   --established "Both researchers confirm the API rate-limits at 60 req/min" \
   --gap "No consensus yet on which caching strategy to adopt" \

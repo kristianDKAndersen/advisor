@@ -10,7 +10,7 @@ description: Load inbox-polling rules, per-tool tracing, and self-terminate beha
 **While working**, check for new inbox messages between every action step:
 
 ```bash
-node "$ADV/lib/channel.js" recv --file "$INBOX" --after <last_seq> --json
+bun "$ADV/lib/channel.js" recv --file "$INBOX" --after <last_seq> --json
 ```
 
 Update `last_seq` after each check. On `terminate`, immediately run `bash "$ADV/bin/close-tab"` as your final action — stop work, do not send `result`.
@@ -18,7 +18,7 @@ Update `last_seq` after each check. On `terminate`, immediately run `bash "$ADV/
 **If the task has no immediate work** (e.g. "stand by", "wait", "probe"): never sit idle. Tail the inbox in a blocking loop:
 
 ```bash
-node "$ADV/lib/channel.js" tail --file "$INBOX" --after <last_seq> --timeout 300 --json
+bun "$ADV/lib/channel.js" tail --file "$INBOX" --after <last_seq> --timeout 300 --json
 ```
 
 Re-tail on every timeout. Only exit via `close-tab` after `terminate` or after sending `result`.

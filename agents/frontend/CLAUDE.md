@@ -31,7 +31,7 @@ Before sending `result`, do all of these:
 - Emit a `progress` message when you start, and again whenever you'd want a human to know "still working, here's where I am" — e.g., "wrote skeleton, styling now", "preview opened, tweaking spacing".
 - Emit one `result` per completed deliverable with the absolute path and a one-line summary of what you built:
   ```bash
-  node "$ADV/lib/channel.js" send --file "$OUTBOX" --type result \
+  bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type result \
     --body '{"summary":"<one-line: what you built + key dimensions>","paths":["$OUTPUT_DIR/<file>.html"],"verdict":"complete"}' \
     --from frontend --quiet
   ```
