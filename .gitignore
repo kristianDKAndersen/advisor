@@ -1,6 +1,29 @@
-.advisor-runs/
-.claude/scheduled_tasks.lock
+# ── macOS ──────────────────────────────────────────────────────────────────
 .DS_Store
+**/.DS_Store
+
+# ── Node / Bun ─────────────────────────────────────────────────────────────
 node_modules/
 
+# ── Advisor framework — runtime & personal session data ───────────────────
+# All session plumbing (workspaces, channel JSONL, bootstrap prompts, launch.sh)
+.advisor-runs/
+
+# Deliverables output written into a repo when advisor is invoked from it
+# (lib/summon.js → computeOutputDir() → ensureGitignore() auto-adds this
+#  to target repos; include here so this template repo is also covered)
+.advisor-output/
+
+# ── Claude Code runtime artifacts ─────────────────────────────────────────
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# ── Personal / scratch files (currently tracked — need git rm --cached) ───
+agent-teams-conversation.md
+ideaar.md
+
+# ── Ephemeral test output ──────────────────────────────────────────────────
+test/*.txt
+
+# ── Local docs scratch area ────────────────────────────────────────────────
 /docs

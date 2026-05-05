@@ -2,7 +2,7 @@
 # close-tab integration test suite
 # Verifies bin/close-tab closes ONLY the caller's tab, not any other.
 
-CLOSE_TAB=./bin/close-tab
+CLOSE_TAB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/close-tab"
 TMP_DIR=/tmp/close-tab-test
 PASS=0
 FAIL=0
