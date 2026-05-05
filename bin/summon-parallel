@@ -1,0 +1,79 @@
+#!/usr/bin/env bun
+// summon-parallel — fan out multiple briefs to parallel worker sessions.
+//
+// Usage:
+//   bin/summon-parallel --briefs <path.json> [--output-dir <dir>]
+//
+// briefs.json: [{ agent, task, goal, model? }, ...]
+// outputDir defaults to $REPO/.advisor-runs/parallel-<unix-ts>
+// (or <cwd>/.advisor-runs/parallel-<unix-ts> if $REPO is unset).
+//
+// Prints the absolute path of the written session-report.json on stdout.
+
+const fs = require('fs');
+const path = require('path');
+const { runParallel } = require('../lib/parallel');
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        out[k] = next;
+        i++;
+      } else {
+        out[k] = true;
+      }
+    }
+  }
+  return out;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (!args.briefs || args.briefs === true) {
+    process.stderr.write(
+      'Usage: summon-parallel --briefs <path.json> [--output-dir <dir>]\n'
+    );
+    process.exit(1);
+  }
+
+  let briefs;
+  try {
+    briefs = JSON.parse(fs.readFileSync(args.briefs, 'utf8'));
+  } catch (e) {
+    process.stderr.write(`Error reading briefs file: ${e.message}\n`);
+    process.exit(1);
+  }
+
+  if (!Array.isArray(briefs) || briefs.length === 0) {
+    process.stderr.write('briefs.json must be a non-empty array\n');
+    process.exit(1);
+  }
+
+  const base = process.env.REPO || process.cwd();
+  const defaultOutputDir = path.join(
+    base,
+    '.advisor-runs',
+    `parallel-${Math.floor(Date.now() / 1000)}`
+  );
+  const outputDir = (args['output-dir'] && args['output-dir'] !== true)
+    ? args['output-dir']
+    : defaultOutputDir;
+
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  await runParallel(briefs, { outputDir });
+
+  const reportPath = path.join(outputDir, 'session-report.json');
+  process.stdout.write(`${reportPath}\n`);
+}
+
+main().catch((e) => {
+  process.stderr.write(`summon-parallel: ${e.message}\n`);
+  process.exit(1);
+});
