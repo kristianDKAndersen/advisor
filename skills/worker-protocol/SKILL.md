@@ -59,9 +59,24 @@ Example (file-based):
 Example (inline):
 `--body '{"summary":"Option A (lazy-init) beats Option B: simpler, no boot cost. See reasoning in progress messages.","paths":[],"verdict":"complete"}'`
 
-## Channel
+## Channel commands
 
-See the bootstrap prompt (your first user message) for the exact channel commands. Do not invent your own protocol. If you forget, re-read the bootstrap prompt — it's in scrollback.
+### Send a message to the Advisor
+```bash
+bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type <type> --body "<text>" --from <agent-name> --quiet
+```
+
+### Message types
+
+You SEND:
+- `progress` — intermediate observation (keep concise)
+- `result`   — a completed deliverable
+- `question` — only if truly blocked; the pattern is *execute, don't negotiate*
+
+You RECEIVE:
+- `task`      — work to do (your first inbox message, seq 1, is one)
+- `guidance`  — course correction; adjust and continue
+- `terminate` — Advisor says done; exit cleanly and immediately
 
 ## What to do on `terminate`
 
