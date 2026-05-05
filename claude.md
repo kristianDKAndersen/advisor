@@ -126,6 +126,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    - `progress` → usually acknowledge mentally, wait for more. Intervene only if the worker is clearly off-track.
    - `result`   → When a worker delivers result, the channel.js output appends a SYNTHESIS REQUIRED block with a pre-filled `synthesize` command. The result body is a structured envelope — read `body.summary` (≤200 char outcome), `body.paths` (absolute file paths to deliverables), `body.verdict` (`complete`|`partial`|`blocked`). Legacy string bodies display as before. Fill the four fields (established, gap, material, next_action) and run it BEFORE spawning a new worker, sending guidance, or proceeding to Step 8. Use `/synth` to run synthesis — it validates required fields before invoking `channel.js synthesize` and prevents malformed synthesis records.
 
+     **Fact-check trigger.** If body.summary or the result file contains claims about external-tool pricing, licensing, availability, or version (signals: dollar amounts, 'free/paid/open-source', license names, 'available as', 'deprecated', version numbers tied to feature support), summon fact-checker BEFORE synthesizing material:no. Pass the result file path + claim category as the task.
+
      **After synthesis, drop the result from context.** Do not re-quote the result body inline. Do not include result body content in any subsequent tool call arguments or narrative. The synthesis record (established, gap, material, next_action, key_quotes) is the complete interface to this worker's output. If a later step genuinely requires the full content, read the file at the path in `body.paths[0]` — do not reconstruct it from memory. Progress messages from this worker are also evicted at synthesis time — they are absorbed into `established`; do not re-read them.
 
      The synthesis is recorded to ~/.advisor/runs/<sid>/synthesis.log for audit and cross-session iteration. Then run bin/close-worker-tab <sid>. If the gap is material, spawn a fresh worker via the next_action; when spawning a refinement worker for a material gap, pass `body.paths[0]` from the prior synthesis as prior context — do not re-embed the full result body. The new worker reads the file directly. If not material, proceed to Step 8.
@@ -160,6 +162,22 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
      The lesson note is written to `~/.advisor/vault/lessons/` and will be retrieved automatically in future sessions at Step 5. Do not trigger on the first failure — a single failure may be task-specific noise.
 8. **Report to the user.** Synthesize the worker's findings in your own words + cite key evidence from the outbox. If the task produced files, run `ls -la <outputDir>` and list the deliverables with their absolute paths so the user can open them. End with: `— via <agent>, session <sid>` so the user can audit `.advisor-runs/<sid>/`.
 9. **Record `outputDir` for follow-up.** Remember `outputDir` so you can pass it to a fresh worker if the user iterates. The worker has self-terminated. See the Iteration section for how to handle follow-ups.
+
+## Context pressure response
+
+If you receive a context-window warning (from Claude Code (auto-compact warning) or your
+own judgement (long session, many syntheses, repeated rework)), take these steps IN ORDER before issuing `/clear`:
+
+1. Run `node -e "const {readSessionState}=require('./lib/session'); readSessionState('<sid>').then(s=>console.log(JSON.stringify(s,null,2)))"`.
+2. Write the output to `.advisor-runs/plans/$(date +%Y%m%d-%H%M%S)-context-handover.md`.
+3. Record: active sid, tier, decomposition[] statuses, next_action, and synthesis_seq for each worker.
+4. Issue `/clear`.
+
+The session-start.js hook will surface the last handover on the next session start.
+Do NOT /clear before completing step 2 — the sid is lost after /clear if it is not
+written to disk.
+
+Note: a future PreCompact hook (Claude Code lifecycle event fired before auto-compaction) could automate this handover write — see ~/.advisor/runs/1778010394-45ceec/output/probe-results.md "Implications for C2" for the alternative design.
 
 ## Recovery after compression
 
@@ -250,6 +268,15 @@ The vault is populated automatically during `bun lib/channel.js synthesize` and 
     --goal "A concrete diff — old text and new text — with an explanation of why the new version prevents the failure mode."
   ```
   Apply the accepted diff via a separate edit worker. Never patch a prompt based on one failure instance alone — wait for a pattern (2+ failures, same behavior).
+
+## Skill resolution (three tiers)
+
+Workers see skills from three tiers, merged at summon time via symlinks under `<workspace>/.claude/skills/`:
+1. **Global** — `~/.claude/skills/` (always present, managed by the user).
+2. **Advisor-local** — `<ROOT>/skills/` (skills shipped with this advisor repo).
+3. **Agent-private** — `agents/<AGENT>/.claude/skills/` (skills specific to one agent type).
+
+When the same skill name exists in tiers 2 and 3, the agent-private version wins (symlink is replaced). This merge happens inside `lib/summon.js` before the worker session launches; no manual installation into `~/.claude/skills/` is needed.
 
 ## What workers cannot do
 
