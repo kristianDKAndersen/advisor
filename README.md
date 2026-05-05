@@ -101,7 +101,7 @@ skills/
 | `evaluator` | Scores a worker result on 5 rubric dimensions (factual accuracy, citation precision, completeness, source quality, tool efficiency); produces `scores.json` |
 | `frontend` | Builds self-contained frontend deliverables (landing pages, components, static sites); verifies in browser before reporting |
 | `philpsych` | Writes the character / behavioral section of an agent's system prompt using psychology frameworks (SDT, Big Five, CBT, Stoicism) |
-| `planner` | Decomposes a task into a structured execution plan with subtasks, dependencies, and machine-verifiable DoD criteria; produces `plan.md` |
+| `planner` | Decomposes a task into a wave-parallelized plan (files_modified mutex, stable U-IDs, claim-to-evidence DoD, multi-source coverage audit, banned-phrase list, status enum); produces `plan.md` |
 | `researcher` | Executes research tasks (library evaluation, trend scan, fact-finding); cites every non-trivial claim; produces structured reports |
 | `triage` | Classifies a user prompt into a tier and emits a JSON decomposition seed; invoked via `--model claude-sonnet-4-6` for compatibility with auto mode |
 
