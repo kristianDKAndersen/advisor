@@ -29,7 +29,7 @@ Invoke the mapper subagent via the Task tool. Use this prompt template, substitu
 
 ```
 Your first action must be to Read the file at:
-  ./agents/creative/.claude/skills/creative-thinking/assets/creative-mapper.md
+  .claude/skills/creative-thinking/assets/creative-mapper.md
 Follow every instruction in that file exactly.
 
 Problem statement: <VERBATIM PROBLEM STATEMENT>
@@ -68,7 +68,7 @@ Fire **3 Task tool calls simultaneously** (all in the same assistant turn). Each
 
 ```
 Your first action must be to Read the file at:
-  ./agents/creative/.claude/skills/creative-thinking/assets/creative-<PERSONA_NAME>.md
+  .claude/skills/creative-thinking/assets/creative-<PERSONA_NAME>.md
 Follow every instruction in that file exactly.
 
 Problem statement: <VERBATIM PROBLEM STATEMENT>
@@ -106,7 +106,7 @@ Invoke the synthesizer subagent via a single Task tool call:
 
 ```
 Your first action must be to Read the file at:
-  ./agents/creative/.claude/skills/creative-thinking/assets/creative-synthesizer.md
+  .claude/skills/creative-thinking/assets/creative-synthesizer.md
 Follow every instruction in that file exactly.
 
 Original user goal: <VERBATIM PROBLEM STATEMENT>
