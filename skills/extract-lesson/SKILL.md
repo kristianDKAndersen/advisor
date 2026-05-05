@@ -1,6 +1,6 @@
 ---
 name: extract-lesson
-description: Analyze a synthesis record (and optional evaluator scores) for a failed worker task and write a single vault lesson note. Use after a worker delivers verdict:blocked OR after evaluator returns overall_pass:false for 2+ consecutive attempts on the same task shape. Do NOT invoke for verdict:complete or for a first-time failure.
+description: "Post-mortem analyst: write a vault lesson from failed worker synthesis + evaluator scores. Use after verdict:blocked or 2+ consecutive overall_pass:false on same task shape."
 ---
 
 # Extract Lesson
