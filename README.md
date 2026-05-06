@@ -17,8 +17,9 @@ User prompt
 2. Decompose → write briefs   (/brief validates 5 required fields)
     │
     ▼
-3. bin/summon --agent <name> --task "..." --goal "..."  [--model <id>]
+3. bin/summon --agent <name> --task "..." --goal "..."  [--model <id>] [--intelligence <score>] [--ensemble N] [--allowedTools <list>]
    └─ opens Terminal tab, seeds inbox, exports $INBOX/$OUTBOX/$OUTPUT_DIR/$ADV/$REPO
+      coder agent: provisions git worktree branch ws/<sid> instead of a copyDir workspace
     │
     ▼
 4. Observe outbox  (tail / recv)
@@ -35,15 +36,20 @@ Workers run in isolated, ephemeral workspaces. Durable output lands in `$OUTPUT_
 ```
 bin/
   advisor-list        # list all sessions under ~/.advisor/runs/ (--json, --repo, --agent)
+  advisor-schedule    # launch autonomous loops detached in a tmux window (--sid, --interval, --task, --once)
+  advisor-timeline    # HTTP timeline dashboard on port 7878 — SSE live updates, color-coded by message type
   advisor-vault       # query the native vault index (search / backlinks / path)
+  brief               # validate 5-field brief and emit bin/summon command (auto-populates --allowedTools)
   close-tab           # close current macOS Terminal tab (called by workers on self-terminate)
   close-worker-tab    # close a specific worker's tab by SID (called by Advisor post-result)
   summon              # provision + open a worker session in a new Terminal tab
 lib/
-  channel.js          # append-only JSONL channel: send / recv / tail / synthesize
+  channel.js          # append-only JSONL channel: send / recv / tail / synthesize; acquireSeqLock (mkdir spinlock for seq IDs); Tail class (byte-offset incremental reader)
   session.js          # session plumbing: IDs, workspaces, session.json, output-dir logic
-  summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh
+  summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh; --intelligence flag (resolves tier→model via adapter/intelligence-map.json); --ensemble N (parallel workers + batch envelope); --allowedTools
   vault.js            # native vault writer + FTS5 search (synthesis notes, session notes, lessons)
+adapter/
+  intelligence-map.json  # 4-band tier→model+reasoning manifest used by --intelligence flag
 agents/
   code-reviewer/      # (each contains CLAUDE.md that defines the worker's role)
   coder/
@@ -57,17 +63,19 @@ agents/
   researcher/
   triage/
 skills/
-  brief/              # /brief — validates fields and emits bin/summon command
+  brief/              # /brief — validates fields and emits bin/summon command (--allowedTools)
   extract-lesson/     # /extract-lesson — post-mortem analyst; writes negative-polarity lesson notes
   synth/              # /synth — validates fields and runs channel.js synthesize
   worker-protocol/    # /worker-protocol — inbox polling, tracing, self-terminate rules
 .claude/
   settings.json       # Advisor harness config (permissions, hooks, env vars)
   hooks/              # SessionStart banner, PostToolUse session.json updater, statusline
+  skills/
+    context-timeline/ # /context-timeline — triggers bin/advisor-timeline for the current session
 ~/.advisor/runs/<sid>/
   channel/inbox.jsonl   # Advisor → worker
   channel/outbox.jsonl  # worker → Advisor
-  workspace/            # ephemeral copy of agents/<name>/ — the worker's cwd
+  workspace/            # ephemeral copy of agents/<name>/ — the worker's cwd (coder agent: git worktree at branch ws/<sid>)
   output/               # durable deliverables (self-invocation) or <repo>/.advisor-output/<sid>/
   meta.json             # session metadata (sid, agent, task, goal, outputDir, repo, …)
   session.json          # tier, decomposition status, next_action (recovery checkpoint)
@@ -130,7 +138,7 @@ Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a s
 
 | Skill | Purpose |
 |-------|---------|
-| `/brief` | Validates 5 required fields (objective, output, tools, scope, parallelism) then emits a `bin/summon` command |
+| `/brief` | Validates 5 required fields (objective, output, tools, scope, parallelism) then emits a `bin/summon` command; auto-populates `--allowedTools` from the brief's tools field and accepts `--intelligence` to resolve model via `adapter/intelligence-map.json` |
 | `/synth` | Validates 4 required fields (sid, seq, established, gap) then invokes `channel.js synthesize` |
 | `/extract-lesson` | Post-mortem analyst — turns a `verdict=blocked, material=yes` synthesis into a negative-polarity lesson note in the vault; auto-triggered on the 2nd evaluator failure for the same task shape |
 | `/worker-protocol` | Loads inbox-polling rules, tracing cadence, and self-terminate behavior into a worker session |
@@ -187,6 +195,15 @@ Each session writes `~/.advisor/runs/<sid>/session.json` — the recovery checkp
 ```
 
 Read with `readSessionState(sid)` · Update with `updateSessionState(sid, patchFn)` — both from `lib/session.js`.
+
+## Hooks
+
+Two lifecycle hooks are registered in `.claude/settings.json`:
+
+| Hook | Event | What it does |
+|------|-------|--------------|
+| `PreCompact` | Before auto-compaction | `git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"` — preserves session state across context resets. Note GH#13572: does not fire on manual `/compact`; the Stop hook covers that path. |
+| `Stop` | After each Claude response | Reads `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, sums all four token fields, and appends a record to `~/.advisor/state/token-usage.jsonl` for cross-session cost tracking. |
 
 ## Iteration and spawn-fresh model
 

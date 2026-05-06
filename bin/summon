@@ -13,16 +13,20 @@ TASK=""
 GOAL=""
 SID=""
 MODEL=""
+INTELLIGENCE=""
+ALLOWED_TOOLS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --agent) AGENT="$2"; shift 2 ;;
-    --task)  TASK="$2";  shift 2 ;;
-    --goal)  GOAL="$2";  shift 2 ;;
-    --sid)   SID="$2";   shift 2 ;;
-    --model) MODEL="$2"; shift 2 ;;
+    --agent)         AGENT="$2";         shift 2 ;;
+    --task)          TASK="$2";          shift 2 ;;
+    --goal)          GOAL="$2";          shift 2 ;;
+    --sid)           SID="$2";           shift 2 ;;
+    --model)         MODEL="$2";         shift 2 ;;
+    --intelligence)  INTELLIGENCE="$2";  shift 2 ;;
+    --allowed-tools) ALLOWED_TOOLS="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--sid <id>] [--model <model>]"
+      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--sid <id>] [--model <model>] [--intelligence <0-100>] [--allowed-tools \"T1,T2\"]"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -39,8 +43,10 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Provision workspace + channel + bootstrap prompt.
 NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
-[[ -n "$SID"   ]] && NODE_ARGS+=(--sid   "$SID")
-[[ -n "$MODEL" ]] && NODE_ARGS+=(--model "$MODEL")
+[[ -n "$SID"           ]] && NODE_ARGS+=(--sid          "$SID")
+[[ -n "$MODEL"         ]] && NODE_ARGS+=(--model        "$MODEL")
+[[ -n "$INTELLIGENCE"  ]] && NODE_ARGS+=(--intelligence "$INTELLIGENCE")
+[[ -n "$ALLOWED_TOOLS" ]] && NODE_ARGS+=(--allowedTools "$ALLOWED_TOOLS")
 META=$(node "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
 
 # Parse paths out of the JSON (node one-liner, no deps).

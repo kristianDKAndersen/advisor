@@ -108,6 +108,11 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
      --task "Objective: <question>. Output: <format>. Tools: <tools/sources>. Out of scope: <exclusions>. Parallelism: where multiple independent sources can be fetched simultaneously, do so — don't wait for one WebFetch to complete before starting the next." \
      --goal "<done condition>"
    ```
+
+   `/brief` auto-populates two additional flags in the emitted command:
+   - `--allowedTools <list>` — derived from the brief's tools field; constrains the worker's tool access.
+   - `--intelligence <score>` — optional integer 0–100 resolved through `adapter/intelligence-map.json` to the appropriate model + reasoning band (replaces a manual `--model` selection for tier-driven dispatch).
+
    Returns JSON: `{sid, workspace, outputDir, channelDir, inbox, outbox, promptFile, ...}`. Remember these paths — you'll need them for every subsequent call in this session. `outputDir` is where the worker writes any files; check it when evaluating deliverables.
 6. **Observe the outbox:**
    ```bash
@@ -122,6 +127,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    bun lib/channel.js recv --file <outbox2> --after <seq2> --json
    ```
    Repeat until all workers have sent `result`, or until 10 minutes have elapsed — then proceed to Step 7 synthesis with whatever partial results are available. The single-worker `tail` path remains the default for Fact-tier tasks.
+
+   **Ensemble shorthand:** Instead of issuing multiple `bin/summon` calls, pass `--ensemble N` to a single summon call to provision N workers on the same brief automatically; their result envelopes are batched into a single synthesize record. Use for homogeneous fan-out (same brief, same agent type) where territory assignment is not needed.
 7. **Steer.** React to each worker message:
    - `progress` → usually acknowledge mentally, wait for more. Intervene only if the worker is clearly off-track.
    - `result`   → When a worker delivers result, the channel.js output appends a SYNTHESIS REQUIRED block with a pre-filled `synthesize` command. The result body is a structured envelope — read `body.summary` (≤200 char outcome), `body.paths` (absolute file paths to deliverables), `body.verdict` (`complete`|`partial`|`blocked`). Legacy string bodies display as before. Fill the four fields (established, gap, material, next_action) and run it BEFORE spawning a new worker, sending guidance, or proceeding to Step 8. Use `/synth` to run synthesis — it validates required fields before invoking `channel.js synthesize` and prevents malformed synthesis records.
@@ -177,7 +184,7 @@ The session-start.js hook will surface the last handover on the next session sta
 Do NOT /clear before completing step 2 — the sid is lost after /clear if it is not
 written to disk.
 
-Note: a future PreCompact hook (Claude Code lifecycle event fired before auto-compaction) could automate this handover write — see ~/.advisor/runs/1778010394-45ceec/output/probe-results.md "Implications for C2" for the alternative design.
+Note: the PreCompact hook is now installed in `.claude/settings.json` — it auto-commits a checkpoint (`git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"`) before auto-compaction fires, so the handover write above is already persisted. Caveat GH#13572: PreCompact does not fire on manual `/compact`; in that case, complete the handover write manually before issuing `/compact`, or rely on the Stop hook which fires after every response.
 
 ## Recovery after compression
 
@@ -239,6 +246,8 @@ bun lib/channel.js recv --file <outbox> --after <N> --json
 bun lib/channel.js tail --file <outbox> --after <N> --timeout 60 --json
 ```
 
+`channel.js` internal improvements (no API change): `acquireSeqLock` uses a `mkdir` spinlock to assign seq IDs without race conditions; `Tail` class reads only new bytes via byte-offset tracking so `recv` and `tail` no longer re-parse the entire file on every poll.
+
 ## Vault commands (read-only memory)
 
 The native vault indexes every synthesis record and session note into `~/.advisor/vault/` as Markdown files with YAML frontmatter, backed by an FTS5 SQLite index. These commands are read-only and safe to run at any time from the advisor repo root.
@@ -250,6 +259,22 @@ bin/advisor-vault path                       # print the vault root path
 ```
 
 The vault is populated automatically during `bun lib/channel.js synthesize` and when sessions are created via `bin/summon`. Each synthesis note lands at `~/.advisor/vault/synthesis/<sid>-<seq>.md` with frontmatter fields `type`, `sid`, `seq`, `established`, `gap`, `material`, and `next_action`.
+
+## Tooling
+
+```bash
+# HTTP timeline dashboard — renders session activity in a browser; SSE live updates
+bin/advisor-timeline [--port 7878]          # start server; open http://localhost:7878/
+
+# Autonomous loop scheduling — detaches into a tmux window; fires bin/summon on interval
+bin/advisor-schedule \
+  --sid <sid> \
+  --interval <duration> \
+  --task "<task text>" \
+  [--once]                                  # fire once then exit; omit for repeating loop
+```
+
+`/context-timeline` (skill at `.claude/skills/context-timeline/`) invokes `bin/advisor-timeline` for the current session from within a Claude Code session.
 
 ## Guardrails
 

@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# advisor-schedule — detach a recurring bin/summon loop into a tmux window.
+#
+# Usage:
+#   bin/advisor-schedule --sid <session-id> --interval <duration> --task '<text>' [--once]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+SID=""
+INTERVAL=""
+TASK_TEXT=""
+ONCE=false
+
+# Self-loop guard: refuse if we're already inside a scheduled-loop session.
+if [[ "${ADVISOR_SCHEDULED_LOOP:-}" == "1" ]]; then
+  echo "advisor-schedule: refusing — already inside a scheduled-loop session (loop prevention)." >&2
+  exit 1
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sid)       SID="$2";        shift 2 ;;
+    --interval)  INTERVAL="$2";   shift 2 ;;
+    --task)      TASK_TEXT="$2";  shift 2 ;;
+    --once)      ONCE=true;       shift   ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: advisor-schedule --sid <session-id> --interval <duration> --task '<text>' [--once]
+
+Detaches a tmux window that loops bin/summon at the given interval.
+
+Flags:
+  --sid <id>         Session ID for this schedule (used to name the tmux window)
+  --interval <dur>   Repeat interval, e.g. 30s, 5m, 2h (seconds/minutes/hours)
+  --task '<text>'    Task text passed to bin/summon on each iteration
+  --once             Run once and exit instead of looping
+
+The tmux window runs with ADVISOR_SCHEDULED_LOOP=1 so nested scheduling is
+blocked — any advisor-schedule call from inside the loop will be refused.
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SID" || -z "$INTERVAL" || -z "$TASK_TEXT" ]]; then
+  echo "Missing required flag(s). Run --help for usage." >&2
+  exit 1
+fi
+
+# Parse duration string (30s | 5m | 2h) → seconds.
+parse_interval() {
+  local dur="$1"
+  if [[ "$dur" =~ ^([0-9]+)([smh])$ ]]; then
+    local num="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+      s) echo "$num" ;;
+      m) echo $(( num * 60 )) ;;
+      h) echo $(( num * 3600 )) ;;
+    esac
+  else
+    echo "Invalid interval '$dur'. Use e.g. 30s, 5m, 2h." >&2
+    exit 1
+  fi
+}
+
+SLEEP_SECS=$(parse_interval "$INTERVAL")
+WINDOW_NAME="adv-sched-${SID}"
+
+# Escape task text for safe embedding in a single-quoted shell string.
+SAFE_TASK="${TASK_TEXT//\'/\'\\\'\'}"
+
+if [[ "$ONCE" == true ]]; then
+  LOOP_BODY="'${SCRIPT_DIR}/summon' --task '${SAFE_TASK}' --agent coder --goal '${SAFE_TASK}'"
+else
+  LOOP_BODY="while true; do '${SCRIPT_DIR}/summon' --task '${SAFE_TASK}' --agent coder --goal '${SAFE_TASK}' || true; sleep ${SLEEP_SECS}; done"
+fi
+
+INNER_CMD="export ADVISOR_SCHEDULED_LOOP=1; ${LOOP_BODY}"
+
+# Prefer attaching to an existing tmux session; fall back to creating one.
+if tmux info &>/dev/null 2>&1; then
+  tmux new-window -d -n "$WINDOW_NAME" "bash -c $(printf '%q' "$INNER_CMD")"
+else
+  tmux new-session -d -s "$WINDOW_NAME" -n "$WINDOW_NAME" "bash -c $(printf '%q' "$INNER_CMD")"
+fi
+
+echo "advisor-schedule: started tmux window '${WINDOW_NAME}' (interval=${INTERVAL}, once=${ONCE})."
