@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+// advisor-observe — tail a session's outbox, emit each message as a JSON line.
+//
+// Usage:
+//   bin/advisor-observe <sid> [--after <seq>] [--max-wait <secs>] [--poll <ms>]
+//
+// Streams each new outbox message as a single JSON line to stdout (Monitor-friendly).
+// Exits 0 on a `result` message, 1 on an `error` message, 2 on timeout.
+
+const path = require('path');
+const { Tail } = require(path.join(__dirname, '..', 'lib', 'channel.js'));
+
+function parseArgs(argv) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) { out[k] = next; i++; }
+      else { out[k] = true; }
+    } else {
+      out._.push(a);
+    }
+  }
+  return out;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const sid = args._[0];
+  if (!sid) {
+    process.stderr.write('Usage: advisor-observe <sid> [--after <seq>] [--max-wait <secs>] [--poll <ms>]\n');
+    process.exit(2);
+  }
+
+  const home = process.env.HOME || process.env.USERPROFILE;
+  const outboxPath = path.join(home, '.advisor', 'runs', sid, 'channel', 'outbox.jsonl');
+
+  let cursor = parseInt(args.after || '0', 10);
+  const maxWaitMs = parseFloat(args['max-wait'] || '1800') * 1000;
+  const pollMs = parseInt(args.poll || '1000', 10);
+
+  const tailer = new Tail();
+  const deadline = Date.now() + maxWaitMs;
+
+  while (true) {
+    const msgs = tailer.read(outboxPath).filter(m => m.seq > cursor);
+    for (const m of msgs) {
+      cursor = Math.max(cursor, m.seq);
+      process.stdout.write(JSON.stringify(m) + '\n');
+      if (m.type === 'result') process.exit(0);
+      if (m.type === 'error') process.exit(1);
+    }
+
+    if (Date.now() >= deadline) {
+      process.stderr.write(`advisor-observe: timeout after ${args['max-wait'] || 1800}s waiting for result\n`);
+      process.exit(2);
+    }
+
+    await sleep(pollMs);
+  }
+}
+
+main().catch(err => {
+  process.stderr.write(`advisor-observe: ${err.message}\n`);
+  process.exit(2);
+});

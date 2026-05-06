@@ -115,18 +115,20 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
 
    Returns JSON: `{sid, workspace, outputDir, channelDir, inbox, outbox, promptFile, ...}`. Remember these paths — you'll need them for every subsequent call in this session. `outputDir` is where the worker writes any files; check it when evaluating deliverables.
 6. **Observe the outbox:**
-   ```bash
-   bun lib/channel.js tail --file <outbox> --after <last_seq> --timeout 60 --json
-   ```
-   Track the last `seq` so you don't reprocess old messages.
 
-   **Multiple workers (Comparison / Deep-research tier):** When running parallel workers, switch from `tail` (blocking) to `recv` (non-blocking) and poll all outboxes in a round-robin loop:
+   **Single-worker (default):** Use `bin/advisor-observe` — it tracks the cursor internally, exits 0 on `result` / 1 on `error` / 2 on timeout, and emits one JSON line per message (Monitor-friendly). Run it inside a Monitor command:
+   ```bash
+   bin/advisor-observe <sid> | jq -c .
+   ```
+   Flags: `--after <seq>` (start cursor, default 0), `--max-wait <secs>` (default 1800), `--poll <ms>` (default 1000). `bin/advisor-observe` handles the single-worker case more reliably than a `tail --timeout` loop, which can expire before the worker delivers.
+
+   **Multiple workers (Comparison / Deep-research tier):** When running parallel workers, switch to `recv` (non-blocking) and poll all outboxes in a round-robin loop:
    ```bash
    # Poll two workers without blocking:
    bun lib/channel.js recv --file <outbox1> --after <seq1> --json
    bun lib/channel.js recv --file <outbox2> --after <seq2> --json
    ```
-   Repeat until all workers have sent `result`, or until 10 minutes have elapsed — then proceed to Step 7 synthesis with whatever partial results are available. The single-worker `tail` path remains the default for Fact-tier tasks.
+   Repeat until all workers have sent `result`, or until 10 minutes have elapsed — then proceed to Step 7 synthesis with whatever partial results are available. For the single-worker case, prefer `bin/advisor-observe` over a manual recv loop.
 
    **Ensemble shorthand:** Instead of issuing multiple `bin/summon` calls, pass `--ensemble N` to a single summon call to provision N workers on the same brief automatically; their result envelopes are batched into a single synthesize record. Use for homogeneous fan-out (same brief, same agent type) where territory assignment is not needed.
 7. **Steer.** React to each worker message:
