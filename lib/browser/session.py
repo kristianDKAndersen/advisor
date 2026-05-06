@@ -22,9 +22,3 @@ def write_state(sid: str, data: dict[str, Any]) -> None:
     tmp = d / "state.json.tmp"
     tmp.write_text(json.dumps(data, indent=2))
     tmp.rename(d / "state.json")
-
-
-def update_last_action(sid: str) -> None:
-    state = read_state(sid)
-    state["last_action_at"] = datetime.now(timezone.utc).isoformat()
-    write_state(sid, state)

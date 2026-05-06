@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import markdownify
-from lib.browser.dom_serializer import serialize as dom_serialize
 
 
 async def navigate(client: Any, params: dict, session_dir: Path) -> dict:
@@ -18,8 +17,14 @@ async def navigate(client: Any, params: dict, session_dir: Path) -> dict:
     if not url.startswith(("http://", "https://", "about:", "file:")):
         url = "https://" + url
     result = await client.send_raw("Page.navigate", {"url": url})
-    # Wait for load
-    await asyncio.sleep(1.5)
+    for _ in range(10):
+        await asyncio.sleep(0.2)
+        ready = await client.send_raw("Runtime.evaluate", {
+            "expression": "document.readyState",
+            "returnByValue": True,
+        })
+        if ready.get("result", {}).get("value") == "complete":
+            break
     info = await client.send_raw("Runtime.evaluate", {
         "expression": "JSON.stringify({url: location.href, title: document.title})",
         "returnByValue": True,
@@ -144,45 +149,135 @@ async def screenshot(client: Any, params: dict, session_dir: Path, output_dir: P
     return {"path": str(path)}
 
 
+# JS expression injected into Chrome to extract interactive elements and metadata
+# in a single Runtime.evaluate round-trip. Mirrors dom_serializer.py output shape.
+_GET_STATE_JS = r"""
+(function(prevIndices) {
+  var INTERACTIVE = {a:1,button:1,input:1,select:1,textarea:1};
+  var BLOCK_TEXT = {h1:1,h2:1,h3:1,h4:1,h5:1,h6:1,p:1,li:1,td:1,th:1,caption:1,title:1};
+  var SKIP = {script:1,style:1,noscript:1,head:1,meta:1,link:1};
+  var KEEP_ATTRS = {href:1,src:1,type:1,placeholder:1,value:1,'aria-label':1,role:1,action:1,name:1};
+  var MAX_CHARS = 24000;
+  var url = location.href;
+  var title = document.title;
+  var scrollY = Math.round(window.scrollY);
+  var lines = ['URL: '+url,'Title: '+title,'Scroll: '+scrollY+'px',''];
+  var selectorMap = {};
+  var counter = 0;
+  var charCount = lines.reduce(function(s,l){return s+l.length+1;},0);
+  var truncated = false;
+  var prevSet = prevIndices !== null ? new Set(prevIndices) : null;
+
+  function getXPath(el) {
+    var parts = [];
+    var node = el;
+    while (node && node.nodeType === 1) {
+      var parent = node.parentNode;
+      var idx = 1;
+      if (parent) {
+        var sibs = parent.childNodes;
+        var count = 0;
+        for (var i = 0; i < sibs.length; i++) {
+          if (sibs[i].nodeType === 1 && sibs[i].tagName === node.tagName) {
+            count++;
+            if (sibs[i] === node) { idx = count; break; }
+          }
+        }
+      }
+      parts.unshift(node.tagName.toLowerCase()+'['+idx+']');
+      node = parent;
+    }
+    return parts.length ? '/'+parts.join('/') : '/';
+  }
+
+  function appendLine(line) {
+    var cost = line.length+1;
+    if (charCount+cost > MAX_CHARS) {
+      lines.push('--- TRUNCATED ('+charCount+' chars) ---');
+      truncated = true;
+      return false;
+    }
+    lines.push(line);
+    charCount += cost;
+    return true;
+  }
+
+  function getAttrStr(el) {
+    var parts = [];
+    var attrs = el.attributes;
+    for (var i = 0; i < attrs.length; i++) {
+      var k = attrs[i].name, v = attrs[i].value;
+      if (KEEP_ATTRS[k] && v) parts.push(k+'="'+v+'"');
+    }
+    return parts.length ? ' '+parts.join(' ') : '';
+  }
+
+  function getAttrsObj(el) {
+    var obj = {};
+    var attrs = el.attributes;
+    for (var i = 0; i < attrs.length; i++) {
+      var k = attrs[i].name, v = attrs[i].value;
+      if (KEEP_ATTRS[k] && v) obj[k] = v;
+    }
+    return obj;
+  }
+
+  function hasInteractive(el) {
+    return el.querySelector('a,button,input,select,textarea') !== null;
+  }
+
+  function walk(node) {
+    if (truncated || !node || node.nodeType !== 1) return;
+    var tag = node.tagName.toLowerCase();
+    if (SKIP[tag]) return;
+    if (INTERACTIVE[tag]) {
+      counter++;
+      var idx = counter;
+      var text = (node.textContent||'').replace(/\s+/g,' ').trim().slice(0,120);
+      var isNew = prevSet !== null && !prevSet.has(idx);
+      var prefix = isNew ? '*' : '';
+      var line = prefix+'['+idx+']<'+tag+getAttrStr(node)+'>'+text+'</'+tag+'>';
+      if (!appendLine(line)) return;
+      selectorMap[idx] = {tag:tag,text:text,attrs:getAttrsObj(node),interactive:true,xpath:getXPath(node)};
+      return;
+    }
+    if (BLOCK_TEXT[tag]) {
+      if (!hasInteractive(node)) {
+        var btext = (node.textContent||'').replace(/\s+/g,' ').trim().slice(0,200);
+        if (btext) appendLine('<'+tag+'>'+btext+'</'+tag+'>');
+        return;
+      }
+      var ch = node.childNodes;
+      for (var i = 0; i < ch.length; i++) walk(ch[i]);
+      return;
+    }
+    var ch = node.childNodes;
+    for (var i = 0; i < ch.length; i++) walk(ch[i]);
+  }
+
+  walk(document.body || document.documentElement);
+  return JSON.stringify({url:url,title:title,scrollY:scrollY,dom_text:lines.join('\n'),selector_map:selectorMap});
+})(%s)
+"""
+
+
 async def get_state(client: Any, session_dir: Path, selector_map: dict[int, dict],
                     prev_indices: set[int] | None = None) -> dict:
-    html_result = await client.send_raw("Runtime.evaluate", {
-        "expression": "document.documentElement.outerHTML",
+    prev_js = "null" if prev_indices is None else json.dumps(sorted(prev_indices))
+    result = await client.send_raw("Runtime.evaluate", {
+        "expression": _GET_STATE_JS % prev_js,
         "returnByValue": True,
     })
-    html = html_result.get("result", {}).get("value", "")
-
-    info_result = await client.send_raw("Runtime.evaluate", {
-        "expression": "JSON.stringify({url: location.href, title: document.title, scrollY: Math.round(window.scrollY)})",
-        "returnByValue": True,
-    })
-    info = json.loads(info_result.get("result", {}).get("value", "{}"))
-    url = info.get("url", "")
-    title = info.get("title", "")
-    scroll_y = info.get("scrollY", 0)
-
-    dom_text, new_map = dom_serialize(html, url, title, scroll_y, prev_indices)
-
-    # Update in-place so caller sees new map
+    data = json.loads(result.get("result", {}).get("value", "{}"))
+    url = data.get("url", "")
+    title = data.get("title", "")
+    scroll_y = data.get("scrollY", 0)
+    dom_text = data.get("dom_text", "")
+    new_map = {int(k): v for k, v in data.get("selector_map", {}).items()}
     selector_map.clear()
     selector_map.update(new_map)
-
-    # Write to disk
-    state_dir = session_dir / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "dom.txt").write_text(dom_text)
-    (state_dir / "dom_selector.json").write_text(json.dumps(new_map, indent=2))
-
-    # Screenshot
-    ss_result = await client.send_raw("Page.captureScreenshot", {"format": "png"})
-    ss_data = ss_result.get("data", "")
-    ss_path = state_dir / "latest.png"
-    ss_path.write_bytes(base64.b64decode(ss_data))
-
     return {
         "dom_text": dom_text,
-        "dom_file": str(state_dir / "dom.txt"),
-        "screenshot": str(ss_path),
         "url": url,
         "title": title,
         "scroll_y": scroll_y,

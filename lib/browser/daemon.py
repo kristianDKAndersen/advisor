@@ -9,6 +9,7 @@ import logging
 import os
 import signal
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure lib/ is importable
@@ -20,7 +21,7 @@ from aiohttp import web
 from cdp_use import CDPClient
 
 from lib.browser import actions as act
-from lib.browser.session import write_state, update_last_action
+from lib.browser.session import read_state, write_state
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +45,7 @@ class BrowserDaemon:
         self._stop_event: asyncio.Event | None = None
         self.app = web.Application()
         self.runner: web.AppRunner | None = None
+        self.last_action_at: str | None = None
 
     async def start(self):
         log.info(f"Connecting to Chrome: {self.cdp_url}")
@@ -65,6 +67,16 @@ class BrowserDaemon:
         log.info(f"Daemon listening on {self.socket_path}")
 
     async def stop(self):
+        if self.last_action_at is not None:
+            try:
+                try:
+                    state = read_state(self.session_id)
+                except FileNotFoundError:
+                    state = {"session_id": self.session_id}
+                state["last_action_at"] = self.last_action_at
+                write_state(self.session_id, state)
+            except Exception:
+                log.exception("flush last_action_at on stop failed")
         if self.runner:
             await self.runner.cleanup()
         if self.client:
@@ -79,7 +91,7 @@ class BrowserDaemon:
                 self.client, self.session_dir, self.selector_map,
                 set(self.selector_map.keys()) if self.selector_map else None,
             )
-            update_last_action(self.session_id)
+            self.last_action_at = datetime.now(timezone.utc).isoformat()
             return web.json_response({"ok": True, **state})
         except Exception as e:
             log.exception("get_state failed")
@@ -97,7 +109,7 @@ class BrowserDaemon:
 
         try:
             result = await self._dispatch(action, params)
-            update_last_action(self.session_id)
+            self.last_action_at = datetime.now(timezone.utc).isoformat()
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             log.exception(f"action {action} failed")

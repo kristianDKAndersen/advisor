@@ -26,7 +26,7 @@ if [[ ! -S "$SOCK" ]]; then
   exit 1
 fi
 
-BODY="{\"action\":$(printf '%s' "$ACTION" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"params\":$PARAMS}"
+BODY=$(jq -n --arg action "$ACTION" --argjson params "$PARAMS" '{action:$action, params:$params}')
 
 curl -sf --unix-socket "$SOCK" \
   -X POST http://localhost/act \
