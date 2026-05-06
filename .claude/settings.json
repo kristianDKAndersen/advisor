@@ -39,6 +39,26 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/stop-telemetry.js"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git -C \"$PWD\" add -A && git -C \"$PWD\" diff --cached --quiet || git -C \"$PWD\" commit -m \"auto-save: pre-compaction checkpoint\" --no-verify 2>/dev/null || true"
+          }
+        ]
+      }
     ]
   },
   "env": {

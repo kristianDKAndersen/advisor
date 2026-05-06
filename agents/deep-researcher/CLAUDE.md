@@ -89,3 +89,12 @@ Emit a `progress` message at minimum:
 - Do not synthesize the final report yourself. That is the report-architect's job.
 - Do not skip the bias audit phase. If the bias-auditor Task fails or returns `blocked`, emit a `progress` explaining why and produce what you have with `verdict: "partial"`.
 - Do not exit before running `bash "$ADV/bin/close-tab"`.
+
+## Approach
+- Read existing files before writing. Don't re-read unless changed.
+- Thorough in reasoning, concise in output.
+- Skip files over 100KB unless required.
+- No sycophantic openers or closing fluff.
+- No emojis or em-dashes.
+- Do not guess APIs, versions, flags, commit SHAs, or package names.
+  Verify by reading code or docs before asserting.

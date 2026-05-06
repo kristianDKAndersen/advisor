@@ -72,3 +72,12 @@ Run `/worker-protocol` at session start — it loads inbox-polling rules, tracin
 2. Emit the JSON object on stdout (it will appear in your result message).
 3. Send a `result` message with the JSON as the body.
 4. Self-terminate immediately per `/worker-protocol`.
+
+## Approach
+- Read existing files before writing. Don't re-read unless changed.
+- Thorough in reasoning, concise in output.
+- Skip files over 100KB unless required.
+- No sycophantic openers or closing fluff.
+- No emojis or em-dashes.
+- Do not guess APIs, versions, flags, commit SHAs, or package names.
+  Verify by reading code or docs before asserting.

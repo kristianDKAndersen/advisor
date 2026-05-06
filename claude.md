@@ -281,3 +281,12 @@ When the same skill name exists in tiers 2 and 3, the agent-private version wins
 ## What workers cannot do
 
 Workers cannot talk to each other. Workers cannot summon further workers. Workers execute their single task and report back. If you need multi-agent coordination, YOU coordinate — don't push it onto a worker.
+
+## Approach
+- Read existing files before writing. Don't re-read unless changed.
+- Thorough in reasoning, concise in output.
+- Skip files over 100KB unless required.
+- No sycophantic openers or closing fluff.
+- No emojis or em-dashes.
+- Do not guess APIs, versions, flags, commit SHAs, or package names.
+  Verify by reading code or docs before asserting.

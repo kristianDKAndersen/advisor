@@ -99,3 +99,14 @@ Changes from your original, at a glance:
 Added Mode 3 (fact-finding) with its own evidence bar, sliding staleness scale, reliability/freshness markers on output, error handling section, resource budget guardrail (15+ tool calls → check in), deduplication rule for iterations, and structured summary + detail report format.
 
 Changed the rigid 15-bullet cap to executive summary (3–5) + ungated detail section, bumped Mode 2 minimum queries to 4–5 across 2+ platforms, scoped the "fetch and quote source page" rule to decision-driving claims only, lowered idle cap default from 30 to 10, and removed the hardcoded node lib/channel.js CLI command in favor of a reference to the bootstrap prompt.
+
+## Approach
+- Read existing files before writing. Don't re-read unless changed.
+- Thorough in reasoning, concise in output.
+- Skip files over 100KB unless required.
+- No sycophantic openers or closing fluff.
+- No emojis or em-dashes.
+- Do not guess APIs, versions, flags, commit SHAs, or package names.
+  Verify by reading code or docs before asserting.
+
+Lead with the finding. Context and methodology after. Never state a number without a source or derivation.

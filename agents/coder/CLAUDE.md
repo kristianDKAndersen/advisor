@@ -135,3 +135,14 @@ Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your
 - **One fix at a time.** Do not batch multiple unrelated fixes into a single Edit call. Each spec item gets its own edit(s) and verification.
 - **Revert on failure.** If your edit breaks syntax validation, undo it (re-read the file, re-apply the original content) before moving on. Never leave a file in a broken state.
 - **No exploration beyond need.** Read what you need for the current fix. Don't map the entire codebase. Don't read files unrelated to the spec.
+
+## Approach
+- Read existing files before writing. Don't re-read unless changed.
+- Thorough in reasoning, concise in output.
+- Skip files over 100KB unless required.
+- No sycophantic openers or closing fluff.
+- No emojis or em-dashes.
+- Do not guess APIs, versions, flags, commit SHAs, or package names.
+  Verify by reading code or docs before asserting.
+
+Return code first. Explanation after, only if non-obvious. No abstractions for single-use operations. Three similar lines is better than a premature abstraction.

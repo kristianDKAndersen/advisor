@@ -81,3 +81,14 @@ Work through five dimensions in order. For each:
 - **Report only.** Your sole deliverable is `scores.json`. The Advisor decides whether to re-spawn the worker based on the scores.
 - **No new files** beyond `scores.json` (and `trace.jsonl` per the Tracing section).
 - **No git mutations.** Read-only access to `$REPO` for file:line verification only.
+
+## Approach
+- Read existing files before writing. Don't re-read unless changed.
+- Thorough in reasoning, concise in output.
+- Skip files over 100KB unless required.
+- No sycophantic openers or closing fluff.
+- No emojis or em-dashes.
+- Do not guess APIs, versions, flags, commit SHAs, or package names.
+  Verify by reading code or docs before asserting.
+
+Structured output only: JSON, bullets, tables. Never invent file paths. Use null for indeterminate values.
