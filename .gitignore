@@ -8,6 +8,8 @@ node_modules/
 # ── Python ─────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+.venv/
+venv/
 
 # ── Advisor framework — runtime & personal session data ───────────────────
 # All session plumbing (workspaces, channel JSONL, bootstrap prompts, launch.sh)

@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Start Chrome + browser daemon, print session JSON.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+VENV="$REPO_ROOT/lib/browser/.venv/bin/python3"
+
+SESSION=""
+HEADLESS=false
+PORT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session) SESSION="$2"; shift 2 ;;
+    --headless) HEADLESS=true; shift ;;
+    --port) PORT="$2"; shift 2 ;;
+    *) echo "unknown flag $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SESSION" ]]; then
+  SESSION="$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
+fi
+
+if [[ -z "$PORT" ]]; then
+  PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); p=s.getsockname()[1]; s.close(); print(p)')"
+fi
+
+SESSION_DIR="$HOME/.advisor/browser-sessions/$SESSION"
+mkdir -p "$SESSION_DIR/state" "$SESSION_DIR/screenshots" "$SESSION_DIR/log"
+
+SOCK="$SESSION_DIR/daemon.sock"
+LOG="$SESSION_DIR/log/daemon.log"
+
+# Find Chrome binary
+CHROME=""
+for candidate in \
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  "google-chrome-stable" \
+  "google-chrome" \
+  "chromium" \
+  "chromium-browser"; do
+  if command -v "$candidate" &>/dev/null 2>&1 || [[ -f "$candidate" ]]; then
+    CHROME="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$CHROME" ]]; then
+  echo '{"error":"Chrome not found. Install Google Chrome or put chromium on PATH."}' >&2
+  exit 1
+fi
+
+CHROME_ARGS=(
+  "--remote-debugging-port=$PORT"
+  "--no-first-run"
+  "--no-default-browser-check"
+  "--disable-background-networking"
+  "--disable-sync"
+  "--disable-translate"
+  "--metrics-recording-only"
+  "--safebrowsing-disable-auto-update"
+  "--user-data-dir=$SESSION_DIR/chrome-profile"
+)
+
+if $HEADLESS; then
+  CHROME_ARGS+=("--headless=new" "--disable-gpu")
+fi
+
+# Launch Chrome in background
+"$CHROME" "${CHROME_ARGS[@]}" &>/dev/null &
+CHROME_PID=$!
+
+# Poll /json/version until Chrome is ready (timeout 10s)
+CDP_URL=""
+PAGE_WS=""
+for i in $(seq 1 40); do
+  sleep 0.25
+  VERSION_JSON="$(curl -sf "http://localhost:$PORT/json/version" 2>/dev/null || true)"
+  if [[ -n "$VERSION_JSON" ]]; then
+    CDP_URL="$(echo "$VERSION_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('webSocketDebuggerUrl',''))" 2>/dev/null || true)"
+    if [[ -n "$CDP_URL" ]]; then
+      break
+    fi
+  fi
+done
+
+if [[ -z "$CDP_URL" ]]; then
+  kill "$CHROME_PID" 2>/dev/null || true
+  echo '{"error":"Chrome failed to start within 10s"}' >&2
+  exit 1
+fi
+
+# Get the first page WebSocket URL for the daemon
+PAGE_JSON="$(curl -sf "http://localhost:$PORT/json" 2>/dev/null || true)"
+PAGE_WS="$(echo "$PAGE_JSON" | python3 -c "
+import sys, json
+pages = json.load(sys.stdin)
+pages = [p for p in pages if p.get('type') == 'page']
+print(pages[0]['webSocketDebuggerUrl'] if pages else '')
+" 2>/dev/null || true)"
+
+if [[ -z "$PAGE_WS" ]]; then
+  PAGE_WS="$CDP_URL"
+fi
+
+# Start daemon
+"$VENV" "$REPO_ROOT/lib/browser/daemon.py" \
+  --session "$SESSION" \
+  --cdp-url "$PAGE_WS" \
+  --socket "$SOCK" \
+  >> "$LOG" 2>&1 &
+DAEMON_PID=$!
+
+# Wait for socket file (timeout 5s)
+for i in $(seq 1 20); do
+  sleep 0.25
+  if [[ -S "$SOCK" ]]; then
+    break
+  fi
+done
+
+if [[ ! -S "$SOCK" ]]; then
+  kill "$DAEMON_PID" 2>/dev/null || true
+  kill "$CHROME_PID" 2>/dev/null || true
+  echo '{"error":"Daemon failed to bind socket within 5s"}' >&2
+  exit 2
+fi
+
+STATE_FILE="$SESSION_DIR/state.json"
+python3 - <<PYEOF
+import json, datetime
+data = {
+  "session_id": "$SESSION",
+  "daemon_pid": $DAEMON_PID,
+  "chrome_pid": $CHROME_PID,
+  "socket": "$SOCK",
+  "cdp_url": "$PAGE_WS",
+  "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+  "last_action_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+with open("$STATE_FILE.tmp", "w") as f:
+  json.dump(data, f, indent=2)
+import os
+os.rename("$STATE_FILE.tmp", "$STATE_FILE")
+PYEOF
+
+echo "{\"session_id\":\"$SESSION\",\"socket\":\"$SOCK\",\"cdp_url\":\"$PAGE_WS\",\"state_file\":\"$STATE_FILE\"}"

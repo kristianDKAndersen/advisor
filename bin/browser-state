@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Read current browser DOM state from the daemon.
+set -euo pipefail
+
+SESSION="" FORMAT="text"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session) SESSION="$2"; shift 2 ;;
+    --format)  FORMAT="$2";  shift 2 ;;
+    *) echo "unknown flag $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SESSION" ]]; then
+  echo '{"ok":false,"error":"--session is required"}' >&2
+  exit 1
+fi
+
+STATE_DIR="$HOME/.advisor/browser-sessions/$SESSION"
+SOCK="$STATE_DIR/daemon.sock"
+
+if [[ ! -S "$SOCK" ]]; then
+  echo '{"ok":false,"error":"daemon not running — call bin/browser-launch first"}'
+  exit 1
+fi
+
+RESPONSE="$(curl -sf --unix-socket "$SOCK" http://localhost/state || { echo '{"ok":false,"error":"curl failed"}'; exit 2; })"
+
+if [[ "$FORMAT" == "json" ]]; then
+  echo "$RESPONSE"
+else
+  echo "$RESPONSE" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if d.get('ok'):
+    print(d.get('dom_text', ''))
+else:
+    print(d.get('error', 'unknown error'), file=sys.stderr)
+    sys.exit(1)
+"
+fi

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Stop browser daemon and Chrome for a session.
+set -euo pipefail
+
+SESSION=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session) SESSION="$2"; shift 2 ;;
+    *) echo "unknown flag $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SESSION" ]]; then
+  echo '{"ok":false,"error":"--session is required"}' >&2
+  exit 1
+fi
+
+STATE_DIR="$HOME/.advisor/browser-sessions/$SESSION"
+STATE_FILE="$STATE_DIR/state.json"
+SOCK="$STATE_DIR/daemon.sock"
+
+if [[ ! -f "$STATE_FILE" ]]; then
+  echo '{"ok":false,"error":"session not found"}'
+  exit 1
+fi
+
+# Read PIDs
+DAEMON_PID="$(python3 -c "import json; d=json.load(open('$STATE_FILE')); print(d.get('daemon_pid',''))" 2>/dev/null || true)"
+CHROME_PID="$(python3 -c "import json; d=json.load(open('$STATE_FILE')); print(d.get('chrome_pid',''))" 2>/dev/null || true)"
+
+# Ask daemon to shut down cleanly
+if [[ -S "$SOCK" ]]; then
+  curl -sf --unix-socket "$SOCK" -X POST http://localhost/shutdown >/dev/null 2>&1 || true
+  sleep 0.5
+fi
+
+# Force-kill daemon if still alive
+if [[ -n "$DAEMON_PID" ]] && kill -0 "$DAEMON_PID" 2>/dev/null; then
+  kill "$DAEMON_PID" 2>/dev/null || true
+  sleep 0.3
+fi
+
+# Kill Chrome
+if [[ -n "$CHROME_PID" ]] && kill -0 "$CHROME_PID" 2>/dev/null; then
+  kill "$CHROME_PID" 2>/dev/null || true
+fi
+
+# Remove socket
+rm -f "$SOCK"
+
+echo '{"ok":true}'

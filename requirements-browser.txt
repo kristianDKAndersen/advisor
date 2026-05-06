@@ -1,0 +1,6 @@
+cdp-use>=1.4.5
+aiohttp>=3.9
+markdownify>=0.11
+pillow>=10
+psutil>=5
+beautifulsoup4>=4.12

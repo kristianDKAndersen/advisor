@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Execute one browser action via the daemon UNIX socket.
+set -euo pipefail
+
+SESSION="" ACTION="" PARAMS="{}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session) SESSION="$2"; shift 2 ;;
+    --action)  ACTION="$2";  shift 2 ;;
+    --params)  PARAMS="$2";  shift 2 ;;
+    *) echo "unknown flag $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SESSION" || -z "$ACTION" ]]; then
+  echo '{"ok":false,"error":"--session and --action are required"}' >&2
+  exit 1
+fi
+
+STATE_DIR="$HOME/.advisor/browser-sessions/$SESSION"
+SOCK="$STATE_DIR/daemon.sock"
+
+if [[ ! -S "$SOCK" ]]; then
+  echo '{"ok":false,"error":"daemon not running — call bin/browser-launch first"}'
+  exit 1
+fi
+
+BODY="{\"action\":$(printf '%s' "$ACTION" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"params\":$PARAMS}"
+
+curl -sf --unix-socket "$SOCK" \
+  -X POST http://localhost/act \
+  -H 'Content-Type: application/json' \
+  -d "$BODY" || { echo '{"ok":false,"error":"curl failed"}'; exit 2; }
