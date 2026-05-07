@@ -59,6 +59,14 @@ Example (file-based):
 Example (inline):
 `--body '{"summary":"Option A (lazy-init) beats Option B: simpler, no boot cost. See reasoning in progress messages.","paths":[],"verdict":"complete"}'`
 
+## Result body cap
+
+Keep result bodies concise to avoid channel bloat and token waste.
+
+- **Token cap:** Result body must not exceed 3k tokens (3000 tokens). If your summary + paths would exceed the cap, truncate the summary.
+- **Sources limit:** Include at most 50 sources in any result. Do not list more than 50 sources in a single result message.
+- **1-line summaries:** Each source entry must have a 1-line summary. Multi-line descriptions are not allowed per source.
+
 ## Channel commands
 
 ### Send a message to the Advisor

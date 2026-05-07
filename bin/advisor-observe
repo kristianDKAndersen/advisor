@@ -45,14 +45,24 @@ async function main() {
 
   const tailer = new Tail();
   const deadline = Date.now() + maxWaitMs;
+  let lastActivityAt = Date.now();
+  let stalledEmitted = false;
 
   while (true) {
     const msgs = tailer.read(outboxPath).filter(m => m.seq > cursor);
     for (const m of msgs) {
       cursor = Math.max(cursor, m.seq);
+      lastActivityAt = Date.now();
+      stalledEmitted = false;
       process.stdout.write(JSON.stringify(m) + '\n');
       if (m.type === 'result') process.exit(0);
       if (m.type === 'error') process.exit(1);
+    }
+
+    const silentMs = Date.now() - lastActivityAt;
+    if (!stalledEmitted && silentMs >= 60_000) {
+      process.stdout.write(JSON.stringify({ type: 'stalled', sid, silentMs }) + '\n');
+      stalledEmitted = true;
     }
 
     if (Date.now() >= deadline) {
