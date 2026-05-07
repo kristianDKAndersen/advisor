@@ -1,61 +1,79 @@
-import { test, expect, afterAll } from 'bun:test';
+// U6 Phase 5 Wave 1 — RED tests for skill content expansion (pattern 4.2).
+// DoD: bun test exits 1 because provisionOne currently symlinks all skills unconditionally.
+import { test, expect, beforeAll, afterAll } from 'bun:test';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { provisionOne } from '../lib/summon.js';
+import { mintSessionId } from '../lib/session.js';
 
-// Create a temp root for synthetic skill sources and the fake workspace.
-// fs.mkdtempSync ensures each test run gets a clean isolated directory.
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'summon-skill-expand-'));
+const ADVISOR_ROOT = path.resolve(import.meta.dir, '..');
+const RUNS_ROOT = path.join(os.homedir(), '.advisor', 'runs');
 
-// --- Synthetic skill source directories ---
+const agentName = `test-skill-expand-${Date.now()}`;
+const agentDir = path.join(ADVISOR_ROOT, 'agents', agentName);
+const agentSkillsDir = path.join(agentDir, '.claude', 'skills');
 
-const sourceDir = path.join(tmpRoot, 'source-skills');
+const createdSids = [];
 
-// Skill with a shell expression in SKILL.md — wiring must expand it.
-const expandableSkillSrc = path.join(sourceDir, 'expandable-skill');
-fs.mkdirSync(expandableSkillSrc, { recursive: true });
-fs.writeFileSync(path.join(expandableSkillSrc, 'SKILL.md'), '$(echo injected)');
+function prepareSession() {
+  const sid = mintSessionId();
+  const dir = path.join(RUNS_ROOT, sid);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'session.json'),
+    JSON.stringify({
+      schema_version: 2,
+      sid,
+      user_prompt: 'skill-expand test',
+      tier: '',
+      decomposition: [],
+      decisions: [],
+      next_action: ''
+    }, null, 2)
+  );
+  createdSids.push(sid);
+  return sid;
+}
 
-// Skill with no shell expressions — symlink must be left intact.
-const plainSkillSrc = path.join(sourceDir, 'plain-skill');
-fs.mkdirSync(plainSkillSrc, { recursive: true });
-fs.writeFileSync(path.join(plainSkillSrc, 'SKILL.md'), 'plain content');
+beforeAll(() => {
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(agentDir, 'CLAUDE.md'), '# Test agent for skill-expand tests\n');
 
-// --- Fake workspace with skill symlinks ---
-// This mirrors what provisionOne currently produces: each skill dir in
-// workspace/.claude/skills/ is a symlink to the canonical source.
+  // Skill with shell expression in SKILL.md — wiring must expand it.
+  const expandableDir = path.join(agentSkillsDir, 'expandable-skill');
+  fs.mkdirSync(expandableDir, { recursive: true });
+  fs.writeFileSync(path.join(expandableDir, 'SKILL.md'), '$(echo injected)');
 
-const workspace = path.join(tmpRoot, 'workspace');
-const workspaceSkillsDir = path.join(workspace, '.claude', 'skills');
-fs.mkdirSync(workspaceSkillsDir, { recursive: true });
-
-const expandableLink = path.join(workspaceSkillsDir, 'expandable-skill');
-const plainLink = path.join(workspaceSkillsDir, 'plain-skill');
-fs.symlinkSync(expandableSkillSrc, expandableLink, 'dir');
-fs.symlinkSync(plainSkillSrc, plainLink, 'dir');
-
-// Expansion wiring (pattern 4.2) is NOT yet implemented.
-// The assertions below describe the required POST-expansion state.
-// They fail (RED) until the wiring is added to provisionOne.
+  // Skill with no shell expressions — symlink must be left intact.
+  const plainDir = path.join(agentSkillsDir, 'plain-skill');
+  fs.mkdirSync(plainDir, { recursive: true });
+  fs.writeFileSync(path.join(plainDir, 'SKILL.md'), 'plain content');
+});
 
 afterAll(() => {
-  try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch (_) {}
+  fs.rmSync(agentDir, { recursive: true, force: true });
+  for (const sid of createdSids) {
+    try { fs.rmSync(path.join(RUNS_ROOT, sid), { recursive: true, force: true }); } catch (_) {}
+  }
 });
 
-// (1) After expansion the skill dir with $(...) must be materialized — the
-//     symlink replaced by a real directory — so SKILL.md is a plain regular
-//     file at a stable workspace path, not a file visible only via indirection.
+// (1) After expansion the skill dir with $(...) must be materialized — not a symlink —
+// so SKILL.md is a regular file at a stable workspace path.
 test('expandable skill SKILL.md is a regular file (not a symlink) after expansion', () => {
-  const skillMdPath = path.join(workspaceSkillsDir, 'expandable-skill', 'SKILL.md');
-  expect(fs.lstatSync(skillMdPath).isSymbolicLink()).toBe(false);
+  const sid = prepareSession();
+  const meta = provisionOne({ agent: agentName, task: 'test', goal: 'test', cwd: ADVISOR_ROOT }, sid);
+  const skillDir = path.join(meta.workspace, '.claude', 'skills', 'expandable-skill');
+  expect(fs.lstatSync(skillDir).isSymbolicLink()).toBe(false);
 });
 
-// (2) Expansion must have evaluated the shell expression: the file should
-//     contain the output ("injected") and must NOT contain the raw literal.
-//     Before wiring: content is still "$(echo injected)" → not.toContain fails → RED.
+// (2) Expansion must have evaluated the shell expression: file must contain the
+// output ("injected") and must NOT contain the raw literal.
 test('expandable SKILL.md contains expanded output and not the raw $(...) expression', () => {
+  const sid = prepareSession();
+  const meta = provisionOne({ agent: agentName, task: 'test', goal: 'test', cwd: ADVISOR_ROOT }, sid);
   const content = fs.readFileSync(
-    path.join(workspaceSkillsDir, 'expandable-skill', 'SKILL.md'),
+    path.join(meta.workspace, '.claude', 'skills', 'expandable-skill', 'SKILL.md'),
     'utf8'
   );
   expect(content).toContain('injected');
@@ -63,7 +81,10 @@ test('expandable SKILL.md contains expanded output and not the raw $(...) expres
 });
 
 // (3) Skills whose SKILL.md has no $(...) must be left as symlinks — no
-//     unnecessary copying. This assertion is GREEN both before and after wiring.
+// unnecessary copying.
 test('plain skill dir remains a symlink when SKILL.md has no shell expressions', () => {
+  const sid = prepareSession();
+  const meta = provisionOne({ agent: agentName, task: 'test', goal: 'test', cwd: ADVISOR_ROOT }, sid);
+  const plainLink = path.join(meta.workspace, '.claude', 'skills', 'plain-skill');
   expect(fs.lstatSync(plainLink).isSymbolicLink()).toBe(true);
 });

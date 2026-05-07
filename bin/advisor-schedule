@@ -12,6 +12,9 @@ SID=""
 INTERVAL=""
 TASK_TEXT=""
 ONCE=false
+AGENT='coder'
+GOAL=''
+WHEN=''
 
 # Self-loop guard: refuse if we're already inside a scheduled-loop session.
 if [[ "${ADVISOR_SCHEDULED_LOOP:-}" == "1" ]]; then
@@ -25,9 +28,12 @@ while [[ $# -gt 0 ]]; do
     --interval)  INTERVAL="$2";   shift 2 ;;
     --task)      TASK_TEXT="$2";  shift 2 ;;
     --once)      ONCE=true;       shift   ;;
+    --agent)     AGENT="$2";      shift 2 ;;
+    --goal)      GOAL="$2";       shift 2 ;;
+    --when)      WHEN="$2";       shift 2 ;;
     -h|--help)
       cat <<'EOF'
-Usage: advisor-schedule --sid <session-id> --interval <duration> --task '<text>' [--once]
+Usage: advisor-schedule --sid <session-id> --interval <duration> --task '<text>' [--once] [--agent <name>] [--goal '<text>'] [--when '<expr>']
 
 Detaches a tmux window that loops bin/summon at the given interval.
 
@@ -36,6 +42,10 @@ Flags:
   --interval <dur>   Repeat interval, e.g. 30s, 5m, 2h (seconds/minutes/hours)
   --task '<text>'    Task text passed to bin/summon on each iteration
   --once             Run once and exit instead of looping
+  --agent <name>     Agent type to pass to bin/summon (default: coder)
+  --goal '<text>'    Goal text passed to bin/summon (default: same as --task)
+  --when '<expr>'    Shell expression evaluated before each summon; summon is
+                     skipped when the expression exits non-zero
 
 The tmux window runs with ADVISOR_SCHEDULED_LOOP=1 so nested scheduling is
 blocked — any advisor-schedule call from inside the loop will be refused.
@@ -49,6 +59,11 @@ done
 if [[ -z "$SID" || -z "$INTERVAL" || -z "$TASK_TEXT" ]]; then
   echo "Missing required flag(s). Run --help for usage." >&2
   exit 1
+fi
+
+# Default GOAL to TASK_TEXT when not explicitly provided.
+if [[ -z "$GOAL" ]]; then
+  GOAL="$TASK_TEXT"
 fi
 
 # Parse duration string (30s | 5m | 2h) → seconds.
@@ -70,13 +85,28 @@ parse_interval() {
 SLEEP_SECS=$(parse_interval "$INTERVAL")
 WINDOW_NAME="adv-sched-${SID}"
 
-# Escape task text for safe embedding in a single-quoted shell string.
+# Escape text for safe embedding in a single-quoted shell string.
 SAFE_TASK="${TASK_TEXT//\'/\'\\\'\'}"
+SAFE_GOAL="${GOAL//\'/\'\\\'\'}"
+SAFE_WHEN="${WHEN//\'/\'\\\'\'}"
+
+SUMMON_CMD="'${SCRIPT_DIR}/summon' --task '${SAFE_TASK}' --agent ${AGENT} --goal '${SAFE_GOAL}'"
+
+# Wrap summon in a condition guard when --when is provided.
+if [[ -n "$WHEN" ]]; then
+  SUMMON_CMD="if bash -c '${SAFE_WHEN}'; then ${SUMMON_CMD}; fi"
+fi
 
 if [[ "$ONCE" == true ]]; then
-  LOOP_BODY="'${SCRIPT_DIR}/summon' --task '${SAFE_TASK}' --agent coder --goal '${SAFE_TASK}'"
+  LOOP_BODY="${SUMMON_CMD}"
 else
-  LOOP_BODY="while true; do '${SCRIPT_DIR}/summon' --task '${SAFE_TASK}' --agent coder --goal '${SAFE_TASK}' || true; sleep ${SLEEP_SECS}; done"
+  LOOP_BODY="while true; do ${SUMMON_CMD} || true; sleep ${SLEEP_SECS}; done"
+fi
+
+# DRY_RUN: print the generated loop body and exit without spawning tmux.
+if [[ "${DRY_RUN:-}" == "1" ]]; then
+  echo "$LOOP_BODY"
+  exit 0
 fi
 
 INNER_CMD="export ADVISOR_SCHEDULED_LOOP=1; ${LOOP_BODY}"
