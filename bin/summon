@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# summon — provision a worker session and open it in a new macOS Terminal tab.
+# summon — provision a worker session. By default runs headless (no Terminal
+# tab); pass --tui to open an interactive claude session in a new macOS tab.
 #
 # Usage:
 #   bin/summon --agent <name> --task "<brief>" --goal "<done condition>" [--sid <id>]
+#   bin/summon --tui   --agent <name> --task "<brief>" --goal "<done condition>"
 #
 # Prints the JSON metadata from lib/summon.js on stdout so the Advisor can parse it.
 
@@ -18,6 +20,7 @@ ALLOWED_TOOLS=""
 MAX_TOOL_CALLS=""
 TIMEOUT_SEC=""
 REQUIRED_OUTPUT=""
+TUI=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,8 +34,9 @@ while [[ $# -gt 0 ]]; do
     --max-tool-calls) MAX_TOOL_CALLS="$2"; shift 2 ;;
     --timeout-sec)    TIMEOUT_SEC="$2";    shift 2 ;;
     --required-output) REQUIRED_OUTPUT="$2"; shift 2 ;;
+    --tui)            TUI=1;               shift ;;
     -h|--help)
-      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--sid <id>] [--model <model>] [--intelligence <0-100>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"]"
+      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--tui] [--sid <id>] [--model <model>] [--intelligence <0-100>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"]"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -56,6 +60,7 @@ NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
 [[ -n "$MAX_TOOL_CALLS" ]] && NODE_ARGS+=(--maxToolCalls  "$MAX_TOOL_CALLS")
 [[ -n "$TIMEOUT_SEC"    ]] && NODE_ARGS+=(--timeoutSec    "$TIMEOUT_SEC")
 [[ -n "$REQUIRED_OUTPUT" ]] && NODE_ARGS+=(--requiredOutput "$REQUIRED_OUTPUT")
+[[ -n "$TUI"            ]] && NODE_ARGS+=(--tui)
 META=$(node "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
 
 # Parse paths out of the JSON (node one-liner, no deps).
@@ -63,36 +68,45 @@ extract() { echo "$META" | node -e "console.log(JSON.parse(require('fs').readFil
 SID=$(extract sid)
 LAUNCH_SH=$(extract launchScript)
 
-# Wrap $LAUNCH_SH for safe embedding inside the do-script shell command.
-# The AppleScript string itself is double-quoted, but Terminal then re-parses
-# the contents as a shell command — so we need shell-level quoting around the
-# path to survive spaces. We also escape single quotes (rare but real, e.g.
-# /Users/O'Brien/...) using the standard '\'' bash trick.
-#
-# launch.sh is a plain path — no embedded quotes in the osascript string.
-# The script itself handles cd + claude + $(cat prompt) in a normal shell.
-#
-# Window-handling note: if Terminal isn't already running, `activate` cold-launches it
-# and macOS auto-opens a blank window. A naked `do script` then opens a SECOND window,
-# leaving an empty terminal behind. We detect the cold-start case and reuse window 1.
-LAUNCH_SH_QUOTED="'${LAUNCH_SH//\'/\'\\\'\'}'"
+if [[ -n "$TUI" ]]; then
+  # TUI mode: open an interactive claude session in a new macOS Terminal tab.
+  #
+  # Wrap $LAUNCH_SH for safe embedding inside the do-script shell command.
+  # The AppleScript string itself is double-quoted, but Terminal then re-parses
+  # the contents as a shell command — so we need shell-level quoting around the
+  # path to survive spaces. We also escape single quotes (rare but real, e.g.
+  # /Users/O'Brien/...) using the standard '\'' bash trick.
+  #
+  # Window-handling note: if Terminal isn't already running, `activate` cold-launches it
+  # and macOS auto-opens a blank window. A naked `do script` then opens a SECOND window,
+  # leaving an empty terminal behind. We detect the cold-start case and reuse window 1.
+  LAUNCH_SH_QUOTED="'${LAUNCH_SH//\'/\'\\\'\'}'"
 
-if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
-  osascript \
-    -e "set wasRunning to application \"Terminal\" is running" \
-    -e "tell application \"Terminal\"" \
-    -e "activate" \
-    -e "if wasRunning then" \
-    -e "do script \"bash $LAUNCH_SH_QUOTED\"" \
-    -e "else" \
-    -e "delay 0.2" \
-    -e "do script \"bash $LAUNCH_SH_QUOTED\" in window 1" \
-    -e "end if" \
-    -e "end tell" >/dev/null
-  echo "[summon] opened Terminal tab — agent=$AGENT sid=$SID" >&2
+  if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+    osascript \
+      -e "set wasRunning to application \"Terminal\" is running" \
+      -e "tell application \"Terminal\"" \
+      -e "activate" \
+      -e "if wasRunning then" \
+      -e "do script \"bash $LAUNCH_SH_QUOTED\"" \
+      -e "else" \
+      -e "delay 0.2" \
+      -e "do script \"bash $LAUNCH_SH_QUOTED\" in window 1" \
+      -e "end if" \
+      -e "end tell" >/dev/null
+    echo "[summon] opened Terminal tab — agent=$AGENT sid=$SID" >&2
+  else
+    echo "[summon] non-macOS or no osascript. Run this in a new terminal:" >&2
+    LAUNCH_SH_QUOTED="'${LAUNCH_SH//\'/\'\\\'\'}'"
+    echo "  bash $LAUNCH_SH_QUOTED" >&2
+  fi
 else
-  echo "[summon] non-macOS or no osascript. Run this in a new terminal:" >&2
-  echo "  bash $LAUNCH_SH_QUOTED" >&2
+  # Headless mode (default): spawn launch.sh as a detached background process.
+  # stdout+stderr go to <sessionDir>/claude.log; process survives bin/summon exiting.
+  SESSION_DIR="$(dirname "$LAUNCH_SH")"
+  LOG_FILE="$SESSION_DIR/claude.log"
+  nohup bash "$LAUNCH_SH" >"$LOG_FILE" 2>&1 &
+  echo "[summon] headless — agent=$AGENT sid=$SID log=$LOG_FILE" >&2
 fi
 
 # Emit the full JSON on stdout for the Advisor to consume.
