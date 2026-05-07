@@ -1,0 +1,10 @@
+{
+  "name": "example",
+  "steps": [
+    {
+      "agent": "researcher",
+      "task_template": "Research {{topic}}",
+      "goal_template": "deliver findings"
+    }
+  ]
+}
