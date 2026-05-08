@@ -21,6 +21,7 @@ MAX_TOOL_CALLS=""
 TIMEOUT_SEC=""
 REQUIRED_OUTPUT=""
 TUI=""
+NO_TIMELINE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,8 +36,9 @@ while [[ $# -gt 0 ]]; do
     --timeout-sec)    TIMEOUT_SEC="$2";    shift 2 ;;
     --required-output) REQUIRED_OUTPUT="$2"; shift 2 ;;
     --tui)            TUI=1;               shift ;;
+    --no-timeline)    NO_TIMELINE=1;       shift ;;
     -h|--help)
-      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--tui] [--sid <id>] [--model <model>] [--intelligence <0-100>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"]"
+      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--tui] [--no-timeline] [--sid <id>] [--model <model>] [--intelligence <0-100>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"]"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -107,6 +109,18 @@ else
   LOG_FILE="$SESSION_DIR/claude.log"
   nohup bash "$LAUNCH_SH" >"$LOG_FILE" 2>&1 &
   echo "[summon] headless — agent=$AGENT sid=$SID log=$LOG_FILE" >&2
+
+  # Auto-start the timeline server (idempotent) unless --no-timeline was passed.
+  # Reads ADVISOR_TIMELINE_PORT env var; defaults to 7878.
+  TIMELINE_PORT="${ADVISOR_TIMELINE_PORT:-7878}"
+  if [[ -z "$NO_TIMELINE" ]]; then
+    if ! curl -sf --connect-timeout 1 "http://127.0.0.1:$TIMELINE_PORT/health" >/dev/null 2>&1; then
+      mkdir -p "$HOME/.advisor"
+      nohup node "$ROOT/bin/advisor-timeline" --port "$TIMELINE_PORT" >>"$HOME/.advisor/timeline.log" 2>&1 &
+      disown
+    fi
+    echo "http://127.0.0.1:$TIMELINE_PORT/session/$SID"
+  fi
 fi
 
 # Emit the full JSON on stdout for the Advisor to consume.

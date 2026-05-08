@@ -68,15 +68,51 @@ For each fix, in severity order:
 
 ### Phase 2.5: Optional parallel delegation
 
-If Phase 1 surfaced enough independent groups and disjoint file territories, you may fan out to a team of `coder-worker` subagents instead of grinding through fixes solo. The full playbook — spawn gate, team sizing (2–8 workers), territory map format, per-worker brief template, parallel `Task()` invocation, and post-spawn aggregation with conflict detection — lives in the `spawn-team` skill at `.claude/skills/spawn-team/SKILL.md`. Read it whenever:
+**Why spawn?** Parallel workers finish faster wall-clock, protect your context window from exhaustion on large specs, and give each territory clean isolation. When the gate passes, spawning is the right call — not the cautious default.
 
-- The spec has ≥6 fixes spanning multiple disjoint files, OR
-- A single bounded territory is large enough (≥8 mechanical fixes) that solo work would exhaust your context, OR
-- You catch yourself thinking "this is a lot of fixes, I should split it up."
+Spawned coder-workers run a stripped protocol with no Phase 2.5 — recursion is structurally impossible. On small or tightly-coupled specs, coordination overhead dominates; only spawn when the gate passes.
 
-The skill bundles `scripts/validate-territory.sh` — run it before spawning (catches overlapping file assignments) and again after workers return (verifies via `git diff --name-only` that each worker stayed in its lane). An integrity violation flips your master verdict to `partial` even if every fix landed.
+#### Spawn gate — evaluate using Phase 1 counts
 
-If the spawn gate fails, skip Phase 2.5 and continue Phase 2 solo. Spawned coder-workers themselves run a stripped protocol with no Phase 2.5 — recursion is structurally impossible.
+**Spawn a team (2–3 parallel workers) when ALL FOUR hold:**
+
+1. **≥3 independent fix groups** — fixes whose correctness does not depend on each other.
+2. **Disjoint file territories** — no file appears in more than one group.
+3. **≥6 total fixes** in the master spec.
+4. **No serial-only constraints** — the spec marks no fix as ordering-dependent.
+
+**Spawn one subagent (not a team)** when there is exactly one large bounded territory (≥8 mechanical fixes in a self-contained module) you want to offload to protect your context.
+
+**Go solo** when neither condition above holds.
+
+#### Pre-spawn: write the territory map
+
+Before any `Task()` call, write `$OUTPUT_DIR/territory.md`:
+
+| Worker | Files (no overlap with other rows) | Fix IDs |
+|--------|------------------------------------|---------|
+| coder-self | path/a.ts, path/b.ts | B1, W3 |
+| coder-worker-1 | path/c.ts | B2, W1 |
+| coder-worker-2 | path/d.ts, path/e.ts | W2, N1 |
+
+Hard rule: every file appears in exactly one row. If a single fix needs files from two rows, move it to whichever row already owns more of its context, or keep it for coder-self. Never split one fix across two workers.
+
+#### Task() invocation
+
+For each worker, call `Task(subagent_type="coder-worker", prompt=...)` (registered at agents/coder/.claude/agents/coder-worker.md — a stripped worker mode that does NOT itself spawn). The prompt must include all of:
+`worker_id`, `file_list` (absolute paths — "edit ONLY these"), `fix_slice` (verbatim spec items), `read_context` (read-only files), `output_path` (`$OUTPUT_DIR/coder-worker-<N>-changes.md`), `scope_constraints` (paste your scope rules), `escalation_rules` (skip-and-log on edit failure or spec divergence; never halt), `verdict_envelope` (`{"summary":"...","paths":["..."],"verdict":"complete|partial|blocked"}`).
+
+**Spawn all workers in a single assistant turn** (parallel fan-out).
+
+#### Aggregation (after all workers return)
+
+1. Parse each verdict. `complete` → accept; `partial` → record skipped IDs; `blocked` → log reason, do not silently retry solo.
+2. Verify territory: `git diff --name-only` and confirm each worker only modified its declared files. Out-of-territory edits → log as **integrity violations** in the master changelog.
+3. Apply your own residual row of the territory map using the standard solo Phase 2 workflow.
+4. Merge per-worker `*-changes.md` files into `$OUTPUT_DIR/changes.md`, preserving B/W/N severity order; annotate each fix with `[applied by coder-worker-N]` or `[applied by coder-self]`.
+5. Append an Orchestration Summary: workers spawned, per-worker apply/skip counts, total applied, skipped fixes with reasons, blocked workers, integrity violations, files modified (union).
+
+If any worker is `blocked` or any integrity violation is logged, your master verdict in Phase 4 is `partial`, even if your own residual work succeeded.
 
 ### Phase 3: Changelog
 
