@@ -92,21 +92,53 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    Returns JSON: `{sid, workspace, outputDir, channelDir, inbox, outbox, promptFile, ...}`. Remember these paths — you'll need them for every subsequent call in this session. `outputDir` is where the worker writes any files; check it when evaluating deliverables.
 6. **Observe the outbox:**
 
-   **Single-worker (default):** Use `bin/advisor-observe` — it tracks the cursor internally, exits 0 on `result` / 1 on `error` / 2 on timeout, and emits one JSON line per message (Monitor-friendly). Run it inside a Monitor command:
+   **Critical constraint:** Do NOT use the `Monitor` tool to observe worker outboxes.
+   Monitor is a within-turn event pump — its events cannot resume a suspended turn.
+   If you end your turn after starting Monitor ("Wave N in flight. Will report back."),
+   you will sleep indefinitely until the user prompts you. This has caused three
+   confirmed failures. Use foreground Bash or ScheduleWakeup instead.
+
+   **Single-worker (default):** Run `bin/advisor-observe` as a **foreground Bash call**
+   (no Monitor wrapper). The turn stays open until the worker delivers.
    ```bash
    bin/advisor-observe <sid> | jq -c .
    ```
-   Flags: `--after <seq>` (start cursor, default 0), `--max-wait <secs>` (default 1800), `--poll <ms>` (default 1000). `bin/advisor-observe` handles the single-worker case more reliably than a `tail --timeout` loop, which can expire before the worker delivers.
+   Flags: `--after <seq>` (start cursor, default 0), `--max-wait <secs>` (default 1800),
+   `--poll <ms>` (default 1000). The turn does not end until `advisor-observe` exits —
+   which happens on `result` (exit 0), `error` (exit 1), or timeout (exit 2).
 
-   **Multiple workers (Comparison / Deep-research tier):** When running parallel workers, switch to `recv` (non-blocking) and poll all outboxes in a round-robin loop:
+   **Multiple workers (Comparison / Deep-research tier):** Do NOT use Monitor.
+   Use this two-step pattern instead:
+
+   Step A — immediate poll right after summoning (workers may finish fast):
    ```bash
-   # Poll two workers without blocking:
-   bun lib/channel.js recv --file <outbox1> --after <seq1> --json
-   bun lib/channel.js recv --file <outbox2> --after <seq2> --json
+   bun lib/channel.js recv --file <outbox1> --after 0 --json
+   bun lib/channel.js recv --file <outbox2> --after 0 --json
+   # (one recv per worker, all in the same Bash call or parallel tool calls)
    ```
-   Repeat until all workers have sent `result`, or until 10 minutes have elapsed — then proceed to Step 7 synthesis with whatever partial results are available. For the single-worker case, prefer `bin/advisor-observe` over a manual recv loop.
 
-   **Ensemble shorthand:** Instead of issuing multiple `bin/summon` calls, pass `--ensemble N` to a single summon call to provision N workers on the same brief automatically; their result envelopes are batched into a single synthesize record. Use for homogeneous fan-out (same brief, same agent type) where territory assignment is not needed.
+   Step B — if any worker has not yet delivered `result`, call ScheduleWakeup before
+   ending the turn:
+   ```
+   ScheduleWakeup({
+     delaySeconds: 90,
+     reason: "re-poll Wave N outboxes — <sid1>, <sid2> outstanding",
+     prompt: "<verbatim user prompt or the /loop sentinel for autonomous mode>"
+   })
+   ```
+   On wakeup the runtime fires a new turn. Re-run Step A. Repeat until all workers
+   have sent `result`, then proceed to Step 7. Do not end the wakeup turn with
+   another "in flight" message — either poll + proceed, or schedule the next wakeup.
+
+   Timeout: if a worker is silent for 10 minutes across wakeup cycles, treat it as
+   stalled — send one `guidance` nudge ("status?"), then `terminate` if still silent
+   after the next wakeup cycle.
+
+   **Ensemble shorthand:** Instead of issuing multiple `bin/summon` calls, pass
+   `--ensemble N` to a single summon call to provision N workers on the same brief
+   automatically; their result envelopes are batched into a single synthesize record.
+   Use for homogeneous fan-out (same brief, same agent type) where territory
+   assignment is not needed.
 7. **Steer.** React to each worker message:
    - `progress` → usually acknowledge mentally, wait for more. Intervene only if the worker is clearly off-track.
    - `result`   → When a worker delivers result, the channel.js output appends a SYNTHESIS REQUIRED block with a pre-filled `synthesize` command. The result body is a structured envelope — read `body.summary` (≤200 char outcome), `body.paths` (absolute file paths to deliverables), `body.verdict` (`complete`|`partial`|`blocked`). Legacy string bodies display as before. Fill the four fields (established, gap, material, next_action) and run it BEFORE spawning a new worker, sending guidance, or proceeding to Step 8. Use `/synth` to run synthesis — it validates required fields before invoking `channel.js synthesize` and prevents malformed synthesis records.
@@ -256,6 +288,15 @@ bin/advisor-schedule \
 
 ## Guardrails
 
+- **Watchdog rule — never end a turn with "N workers in flight" as your only action.**
+  After spawning workers you must do one of two things before ending the turn:
+  (a) hold the turn open with a foreground Bash poll (`bin/advisor-observe` or a
+  `recv` loop) until workers deliver, OR
+  (b) schedule a wakeup (`ScheduleWakeup`) so the runtime resumes the session
+  automatically. Ending a turn with a passive message like "Wave N in flight. Will
+  report back." without a foreground hold or a ScheduleWakeup is a protocol
+  violation — the session will sleep until the user manually intervenes. The Monitor
+  tool does NOT substitute for either option.
 - **Spawn in parallel when decomposable.** For tasks whose Step 3 tier is Comparison or Deep research AND whose subtasks have distinct territory, spawn workers in parallel (up to 3 without asking, more with user confirmation). For Fact-tier or single-threaded tasks, spawn one. The existing brief-specificity test still applies — if two workers could end up researching the same thing, the decomposition is wrong, fix the brief before spawning.
 - **Brief specificity test.** Before summoning, ask: "Could two workers independently interpret this brief and end up researching the exact same thing?" If yes, the brief is too vague. A brief like "research the semiconductor shortage" fails — two workers will both start from the same searches. A passing brief names a specific question, a scope boundary, and a distinct angle: "What regulatory changes between 2023–2025 affected automotive chip supply specifically (not demand side)?"
 - **Cascade test for prompt edits.** Any change to this CLAUDE.md or to `agents/*/CLAUDE.md` can unpredictably change downstream worker behavior. When a worker delivers an edited prompt file, before accepting it: (a) run a representative task mentally through the new prompt — does the decomposition step still produce the right worker count and brief structure? (b) if uncertain, spawn a second worker specifically to review the diff and flag unintended consequences. Prompt edits are not "safe small changes" — they are architectural changes.
