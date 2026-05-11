@@ -1,7 +1,8 @@
-import { test, expect, mock, beforeEach, afterAll } from 'bun:test';
+import { test, expect, mock, beforeAll, beforeEach, afterAll } from 'bun:test';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+import { execFileSync as _realExecFileSync, spawnSync as _realSpawnSync } from 'child_process';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'handoff-receiver-test-'));
 const SUMMON_BIN = path.resolve(import.meta.dir, '../bin/summon');
@@ -13,24 +14,27 @@ const callLog = { calls: [], nextSid: 'test-sid-001' };
 
 // Intercept child_process before lib/handoff-receiver.js loads so that
 // execFileSync calls to bin/summon are captured without spawning a real process.
-mock.module('child_process', () => ({
-  execFileSync: (cmd, args, opts) => {
-    callLog.calls.push({ cmd, args, opts });
-    const sid = callLog.nextSid;
-    return JSON.stringify({
-      sid,
-      outputDir: tmpDir,
-      outbox: path.join(tmpDir, `${sid}-outbox.jsonl`),
-      inbox: path.join(tmpDir, `${sid}-inbox.jsonl`),
-    });
-  },
-}));
+beforeAll(() => {
+  mock.module('child_process', () => ({
+    execFileSync: (cmd, args, opts) => {
+      callLog.calls.push({ cmd, args, opts });
+      const sid = callLog.nextSid;
+      return JSON.stringify({
+        sid,
+        outputDir: tmpDir,
+        outbox: path.join(tmpDir, `${sid}-outbox.jsonl`),
+        inbox: path.join(tmpDir, `${sid}-inbox.jsonl`),
+      });
+    },
+  }));
+});
 
 beforeEach(() => {
   callLog.calls = [];
 });
 
 afterAll(() => {
+  mock.module('child_process', () => ({ execFileSync: _realExecFileSync, spawnSync: _realSpawnSync }));
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 

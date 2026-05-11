@@ -1,59 +1,30 @@
-import { test, expect, beforeEach, afterEach } from 'bun:test';
+import { test, expect } from 'bun:test';
 import { preflight } from '../lib/preflight.js';
 
-// Tests (a)-(c) need ANTHROPIC_API_KEY set so the key guard passes (stub is used, no real network).
-// Test (d) explicitly removes it and asserts fail-open without calling the stub.
-
-let savedKey;
-
-beforeEach(() => {
-  savedKey = process.env.ANTHROPIC_API_KEY;
-  process.env.ANTHROPIC_API_KEY = 'test-key';
-});
-
-afterEach(() => {
-  if (savedKey !== undefined) {
-    process.env.ANTHROPIC_API_KEY = savedKey;
-  } else {
-    delete process.env.ANTHROPIC_API_KEY;
-  }
-});
-
-// (a) stub returns vague result — assert result equals exactly that shape
-test('preflight returns stub result when anthropicClient resolves', async () => {
+// (a) runner returns valid JSON text — assert parsed result
+test('preflight parses claudeRunner output into result', async () => {
   const stubResult = { is_vague: true, gap_signals: ['audience'] };
   const deps = {
-    anthropicClient: {
-      messages: {
-        create: async () => ({ content: [{ text: JSON.stringify(stubResult) }] }),
-      },
-    },
+    claudeRunner: async () => JSON.stringify(stubResult),
   };
   const result = await preflight({ prompt: 'do something', deps });
   expect(result).toEqual(stubResult);
 });
 
-// (b) stub throws — assert fail-open
-test('preflight returns fail-open when anthropicClient throws', async () => {
+// (b) runner throws — fail-open
+test('preflight returns fail-open when claudeRunner throws', async () => {
   const deps = {
-    anthropicClient: {
-      messages: {
-        create: async () => { throw new Error('network error'); },
-      },
-    },
+    claudeRunner: async () => { throw new Error('claude failed'); },
   };
   const result = await preflight({ prompt: 'do something', deps });
   expect(result).toEqual({ is_vague: false, gap_signals: [] });
 });
 
-// (c) stub hangs forever — timeout 50ms — resolves fail-open within 200ms
-test('preflight resolves fail-open within 200ms when stub hangs and timeoutMs:50', async () => {
+// (c) runner hangs — timeout enforced — fail-open within 200ms
+test('preflight resolves fail-open within 200ms when runner hangs and timeoutMs:50', async () => {
   const deps = {
-    anthropicClient: {
-      messages: {
-        create: () => new Promise(() => {}), // never resolves
-      },
-    },
+    claudeRunner: ({ timeoutMs }) =>
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
   };
   const start = Date.now();
   const result = await preflight({ prompt: 'do something', timeoutMs: 50, deps });
@@ -62,21 +33,31 @@ test('preflight resolves fail-open within 200ms when stub hangs and timeoutMs:50
   expect(elapsed).toBeLessThan(200);
 });
 
-// (d) no API key in env — fail-open without calling the stub
-test('preflight returns fail-open without calling stub when ANTHROPIC_API_KEY is missing', async () => {
-  delete process.env.ANTHROPIC_API_KEY;
+// (d) empty/missing prompt — fail-open without invoking runner
+test('preflight returns fail-open without calling runner when prompt is empty', async () => {
   let called = false;
   const deps = {
-    anthropicClient: {
-      messages: {
-        create: async () => {
-          called = true;
-          throw new Error('should not be called');
-        },
-      },
-    },
+    claudeRunner: async () => { called = true; return '{}'; },
   };
-  const result = await preflight({ prompt: 'do something', deps });
+  const result = await preflight({ prompt: '', deps });
   expect(result).toEqual({ is_vague: false, gap_signals: [] });
   expect(called).toBe(false);
+});
+
+// (e) runner returns markdown-wrapped JSON — extract and parse
+test('preflight strips ```json fences before parsing', async () => {
+  const deps = {
+    claudeRunner: async () => '```json\n{"is_vague": false, "gap_signals": []}\n```',
+  };
+  const result = await preflight({ prompt: 'clear task', deps });
+  expect(result).toEqual({ is_vague: false, gap_signals: [] });
+});
+
+// (f) runner returns malformed JSON — fail-open
+test('preflight returns fail-open when output is unparseable', async () => {
+  const deps = {
+    claudeRunner: async () => 'not json at all',
+  };
+  const result = await preflight({ prompt: 'something', deps });
+  expect(result).toEqual({ is_vague: false, gap_signals: [] });
 });

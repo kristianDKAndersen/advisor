@@ -1,40 +1,44 @@
-import { test, expect, mock, afterAll } from 'bun:test';
+import { test, expect, mock, beforeAll, afterAll } from 'bun:test';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+import { execFileSync as _realExecFileSync, spawnSync as _realSpawnSync } from 'child_process';
 
 // Created at module load time — mock.module must intercept child_process
 // before lib/pipeline.js is first imported.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pipeline-seq-test-'));
 const calls = []; // recorded { cmd, args } per execFileSync invocation
 
-mock.module('child_process', () => ({
-  execFileSync: (cmd, args, _opts) => {
-    calls.push({ cmd, args: Array.isArray(args) ? [...args] : args });
-    const idx = calls.length - 1;
-    const sid = `fake-pipe-${idx}`;
-    const dir = path.join(tmpDir, sid);
-    fs.mkdirSync(dir, { recursive: true });
-    const outbox = path.join(dir, 'outbox.jsonl');
-    const inbox = path.join(dir, 'inbox.jsonl');
-    // Pre-populate worker outbox so pipeline polling loop terminates immediately.
-    fs.writeFileSync(
-      outbox,
-      JSON.stringify({
-        ts: Date.now() / 1000,
-        seq: 1,
-        type: 'result',
-        from: sid,
-        body: JSON.stringify({ summary: 'mock done', paths: [], verdict: 'complete' }),
-      }) + '\n'
-    );
-    fs.writeFileSync(inbox, '');
-    return JSON.stringify({ sid, outputDir: dir, outbox, inbox });
-  },
-  spawnSync: () => ({ status: 0, stdout: '', stderr: '' }),
-}));
+beforeAll(() => {
+  mock.module('child_process', () => ({
+    execFileSync: (cmd, args, _opts) => {
+      calls.push({ cmd, args: Array.isArray(args) ? [...args] : args });
+      const idx = calls.length - 1;
+      const sid = `fake-pipe-${idx}`;
+      const dir = path.join(tmpDir, sid);
+      fs.mkdirSync(dir, { recursive: true });
+      const outbox = path.join(dir, 'outbox.jsonl');
+      const inbox = path.join(dir, 'inbox.jsonl');
+      // Pre-populate worker outbox so pipeline polling loop terminates immediately.
+      fs.writeFileSync(
+        outbox,
+        JSON.stringify({
+          ts: Date.now() / 1000,
+          seq: 1,
+          type: 'result',
+          from: sid,
+          body: JSON.stringify({ summary: 'mock done', paths: [], verdict: 'complete' }),
+        }) + '\n'
+      );
+      fs.writeFileSync(inbox, '');
+      return JSON.stringify({ sid, outputDir: dir, outbox, inbox });
+    },
+    spawnSync: () => ({ status: 0, stdout: '', stderr: '' }),
+  }));
+});
 
 afterAll(() => {
+  mock.module('child_process', () => ({ execFileSync: _realExecFileSync, spawnSync: _realSpawnSync }));
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
