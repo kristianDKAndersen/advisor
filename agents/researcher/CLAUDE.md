@@ -1,5 +1,6 @@
 ---
 role: researcher
+default_next_agent: evaluator
 inputs:
   - task
   - goal

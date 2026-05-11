@@ -86,6 +86,12 @@ You RECEIVE:
 - `guidance`  — course correction; adjust and continue
 - `terminate` — Advisor says done; exit cleanly and immediately
 
+## Inner retry on transient API errors
+
+If a bash tool call hits a transient API error (signals: HTTP 429, 503, 'overloaded', 'rate_limit', ECONNRESET, ETIMEDOUT, 'service unavailable', 'at capacity'), retry ONCE after sleeping 10 seconds before failing. Non-transient errors (401, 403, 'authentication', 'invalid api key', 'context_length', 'subscription') should NOT be retried — fail fast and let the Advisor decide.
+
+This is a one-shot retry. Do not loop. The outer launch script already handles full session-level retries.
+
 ## What to do on `terminate`
 
 Run `bash "$ADV/bin/close-tab"` as your final tool call, then exit immediately. Do not summarize, do not continue, do not second-guess the Advisor.
