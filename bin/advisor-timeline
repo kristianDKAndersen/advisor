@@ -12,6 +12,8 @@ const os = require('os');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const RUNS_DIR = path.join(os.homedir(), '.advisor', 'runs');
+const CLIENT_DIST = process.env.ADVISOR_CLIENT_DIST || path.join(__dirname, '..', 'client', 'dist');
+const CLIENT_DIST_EXISTS = fs.existsSync(path.join(CLIENT_DIST, 'index.html'));
 
 const argv = process.argv.slice(2);
 let port = 7878;
@@ -679,6 +681,33 @@ setInterval(refreshActive,5000);
 </html>`;
 }
 
+// ── Static file helper ────────────────────────────────────────────────────────
+const MIME = {
+  '.js': 'application/javascript',
+  '.mjs': 'application/javascript',
+  '.css': 'text/css',
+  '.svg': 'image/svg+xml',
+  '.html': 'text/html; charset=utf-8',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+};
+
+function serveStaticFile(res, filePath) {
+  try {
+    const data = fs.readFileSync(filePath);
+    const ct = MIME[path.extname(filePath)] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': ct, 'Cache-Control': 'public, max-age=3600' });
+    res.end(data);
+  } catch (_) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
+  }
+}
+
 // ── HTTP server ───────────────────────────────────────────────────────────────
 function jsonRes(res, data, status) {
   res.writeHead(status || 200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
@@ -699,8 +728,31 @@ function parseQueryString(url) {
 const server = http.createServer((req, res) => {
   const urlPath = req.url.split('?')[0].replace(/\/+$/, '') || '/';
 
-  // Static HTML
+  // Root — Svelte shell when built, legacy timeline otherwise
   if (req.method === 'GET' && urlPath === '/') {
+    if (CLIENT_DIST_EXISTS) {
+      serveStaticFile(res, path.join(CLIENT_DIST, 'index.html'));
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(htmlPage());
+    }
+    return;
+  }
+
+  // Assets from client/dist/assets/
+  if (req.method === 'GET' && urlPath.startsWith('/assets/')) {
+    const rel = urlPath.slice('/assets/'.length);
+    if (rel.includes('..') || path.isAbsolute(rel)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Bad request');
+      return;
+    }
+    serveStaticFile(res, path.join(CLIENT_DIST, 'assets', rel));
+    return;
+  }
+
+  // Legacy timeline (old / UI, always accessible)
+  if (req.method === 'GET' && urlPath === '/legacy') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
     res.end(htmlPage());
     return;
@@ -751,6 +803,22 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && msgMatch) {
     const sid = decodeURIComponent(msgMatch[1]);
     jsonRes(res, getMessages(sid));
+    return;
+  }
+
+  // Session detail (meta + session.json + synthesis.log)
+  const detailMatch = urlPath.match(/^\/api\/sessions\/([^/]+)\/detail$/);
+  if (req.method === 'GET' && detailMatch) {
+    const sid = decodeURIComponent(detailMatch[1]);
+    const sidDir = path.join(RUNS_DIR, sid);
+    if (!fs.existsSync(sidDir)) {
+      jsonRes(res, { error: 'not found' }, 404);
+      return;
+    }
+    let session = null;
+    try { session = JSON.parse(fs.readFileSync(path.join(sidDir, 'session.json'), 'utf8')); } catch (_) {}
+    const synthesisRecords = readJsonl(path.join(sidDir, 'synthesis.log'));
+    jsonRes(res, { meta: getMeta(sid), session, synthesisRecords });
     return;
   }
 

@@ -1,8 +1,7 @@
-import { test, expect, mock, beforeAll, beforeEach, afterAll } from 'bun:test';
+import { test, expect, beforeEach, afterAll } from 'bun:test';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync as _realExecFileSync, spawnSync as _realSpawnSync } from 'child_process';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'handoff-receiver-test-'));
 const SUMMON_BIN = path.resolve(import.meta.dir, '../bin/summon');
@@ -12,29 +11,24 @@ const LIB_HANDOFF_RECEIVER = path.resolve(import.meta.dir, '../lib/handoff-recei
 // Shared mutable state — reset per test via beforeEach.
 const callLog = { calls: [], nextSid: 'test-sid-001' };
 
-// Intercept child_process before lib/handoff-receiver.js loads so that
-// execFileSync calls to bin/summon are captured without spawning a real process.
-beforeAll(() => {
-  mock.module('child_process', () => ({
-    execFileSync: (cmd, args, opts) => {
-      callLog.calls.push({ cmd, args, opts });
-      const sid = callLog.nextSid;
-      return JSON.stringify({
-        sid,
-        outputDir: tmpDir,
-        outbox: path.join(tmpDir, `${sid}-outbox.jsonl`),
-        inbox: path.join(tmpDir, `${sid}-inbox.jsonl`),
-      });
-    },
-  }));
-});
+// Fake execFileSync: records calls and returns fake summon metadata.
+// Reads callLog.nextSid dynamically so each test can control the returned sid.
+function fakeExecFileSync(cmd, args, opts) {
+  callLog.calls.push({ cmd, args, opts });
+  const sid = callLog.nextSid;
+  return JSON.stringify({
+    sid,
+    outputDir: tmpDir,
+    outbox: path.join(tmpDir, `${sid}-outbox.jsonl`),
+    inbox: path.join(tmpDir, `${sid}-inbox.jsonl`),
+  });
+}
 
 beforeEach(() => {
   callLog.calls = [];
 });
 
 afterAll(() => {
-  mock.module('child_process', () => ({ execFileSync: _realExecFileSync, spawnSync: _realSpawnSync }));
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -53,7 +47,7 @@ test('processHandoff calls execFileSync with SUMMON_BIN and args --agent planner
   const senderOutbox = path.join(tmpDir, 'sender-outbox-test2.jsonl');
   const handoffBody = { receiver_agent: 'planner', task: 'plan X', goal: 'plan done', context: null };
 
-  await processHandoff(handoffBody, senderOutbox);
+  await processHandoff(handoffBody, senderOutbox, { execFileSync: fakeExecFileSync });
 
   expect(callLog.calls.length).toBeGreaterThanOrEqual(1);
   const call = callLog.calls[0];
@@ -74,7 +68,7 @@ test('processHandoff returns {sid: string with length > 0, agent: planner}', asy
   const senderOutbox = path.join(tmpDir, 'sender-outbox-test3.jsonl');
   const handoffBody = { receiver_agent: 'planner', task: 'plan X', goal: 'plan done', context: null };
 
-  const result = await processHandoff(handoffBody, senderOutbox);
+  const result = await processHandoff(handoffBody, senderOutbox, { execFileSync: fakeExecFileSync });
 
   expect(typeof result.sid).toBe('string');
   expect(result.sid.length).toBeGreaterThan(0);
@@ -90,7 +84,7 @@ test('processHandoff appends guidance record to senderOutbox with new worker sid
   const senderOutbox = path.join(tmpDir, 'sender-outbox-test4.jsonl');
   const handoffBody = { receiver_agent: 'planner', task: 'plan X', goal: 'plan done', context: null };
 
-  const result = await processHandoff(handoffBody, senderOutbox);
+  const result = await processHandoff(handoffBody, senderOutbox, { execFileSync: fakeExecFileSync });
 
   const msgs = readAfter(senderOutbox, 0);
   const guidance = msgs.find((m) => m.type === 'guidance');
@@ -113,7 +107,7 @@ test('processHandoff with context {prev_summary:foo} passes prev_summary substri
     context: { prev_summary: 'foo', prev_paths: ['/a'], prev_verdict: 'complete' },
   };
 
-  await processHandoff(handoffBody, senderOutbox);
+  await processHandoff(handoffBody, senderOutbox, { execFileSync: fakeExecFileSync });
 
   expect(callLog.calls.length).toBeGreaterThanOrEqual(1);
   const call = callLog.calls[0];

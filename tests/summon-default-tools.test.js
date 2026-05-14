@@ -27,41 +27,61 @@ const HOME_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'adv-dflt-home-'));
 
 const AGENT_WITH = `test-dflt-with-${TS}`;
 const agentWithDir = path.join(ADVISOR_ROOT, 'agents', AGENT_WITH);
-fs.mkdirSync(agentWithDir, { recursive: true });
-fs.writeFileSync(
-  path.join(agentWithDir, 'CLAUDE.md'),
-  [
-    '---',
-    'default_tools:',
-    '  - Read',
-    '  - Bash',
-    '  - Grep',
-    '---',
-    '',
-    '# Test agent with default_tools',
-    '',
-    'Synthetic fixture — auto-deleted after tests.',
-  ].join('\n')
-);
 
 const AGENT_WITHOUT = `test-dflt-none-${TS}`;
 const agentWithoutDir = path.join(ADVISOR_ROOT, 'agents', AGENT_WITHOUT);
-fs.mkdirSync(agentWithoutDir, { recursive: true });
-fs.writeFileSync(
-  path.join(agentWithoutDir, 'CLAUDE.md'),
-  [
-    '# Test agent without default_tools',
-    '',
-    'No frontmatter block. Synthetic fixture — auto-deleted after tests.',
-  ].join('\n')
-);
 
-afterAll(() => {
+// Delete any leftover test-dflt-* dirs from previous failed runs before creating new ones.
+const agentsDir = path.join(ADVISOR_ROOT, 'agents');
+for (const entry of fs.readdirSync(agentsDir)) {
+  if (entry.startsWith('test-dflt-')) {
+    fs.rmSync(path.join(agentsDir, entry), { recursive: true, force: true });
+  }
+}
+
+function doCleanup() {
   fs.rmSync(agentWithDir,    { recursive: true, force: true });
   fs.rmSync(agentWithoutDir, { recursive: true, force: true });
   fs.rmSync(RUNS_TMP,        { recursive: true, force: true });
   fs.rmSync(HOME_TMP,        { recursive: true, force: true });
-});
+}
+
+// Register afterAll before creating dirs so cleanup runs even if dir creation succeeds
+// but a later step (provision) fails.
+afterAll(doCleanup);
+
+// Create agent dirs; if this throws, afterAll still runs cleanup.
+try {
+  fs.mkdirSync(agentWithDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(agentWithDir, 'CLAUDE.md'),
+    [
+      '---',
+      'default_tools:',
+      '  - Read',
+      '  - Bash',
+      '  - Grep',
+      '---',
+      '',
+      '# Test agent with default_tools',
+      '',
+      'Synthetic fixture — auto-deleted after tests.',
+    ].join('\n')
+  );
+
+  fs.mkdirSync(agentWithoutDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(agentWithoutDir, 'CLAUDE.md'),
+    [
+      '# Test agent without default_tools',
+      '',
+      'No frontmatter block. Synthetic fixture — auto-deleted after tests.',
+    ].join('\n')
+  );
+} catch (e) {
+  doCleanup();
+  throw e;
+}
 
 // ── Helper ────────────────────────────────────────────────────────────────
 
@@ -90,12 +110,18 @@ function provision(agentName, extraArgs) {
   return { meta, launchSh };
 }
 
-// Provision all three scenarios at module load time (before tests run).
-// If provision itself throws for an unrelated reason, the suite fails loudly
-// with a stack trace rather than silently passing with null fixtures.
-const s1 = provision(AGENT_WITH,    []);
-const s2 = provision(AGENT_WITH,    ['--allowedTools', 'Write']);
-const s3 = provision(AGENT_WITHOUT, []);
+// Provision all three scenarios. Wrapped in try/finally so that cleanup via
+// afterAll is not the only safety net — if provision throws during module load,
+// the finally block ensures dirs are removed before re-throwing.
+let s1, s2, s3;
+try {
+  s1 = provision(AGENT_WITH,    []);
+  s2 = provision(AGENT_WITH,    ['--allowedTools', 'Write']);
+  s3 = provision(AGENT_WITHOUT, []);
+} catch (e) {
+  doCleanup();
+  throw e;
+}
 
 // ── Scenario 1: frontmatter default_tools, no explicit --allowedTools ─────
 

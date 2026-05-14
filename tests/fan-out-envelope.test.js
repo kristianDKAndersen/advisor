@@ -1,44 +1,36 @@
-import { test, expect, mock, beforeAll, afterAll } from 'bun:test';
+import { test, expect, afterAll } from 'bun:test';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync as _realExecFileSync, spawnSync as _realSpawnSync } from 'child_process';
 
-// Created at module load time so the mock.module factory can reference it.
+// Created at module load time so the fake execFileSync factory can reference it.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fan-out-test-'));
 let _workerIdx = 0;
 
-// Intercept child_process before parallel.js loads.
 // Fake bin/summon: returns worker metadata and pre-populates the worker outbox
 // with a result message so the runParallel polling loop terminates immediately.
-beforeAll(() => {
-  mock.module('child_process', () => ({
-    execFileSync: (_cmd, _args, _opts) => {
-      const idx = _workerIdx++;
-      const sid = `fake-w-${idx}`;
-      const dir = path.join(tmpDir, sid);
-      fs.mkdirSync(dir, { recursive: true });
-      const outbox = path.join(dir, 'outbox.jsonl');
-      const inbox = path.join(dir, 'inbox.jsonl');
-      fs.writeFileSync(
-        outbox,
-        JSON.stringify({
-          ts: Date.now() / 1000,
-          seq: 1,
-          type: 'result',
-          from: sid,
-          body: JSON.stringify({ summary: 'mock done', paths: [], verdict: 'complete' }),
-        }) + '\n'
-      );
-      fs.writeFileSync(inbox, '');
-      return JSON.stringify({ sid, outputDir: dir, outbox, inbox });
-    },
-    spawnSync: () => ({ status: 0, stdout: '', stderr: '' }),
-  }));
-});
+function fakeExecFileSync(_cmd, _args, _opts) {
+  const idx = _workerIdx++;
+  const sid = `fake-w-${idx}`;
+  const dir = path.join(tmpDir, sid);
+  fs.mkdirSync(dir, { recursive: true });
+  const outbox = path.join(dir, 'outbox.jsonl');
+  const inbox = path.join(dir, 'inbox.jsonl');
+  fs.writeFileSync(
+    outbox,
+    JSON.stringify({
+      ts: Date.now() / 1000,
+      seq: 1,
+      type: 'result',
+      from: sid,
+      body: JSON.stringify({ summary: 'mock done', paths: [], verdict: 'complete' }),
+    }) + '\n'
+  );
+  fs.writeFileSync(inbox, '');
+  return JSON.stringify({ sid, outputDir: dir, outbox, inbox });
+}
 
 afterAll(() => {
-  mock.module('child_process', () => ({ execFileSync: _realExecFileSync, spawnSync: _realSpawnSync }));
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -83,6 +75,7 @@ test('runParallel with fanInGroups option returns report.groups with fan-in-comp
   let report;
   try {
     report = await runParallel(briefs, {
+      execFileSync: fakeExecFileSync,
       fanInGroups: [{ task_group_id: 'g1', fan_in_threshold: 1 }],
       pollIntervalMs: 10,
       outputDir: path.join(tmpDir, 'report-out'),

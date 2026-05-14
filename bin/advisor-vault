@@ -5,7 +5,7 @@
 //   advisor-vault backlinks --note "sessions/1777631574-208ed7"
 //   advisor-vault path
 
-import { searchNotes, backlinks, listDue, listUnresolved, VAULT_ROOT } from '../lib/vault.js';
+import { searchNotes, backlinks, listDue, listUnresolved, vaultRoot } from '../lib/vault.js';
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -31,7 +31,7 @@ if (cmd === 'search') {
   const bl = backlinks(note);
   console.log(bl.length ? bl.join('\n') : '(no backlinks)');
 } else if (cmd === 'path') {
-  console.log(VAULT_ROOT);
+  console.log(vaultRoot());
 } else if (cmd === 'due') {
   const today = new Date().toISOString().slice(0, 10);
   const window = parseInt(getFlag('--window', '14'), 10);
