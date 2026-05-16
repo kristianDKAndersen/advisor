@@ -23,6 +23,8 @@ const path = require('path');
 const childProcess = require('child_process');
 const channel = require('../lib/channel');
 const { runParallel } = require('../lib/parallel');
+const { formatDuration } = require('../lib/duration');
+const { formatBytes } = require('../lib/bytes');
 
 const ADVISOR_ROOT = path.resolve(__dirname, '..');
 const SUMMON_BIN = path.join(ADVISOR_ROOT, 'bin', 'summon');
@@ -362,6 +364,7 @@ function applyWinner(scores, candidateMap, runId) {
       { encoding: 'utf8' },
     );
     fs.writeFileSync(patchFile, patch);
+    process.stderr.write(`[tournament] winner patch: ${formatBytes(Buffer.byteLength(patch, 'utf8'))}\n`);
   } catch (e) {
     die(3, `failed to create winner patch: ${e.message}`);
   }
@@ -393,7 +396,7 @@ function applyWinner(scores, candidateMap, runId) {
         try {
           fs.mkdirSync(path.dirname(dest), { recursive: true });
           fs.copyFileSync(src, dest);
-          process.stderr.write(`[tournament] copied: ${rel}\n`);
+          process.stderr.write(`[tournament] copied: ${rel} (${formatBytes(fs.statSync(dest).size)})\n`);
         } catch (e) {
           process.stderr.write(`[tournament] warn: failed to copy ${rel}: ${e.message}\n`);
         }
@@ -441,6 +444,7 @@ function applyWinner(scores, candidateMap, runId) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
+  const mainStartMs = Date.now();
   const args = parseArgs(process.argv.slice(2));
 
   // Validate --spec.
@@ -476,7 +480,9 @@ async function main() {
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
   // Phase 1: spec agent.
+  const specStartMs = Date.now();
   const { specMeta, specBody } = await runSpecPhase(specContents);
+  const specEndMs = Date.now();
 
   // Phase 1.5: worktree creation.
 
@@ -519,8 +525,15 @@ async function main() {
   let scores = null;
   let scoresPath = null;
 
+  let codersEndMs = 0;
+  let evaluatorStartMs = 0;
+  let evaluatorEndMs = 0;
+
+  const codersStartMs = Date.now();
   await runParallel(briefs, {
     onAllComplete: async (workers, _report) => {
+      codersEndMs = Date.now();
+
       // Build candidate entries from worker results.
       const candidates = [];
       for (let i = 0; i < workers.length; i++) {
@@ -543,7 +556,9 @@ async function main() {
 
       process.stderr.write(`[tournament] all ${workers.length} coder workers complete. running evaluator...\n`);
 
+      evaluatorStartMs = Date.now();
       const result = await runEvaluatorPhase(candidates, specBody, keepLosers);
+      evaluatorEndMs = Date.now();
       scores = result.scores;
       scoresPath = result.scoresPath;
     },
@@ -570,7 +585,9 @@ async function main() {
   }
 
   // Apply winner.
+  const applyStartMs = Date.now();
   applyWinner(scores, candidateMap, runId);
+  const applyEndMs = Date.now();
 
   const winner = ranked.find(r => r.sid === scores.winner_sid);
   process.stdout.write([
@@ -578,6 +595,11 @@ async function main() {
     `  winner:   ${scores.winner_sid} (strategy: ${winner ? winner.strategy : 'unknown'})`,
     `  rationale: ${scores.rationale || '(none)'}`,
     `  scores:   ${scoresPath}`,
+    `  spec phase:    ${formatDuration(specEndMs - specStartMs)}`,
+    `  coder phase:   ${formatDuration(codersEndMs - codersStartMs)}`,
+    `  evaluator:     ${formatDuration(evaluatorEndMs - evaluatorStartMs)}`,
+    `  apply:         ${formatDuration(applyEndMs - applyStartMs)}`,
+    `  total:         ${formatDuration(applyEndMs - mainStartMs)}`,
   ].join('\n') + '\n');
 
   process.exit(0);
