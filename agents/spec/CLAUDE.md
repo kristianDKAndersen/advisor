@@ -72,6 +72,26 @@ If the framework requires a different import style (pytest, jest with babel, etc
 
 This is non-negotiable. A test with an absolute import that resolves to the main repo during the red-baseline check will produce false-green scoring during evaluation — every candidate resolves to the same out-of-worktree file, and the implementation under test is never actually exercised. Coders may also be misled into writing to the main repo to satisfy the import.
 
+### Phase 2.6: Self-check (reference + null-impl)
+
+Verify the suite is internally consistent before Phase 3. A contradictory suite is undeliverable.
+
+1. Determine the resolved import path: take one test file's relative implementation import (e.g. `../lib/foo.js`) and resolve it against `$OUTPUT_DIR/tests/` (e.g. `$OUTPUT_DIR/lib/foo.js`).
+2. Write a **reference implementation** at `$OUTPUT_DIR/.spec-self-check/reference.js` — a minimal correct impl that satisfies every assertion in the tests you just wrote. (Do not list this path in the result `paths[]` — coders never see it.)
+3. Write a **null implementation** at `$OUTPUT_DIR/.spec-self-check/null-impl.js` — exports all expected symbols returning `undefined` or throwing immediately; no logic.
+4. **CHECK 1 — reference must pass all tests:**
+   - Copy `reference.js` to the resolved import path.
+   - Run `<test_command> $OUTPUT_DIR/tests/` (same runner as Phase 1).
+   - Delete the file at the resolved import path when done.
+   - If any test fails: the assertions are contradictory or over-specified. Edit the failing test(s) or amend the reference; retry. **Budget: 2 retries total across both checks.**
+5. **CHECK 2 — null-impl must fail ≥1 test:**
+   - Copy `null-impl.js` to the resolved import path.
+   - Run `<test_command> $OUTPUT_DIR/tests/`.
+   - Delete the file at the resolved import path when done.
+   - If all tests pass: at least one test is degenerate (asserts nothing real). Fix or remove it; retry (counts against the same 2-retry budget).
+6. On success: delete `$OUTPUT_DIR/.spec-self-check/` entirely before proceeding.
+7. On persistent failure (budget exhausted): send `result` immediately with `"verdict":"blocked"`, citing the specific failing test name and which check failed (`reference` or `null`). Do not proceed to Phase 3.
+
 ### Phase 3: Red baseline (mandatory)
 
 Run `test_command` from `$REPO`:

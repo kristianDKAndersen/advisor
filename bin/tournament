@@ -16,6 +16,7 @@
 //   2  spec phase failed (missing spec file, spec agent error, missing test_command)
 //   3  evaluator phase failed (agent error, scores.json missing or malformed)
 //   4  worktree creation failed
+//   5  spec self-check failed (verdict=blocked)
 
 const fs = require('fs');
 const path = require('path');
@@ -156,6 +157,12 @@ async function runSpecPhase(specContents) {
 
   if (!body || typeof body !== 'object') {
     die(2, `spec agent result body is not a JSON object: ${JSON.stringify(resultMsg.body)}`);
+  }
+
+  if (body.verdict === 'blocked') {
+    process.stderr.write('[tournament] spec phase blocked — internal inconsistency\n');
+    process.stderr.write(`[tournament] reason: ${body.summary}\n`);
+    process.exit(5);
   }
 
   if (body.verdict !== 'complete') {
