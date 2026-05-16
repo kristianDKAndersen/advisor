@@ -58,7 +58,7 @@ The planner has no authority to judge difficulty. The only legitimate split trig
 
 These phrases are plan failures — never write them:
 
-`v1`, `v2`, `simplified version`, `static for now`, `hardcoded for now`, `future enhancement`, `placeholder`, `basic version`, `minimal implementation`, `will be wired later`, `dynamic in future phase`, `skip for now`, `TBD`, `TODO`, `implement later`, `fill in details`, `add appropriate error handling`, `handle edge cases`, `similar to task N`, `complex`, `difficult`, `non-trivial`
+`v1`, `v2`, `simplified version`, `static for now`, `hardcoded for now`, `future enhancement`, `placeholder`, `basic version`, `minimal implementation`, `will be wired later`, `dynamic in future phase`, `skip for now`, `TBD`, `TODO`, `implement later`, `fill in details`, `add appropriate error handling`, `handle edge cases`, `similar to task N`, `complex`, `difficult`, `non-trivial`, `add tests later`, `tests deferred`, `skip tests for now`, `manual verification only`, `test in follow-up`, `no tests needed`
 
 If a feature won't fit in the current plan's context budget, return a split recommendation — never silently omit work.
 
@@ -91,6 +91,17 @@ When a plan introduces new interfaces consumed by later subtasks, order the wave
 
 This prevents the "scavenger hunt" where an executor reverse-engineers intended contracts from surrounding code.
 
+## Test-first ordering (TDD)
+
+Every plan that introduces or modifies behavior must include a failing-test subtask in Wave 0 (or the earliest applicable wave), before the implementation subtask. The implementation subtask's DoD must reference the test transitioning from failing to passing, with pasted command output (both the failing run and the passing run) as evidence.
+
+Rules:
+- **Failing-test subtask first:** create or locate the test for the behavior being changed, run it, confirm it fails. This is a separate subtask from the implementation.
+- **Implementation subtask depends on it:** the implementation subtask lists the failing-test subtask in its `Depends on` column.
+- **DoD references red→green:** the implementation subtask's DoD must include: `Test went red→green — evidence: paste failing run output + passing run output, both with command + exit code`.
+- **Spike exemption:** subtasks scoped as spikes (pure investigation, no behavior change) must state `no behavior change, TDD waived` in the subtask row.
+- **Pure-refactor exemption:** subtasks that restructure code without changing observable behavior must state `no behavior change, TDD waived` in the subtask row. Existing tests must still be run to confirm no regression.
+
 ## Wave-based parallelism (gsd)
 
 Each subtask carries a `wave` number and a `files_modified` list. Subtasks in the same wave run in parallel **if and only if** their `files_modified` sets are disjoint. Overlapping sets must be assigned to different waves.
@@ -107,6 +118,7 @@ Run this inline before reporting the plan complete. Fix all issues directly — 
 1. **Spec coverage** — Does every item in the user task, outputDir context, and advisor brief map to a subtask? List any gaps.
 2. **Placeholder scan** — Search the plan for any phrase from the banned-phrase list above. Remove and replace with concrete content.
 3. **Type/name consistency** — Do type names, method signatures, and file paths used in later subtasks match what earlier subtasks define?
+4. **TDD coverage** — Does every behavior-changing subtask have a paired failing-test subtask in an earlier or same wave? Pure refactors must be marked `TDD-waived` with a one-line justification.
 
 ## Stated / Inferred / Out-of-scope synthesis (compound-engineering)
 
@@ -132,6 +144,7 @@ Every DoD entry is a claim paired with the evidence that proves it — never a p
 | Build succeeds | Build command: exit 0 |
 | Bug fixed | Test against original symptom: passes |
 | Feature complete | Line-by-line checklist against requirements |
+| Test went red→green | Paste failing run output + passing run output, both with command + exit code |
 
 Write each subtask's DoD as: `[Claim] — evidence: [exact command or artifact]`
 
@@ -170,6 +183,13 @@ Write the plan to `outputDir` as `plan.md`:
 | U1 | [name] | 1 | — | [paths] | [claim — evidence: command] |
 | U2 | [name] | 1 | — | [paths] | [claim — evidence: command] |
 | U3 | [name] | 2 | U1, U2 | [paths] | [claim — evidence: command] |
+
+TDD example (behavior-changing subtask pair):
+
+| U-ID | Subtask | Wave | Depends on | files_modified | DoD (claim → evidence) |
+|------|---------|------|------------|----------------|------------------------|
+| U0 | Write failing test for X | 1 | — | [test file path] | Test exists and fails — evidence: `npm test -- X` exit 1, output pasted |
+| U1 | Implement X | 2 | U0 | [impl file path] | Test went red→green — evidence: paste failing run output + passing run output, both with command + exit code |
 
 ### Dependency Graph
 - Must happen first: [ordered list]
