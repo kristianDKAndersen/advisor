@@ -89,6 +89,11 @@ function die(code, msg) {
   process.exit(code);
 }
 
+function rewriteTestCommand(cmd, fromPath, toPath) {
+  if (!cmd || !fromPath) return cmd;
+  return cmd.split(fromPath).join(toPath);
+}
+
 /**
  * Summon an agent via bin/summon (headless). Returns the parsed metadata JSON.
  * Extracts the JSON line the same way parallel.js does — stdout may contain a
@@ -240,22 +245,23 @@ function copyTestFilesIntoWorktrees(specBody, specMeta, worktreeMap) {
 
 // ── Phase 2: parallel coder workers ───────────────────────────────────────────
 
-function buildCoderBriefs(specContents, specBody, strategies, worktreeMap) {
+function buildCoderBriefs(specContents, specBody, strategies, worktreeMap, specMeta) {
   const testPaths = (specBody.paths || []).join(', ') || '(see spec)';
   return strategies.map(strategy => {
     const worktreePath = worktreeMap.get(strategy);
+    const perWorktreeCmd = rewriteTestCommand(specBody.test_command, specMeta && specMeta.outputDir, worktreePath);
     return {
       agent: 'coder',
       task: [
         specContents,
         `Strategy: ${strategy}`,
-        `Test command: ${specBody.test_command}`,
+        `Test command: ${perWorktreeCmd}`,
         `Failing tests at: ${testPaths}`,
         `Worktree: ${worktreePath}`,
         `Work ONLY inside this worktree. Do not touch the main repository working tree. Run \`cd ${worktreePath}\` first if needed. Implementation files go inside ${worktreePath}, not $OUTPUT_DIR.`,
         'Make all listed tests pass. Do not modify the test files.',
       ].join('\n'),
-      goal: `All tests in "${specBody.test_command}" pass. Implementation files written to worktree at ${worktreePath}.`,
+      goal: `All tests in "${perWorktreeCmd}" pass. Implementation files written to worktree at ${worktreePath}.`,
     };
   });
 }
@@ -267,6 +273,7 @@ async function runEvaluatorPhase(candidates, specBody, keepLosers) {
   const taskText = [
     `Candidates: ${candidatesJson}`,
     `Test command: ${specBody.test_command}`,
+    `IMPORTANT: each candidate has its own test_command field — use candidate.test_command (NOT the global) when running tests for that candidate. Run: cd <candidate.worktree_path> && <candidate.test_command>.`,
     `Repo root: ${ADVISOR_ROOT}`,
     keepLosers ? 'Keep loser worktrees after evaluation (--keep-losers was passed).' : '',
   ].filter(Boolean).join('\n');
@@ -502,7 +509,7 @@ async function main() {
   copyTestFilesIntoWorktrees(specBody, specMeta, worktreeMap);
 
   // Phase 2: parallel coder workers.
-  const briefs = buildCoderBriefs(specContents, specBody, strategies, worktreeMap);
+  const briefs = buildCoderBriefs(specContents, specBody, strategies, worktreeMap, specMeta);
   process.stderr.write(`[tournament] launching ${briefs.length} coder workers (strategies: ${strategies.join(', ')})...\n`);
 
   // candidateMap: sid -> { sid, strategy, outputDir, paths, summary, worktree_path }
@@ -525,6 +532,7 @@ async function main() {
           paths: w.paths || [],
           summary: w.summary || '',
           worktree_path: worktreeMap.get(strategy),
+          test_command: rewriteTestCommand(specBody.test_command, specMeta && specMeta.outputDir, worktreeMap.get(strategy)),
         };
         candidates.push(entry);
         candidateMap.set(w.sid, {

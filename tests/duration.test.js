@@ -2,7 +2,7 @@ import { test, expect, describe } from 'bun:test';
 
 import { formatDuration } from '../lib/duration.js';
 
-describe('formatDuration — sub-second (ms < 1000)', () => {
+describe('formatDuration — sub-second bucket (ms < 1000)', () => {
   test('0 returns "0ms"', () => {
     expect(formatDuration(0)).toBe('0ms');
   });
@@ -24,16 +24,16 @@ describe('formatDuration — sub-second (ms < 1000)', () => {
   });
 });
 
-describe('formatDuration — seconds (1000 <= ms < 60_000)', () => {
+describe('formatDuration — seconds bucket (1000 <= ms < 60_000)', () => {
   test('1000 returns "1s" (lower boundary, inclusive)', () => {
     expect(formatDuration(1000)).toBe('1s');
   });
 
-  test('1500 returns "1s" (spec example — floors fractional seconds)', () => {
+  test('1500 returns "1s" (spec example, floors fractional seconds)', () => {
     expect(formatDuration(1500)).toBe('1s');
   });
 
-  test('1999 returns "1s" (still 1s, floored)', () => {
+  test('1999 returns "1s" (just below 2s, floored)', () => {
     expect(formatDuration(1999)).toBe('1s');
   });
 
@@ -54,7 +54,7 @@ describe('formatDuration — seconds (1000 <= ms < 60_000)', () => {
   });
 });
 
-describe('formatDuration — minutes (60_000 <= ms < 3_600_000)', () => {
+describe('formatDuration — minutes bucket (60_000 <= ms < 3_600_000)', () => {
   test('60_000 returns "1m 0s" (lower boundary, inclusive)', () => {
     expect(formatDuration(60_000)).toBe('1m 0s');
   });
@@ -83,12 +83,12 @@ describe('formatDuration — minutes (60_000 <= ms < 3_600_000)', () => {
     expect(formatDuration(3_599_000)).toBe('59m 59s');
   });
 
-  test('3_599_999 returns "59m 59s" (just below 1h boundary, floored seconds)', () => {
+  test('3_599_999 returns "59m 59s" (just below 1h boundary)', () => {
     expect(formatDuration(3_599_999)).toBe('59m 59s');
   });
 });
 
-describe('formatDuration — hours (ms >= 3_600_000)', () => {
+describe('formatDuration — hours bucket (ms >= 3_600_000)', () => {
   test('3_600_000 returns "1h 0m" (lower boundary, inclusive)', () => {
     expect(formatDuration(3_600_000)).toBe('1h 0m');
   });
@@ -101,8 +101,7 @@ describe('formatDuration — hours (ms >= 3_600_000)', () => {
     expect(formatDuration(3_725_000)).toBe('1h 2m');
   });
 
-  test('seconds are dropped at the hour boundary', () => {
-    // 1h 2m 5s — the 5s portion must NOT appear in the output
+  test('seconds component dropped at hour boundary', () => {
     const out = formatDuration(3_725_000);
     expect(out).not.toMatch(/\d+s/);
     expect(out).toBe('1h 2m');
@@ -112,7 +111,7 @@ describe('formatDuration — hours (ms >= 3_600_000)', () => {
     expect(formatDuration(7_200_000)).toBe('2h 0m');
   });
 
-  test('large value 86_400_000 (24h) returns "24h 0m"', () => {
+  test('86_400_000 (24h) returns "24h 0m"', () => {
     expect(formatDuration(86_400_000)).toBe('24h 0m');
   });
 
@@ -122,20 +121,20 @@ describe('formatDuration — hours (ms >= 3_600_000)', () => {
   });
 });
 
-describe('formatDuration — fractional ms floor before formatting', () => {
-  test('0.5 returns "0ms" (floors to 0)', () => {
+describe('formatDuration — fractional ms are floored before formatting', () => {
+  test('0.5 returns "0ms"', () => {
     expect(formatDuration(0.5)).toBe('0ms');
   });
 
-  test('999.9 returns "999ms" (spec example — floors to 999, stays sub-second)', () => {
+  test('999.9 returns "999ms" (spec example, stays sub-second)', () => {
     expect(formatDuration(999.9)).toBe('999ms');
   });
 
-  test('1000.7 returns "1s" (floor ms then divide)', () => {
+  test('1000.7 returns "1s"', () => {
     expect(formatDuration(1000.7)).toBe('1s');
   });
 
-  test('1999.9 returns "1s" (floors ms then seconds)', () => {
+  test('1999.9 returns "1s"', () => {
     expect(formatDuration(1999.9)).toBe('1s');
   });
 
@@ -154,74 +153,74 @@ describe('formatDuration — invalid inputs throw TypeError', () => {
     expect(() => formatDuration(-1)).toThrow('formatDuration: ms must be non-negative');
   });
 
-  test('large negative throws TypeError with non-negative message', () => {
+  test('large negative -1000 throws non-negative message', () => {
     expect(() => formatDuration(-1000)).toThrow('formatDuration: ms must be non-negative');
   });
 
-  test('negative fractional throws TypeError with non-negative message', () => {
+  test('negative fractional -0.5 throws non-negative message', () => {
     expect(() => formatDuration(-0.5)).toThrow('formatDuration: ms must be non-negative');
   });
 
-  test('string "100" throws TypeError with non-finite message', () => {
+  test('string "100" throws TypeError with finite-number message', () => {
     expect(() => formatDuration('100')).toThrow(TypeError);
     expect(() => formatDuration('100')).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('empty string throws TypeError with non-finite message', () => {
+  test('empty string throws finite-number message', () => {
     expect(() => formatDuration('')).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('null throws TypeError with non-finite message', () => {
+  test('null throws TypeError with finite-number message', () => {
     expect(() => formatDuration(null)).toThrow(TypeError);
     expect(() => formatDuration(null)).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('undefined throws TypeError with non-finite message', () => {
+  test('undefined throws TypeError with finite-number message', () => {
     expect(() => formatDuration(undefined)).toThrow(TypeError);
     expect(() => formatDuration(undefined)).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('no-argument call throws TypeError with non-finite message', () => {
+  test('no-argument call throws finite-number message', () => {
     expect(() => formatDuration()).toThrow(TypeError);
     expect(() => formatDuration()).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('NaN throws TypeError with non-finite message', () => {
+  test('NaN throws TypeError with finite-number message', () => {
     expect(() => formatDuration(NaN)).toThrow(TypeError);
     expect(() => formatDuration(NaN)).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('Infinity throws TypeError with non-finite message', () => {
+  test('Infinity throws TypeError with finite-number message', () => {
     expect(() => formatDuration(Infinity)).toThrow(TypeError);
     expect(() => formatDuration(Infinity)).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('-Infinity throws TypeError with non-finite message', () => {
+  test('-Infinity throws TypeError with finite-number message', () => {
     expect(() => formatDuration(-Infinity)).toThrow(TypeError);
     expect(() => formatDuration(-Infinity)).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('boolean true throws TypeError with non-finite message', () => {
+  test('boolean true throws finite-number message', () => {
     expect(() => formatDuration(true)).toThrow(TypeError);
     expect(() => formatDuration(true)).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('boolean false throws TypeError with non-finite message', () => {
+  test('boolean false throws finite-number message', () => {
     expect(() => formatDuration(false)).toThrow(TypeError);
     expect(() => formatDuration(false)).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('plain object throws TypeError with non-finite message', () => {
+  test('plain object throws finite-number message', () => {
     expect(() => formatDuration({})).toThrow(TypeError);
     expect(() => formatDuration({})).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('array throws TypeError with non-finite message', () => {
+  test('array throws finite-number message', () => {
     expect(() => formatDuration([1])).toThrow(TypeError);
     expect(() => formatDuration([1])).toThrow('formatDuration: ms must be a finite number');
   });
 
-  test('error is a TypeError instance (not generic Error)', () => {
+  test('thrown error is a TypeError instance (not generic Error)', () => {
     try {
       formatDuration(-1);
       throw new Error('expected throw');
@@ -264,7 +263,7 @@ describe('formatDuration — return type and shape', () => {
     expect(formatDuration(3_599_000)).toMatch(/^\d+m \d+s$/);
   });
 
-  test('hours output matches /^\\d+h \\d+m$/ and contains no seconds component', () => {
+  test('hours output matches /^\\d+h \\d+m$/ (no seconds component)', () => {
     expect(formatDuration(3_600_000)).toMatch(/^\d+h \d+m$/);
     expect(formatDuration(3_725_000)).toMatch(/^\d+h \d+m$/);
     expect(formatDuration(86_400_000)).toMatch(/^\d+h \d+m$/);
@@ -272,7 +271,7 @@ describe('formatDuration — return type and shape', () => {
 });
 
 describe('formatDuration — boundary integration sweep', () => {
-  test('full sweep across all four buckets in one pass', () => {
+  test('full sweep across all four buckets', () => {
     const cases = [
       [0, '0ms'],
       [1, '1ms'],

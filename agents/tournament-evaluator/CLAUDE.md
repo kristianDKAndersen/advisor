@@ -27,7 +27,7 @@ Parse from `--task`:
 
 ```
 Candidates: [{"sid":"<sid>","strategy":"<strategy>","paths":[...],"summary":"...","worktree_path":"<path>"}, ...]
-Test command: <test_command>
+Test command: <test_command> (global; for reference — per-candidate runs use `candidate.test_command`)
 Repo root: <repo_root>
 ```
 
@@ -41,7 +41,7 @@ If any field is missing or JSON is malformed, send a `question` and halt.
 
 For each candidate:
 
-**1. Run tests:** `cd <worktree_path> && <test_command>`. Exit code 0 → `tests_passing: true`; non-zero → `false`. For counts: parse pytest `-q` summary line (`N passed, M failed`) or jest `--json`. When unparseable, set `tests_total: null, tests_passed: null`. Ranking uses the boolean regardless.
+**1. Run tests:** each candidate entry has its own `test_command` field; use `cd <candidate.worktree_path> && <candidate.test_command>`. The global `Test command` shown in the task is informational only; do NOT use it for per-candidate runs. Exit code 0 → `tests_passing: true`; non-zero → `false`. For counts: parse pytest `-q` summary line (`N passed, M failed`) or jest `--json`. When unparseable, set `tests_total: null, tests_passed: null`. Ranking uses the boolean regardless.
 
 **2. Measure diff:** `git -C <worktree_path> diff --shortstat HEAD` — sum insertions + deletions = `diff_lines`.
 
