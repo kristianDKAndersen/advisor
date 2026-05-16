@@ -306,7 +306,7 @@ async function runEvaluatorPhase(candidates, specBody, keepLosers) {
     die(3, `scores.json is malformed: ${e.message}`);
   }
 
-  if (!scores.winner_sid) {
+  if (!('winner_sid' in scores)) {
     die(3, 'scores.json is missing required field: winner_sid');
   }
 
@@ -372,12 +372,14 @@ function applyWinner(scores, candidateMap, runId) {
         ['-C', wtPath, 'diff', '--cached', '--name-only', 'HEAD'],
         { encoding: 'utf8' },
       ).trim().split('\n').filter(Boolean);
+      process.stderr.write(`[tournament] fallback: copying ${changedFiles.length} changed file(s)...\n`);
       for (const rel of changedFiles) {
         const src = path.join(wtPath, rel);
         const dest = path.join(ADVISOR_ROOT, rel);
         try {
           fs.mkdirSync(path.dirname(dest), { recursive: true });
           fs.copyFileSync(src, dest);
+          process.stderr.write(`[tournament] copied: ${rel}\n`);
         } catch (e) {
           process.stderr.write(`[tournament] warn: failed to copy ${rel}: ${e.message}\n`);
         }
