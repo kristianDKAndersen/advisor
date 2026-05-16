@@ -1,0 +1,572 @@
+#!/usr/bin/env bun
+// tournament — parallel TDD tournament orchestrator.
+//
+// Usage:
+//   bin/tournament --spec <file> [--strategies "s1,s2,s3"] [--keep-losers] [--dry-run] [--run-id <id>]
+//
+// --spec         path to a feature-spec markdown file (REQUIRED)
+// --strategies   comma-separated strategy names; default "minimal-diff,idiomatic-refactor,defensive"
+// --keep-losers  skip deletion of loser worktrees after evaluation; paths logged to stderr (debug)
+// --dry-run      print scores.json and exit 0 without applying winner's changes
+// --run-id <id>  stable run identifier (default: auto-generated timestamp+random)
+//
+// Exit codes:
+//   0  winner applied (or --dry-run, scores printed)
+//   1  no candidate passed tests
+//   2  spec phase failed (missing spec file, spec agent error, missing test_command)
+//   3  evaluator phase failed (agent error, scores.json missing or malformed)
+//   4  worktree creation failed
+
+const fs = require('fs');
+const path = require('path');
+const childProcess = require('child_process');
+const channel = require('../lib/channel');
+const { runParallel } = require('../lib/parallel');
+
+const ADVISOR_ROOT = path.resolve(__dirname, '..');
+const SUMMON_BIN = path.join(ADVISOR_ROOT, 'bin', 'summon');
+
+// ── Worktree tracking ─────────────────────────────────────────────────────────
+
+// Populated as worktrees are created in Phase 1.5.
+const createdWorktrees = new Set();
+// Populated as worktrees are explicitly removed (winner removal + loser teardown).
+const removedWorktrees = new Set();
+// Set once applyWinner identifies the winner's worktree path.
+let winnerWorktreePath = null;
+// Mirror of the parsed --keep-losers flag, needed in the exit handler.
+let keepLosersGlobal = false;
+
+/**
+ * Idempotent cleanup: removes all created worktrees that have not been removed
+ * yet. When keepLosers is true and a winner has been identified, loser
+ * worktrees are skipped (they were already logged to stderr in applyWinner).
+ * If no winner was identified (early exit), all worktrees are removed.
+ */
+function cleanupAllWorktrees() {
+  for (const wtPath of createdWorktrees) {
+    if (removedWorktrees.has(wtPath)) continue;
+    const isLoser = winnerWorktreePath !== null && wtPath !== winnerWorktreePath;
+    if (isLoser && keepLosersGlobal) continue;
+    try {
+      childProcess.execFileSync(
+        'git',
+        ['-C', ADVISOR_ROOT, 'worktree', 'remove', '--force', wtPath],
+        { stdio: 'ignore' },
+      );
+      removedWorktrees.add(wtPath);
+    } catch (_) {}
+  }
+}
+
+process.on('exit', cleanupAllWorktrees);
+
+// ── Argument parsing ──────────────────────────────────────────────────────────
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        out[k] = next;
+        i++;
+      } else {
+        out[k] = true;
+      }
+    }
+  }
+  return out;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function die(code, msg) {
+  process.stderr.write(`[tournament] error: ${msg}\n`);
+  process.exit(code);
+}
+
+/**
+ * Summon an agent via bin/summon (headless). Returns the parsed metadata JSON.
+ * Extracts the JSON line the same way parallel.js does — stdout may contain a
+ * timeline URL line before the JSON payload.
+ */
+function summonAgent(args) {
+  let stdout;
+  try {
+    stdout = childProcess.execFileSync(SUMMON_BIN, args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+  } catch (e) {
+    throw new Error(`bin/summon failed: ${e.message}`);
+  }
+  const braceIdx = stdout.indexOf('{');
+  if (braceIdx === -1) throw new Error(`bin/summon produced no JSON. stdout:\n${stdout}`);
+  return JSON.parse(stdout.slice(braceIdx));
+}
+
+/**
+ * Poll an outbox until a message of the given type arrives or timeout elapses.
+ * Returns the message, or null on timeout.
+ */
+async function pollUntilType(outbox, targetType, timeoutMs = 30 * 60 * 1000, pollMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  let afterSeq = 0;
+  while (Date.now() < deadline) {
+    const msgs = channel.readAfter(outbox, afterSeq);
+    for (const msg of msgs) {
+      afterSeq = Math.max(afterSeq, msg.seq);
+      if (msg.type === targetType) return msg;
+    }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+  return null;
+}
+
+// ── Phase 1: spec agent ───────────────────────────────────────────────────────
+
+async function runSpecPhase(specContents) {
+  process.stderr.write('[tournament] summoning spec agent...\n');
+
+  let meta;
+  try {
+    meta = summonAgent([
+      '--agent', 'spec',
+      '--task', specContents,
+      '--goal', 'tests/ exists with failing test_command in result body',
+    ]);
+  } catch (e) {
+    die(2, `spec agent summon failed: ${e.message}`);
+  }
+
+  process.stderr.write(`[tournament] spec agent sid=${meta.sid} — polling outbox...\n`);
+
+  const resultMsg = await pollUntilType(meta.outbox, 'result');
+  if (!resultMsg) {
+    die(2, 'spec agent timed out without delivering a result');
+  }
+
+  let body = resultMsg.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch (_) {}
+  }
+
+  if (!body || typeof body !== 'object') {
+    die(2, `spec agent result body is not a JSON object: ${JSON.stringify(resultMsg.body)}`);
+  }
+
+  if (body.verdict !== 'complete') {
+    die(2, `spec agent verdict is "${body.verdict}", expected "complete". summary: ${body.summary}`);
+  }
+
+  if (!body.test_command) {
+    die(2, 'spec agent result body is missing required field: test_command');
+  }
+
+  process.stderr.write(`[tournament] spec phase complete. test_command="${body.test_command}"\n`);
+
+  return { specMeta: meta, specBody: body };
+}
+
+// ── Phase 1.5: worktree creation ──────────────────────────────────────────────
+
+/**
+ * Create one detached git worktree per strategy. On any failure, cleans up
+ * already-created worktrees and exits with code 4.
+ */
+function createWorktrees(strategies, runId, headSha) {
+  const worktreeMap = new Map();
+  for (const strategy of strategies) {
+    const wtPath = `/tmp/tournament-${runId}-${strategy}`;
+    let stderr = '';
+    try {
+      childProcess.execFileSync(
+        'git',
+        ['-C', ADVISOR_ROOT, 'worktree', 'add', '--detach', wtPath, headSha],
+        {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      createdWorktrees.add(wtPath);
+      worktreeMap.set(strategy, wtPath);
+    } catch (e) {
+      stderr = (e.stderr || e.message || '').toString().trim();
+      // Attempt cleanup of already-created worktrees before dying.
+      cleanupAllWorktrees();
+      die(4, `worktree creation failed for strategy "${strategy}": ${stderr}`);
+    }
+  }
+  return worktreeMap;
+}
+
+/**
+ * Copy spec test files into each worktree. Paths in specBody.paths are
+ * absolute; derive relative paths against specMeta.outputDir, then copy to
+ * <worktree>/<rel>. Falls back to tests/<basename> if outputDir is unavailable.
+ */
+function copyTestFilesIntoWorktrees(specBody, specMeta, worktreeMap) {
+  const testPaths = specBody.paths || [];
+  const outputDir = specMeta && specMeta.outputDir;
+
+  for (const [, wtPath] of worktreeMap.entries()) {
+    for (const srcPath of testPaths) {
+      let rel;
+      if (outputDir && srcPath.startsWith(outputDir + path.sep)) {
+        rel = path.relative(outputDir, srcPath);
+      } else {
+        rel = path.join('tests', path.basename(srcPath));
+      }
+      const dest = path.join(wtPath, rel);
+      try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(srcPath, dest);
+      } catch (e) {
+        process.stderr.write(`[tournament] warn: failed to copy ${srcPath} into ${wtPath}: ${e.message}\n`);
+      }
+    }
+  }
+}
+
+// ── Phase 2: parallel coder workers ───────────────────────────────────────────
+
+function buildCoderBriefs(specContents, specBody, strategies, worktreeMap) {
+  const testPaths = (specBody.paths || []).join(', ') || '(see spec)';
+  return strategies.map(strategy => {
+    const worktreePath = worktreeMap.get(strategy);
+    return {
+      agent: 'coder',
+      task: [
+        specContents,
+        `Strategy: ${strategy}`,
+        `Test command: ${specBody.test_command}`,
+        `Failing tests at: ${testPaths}`,
+        `Worktree: ${worktreePath}`,
+        `Work ONLY inside this worktree. Do not touch the main repository working tree. Run \`cd ${worktreePath}\` first if needed. Implementation files go inside ${worktreePath}, not $OUTPUT_DIR.`,
+        'Make all listed tests pass. Do not modify the test files.',
+      ].join('\n'),
+      goal: `All tests in "${specBody.test_command}" pass. Implementation files written to worktree at ${worktreePath}.`,
+    };
+  });
+}
+
+// ── Phase 3: tournament-evaluator ────────────────────────────────────────────
+
+async function runEvaluatorPhase(candidates, specBody, keepLosers) {
+  const candidatesJson = JSON.stringify(candidates, null, 2);
+  const taskText = [
+    `Candidates: ${candidatesJson}`,
+    `Test command: ${specBody.test_command}`,
+    `Repo root: ${ADVISOR_ROOT}`,
+    keepLosers ? 'Keep loser worktrees after evaluation (--keep-losers was passed).' : '',
+  ].filter(Boolean).join('\n');
+
+  process.stderr.write('[tournament] summoning tournament-evaluator...\n');
+
+  let meta;
+  try {
+    meta = summonAgent([
+      '--agent', 'tournament-evaluator',
+      '--task', taskText,
+      '--goal', 'scores.json written with winner_sid',
+    ]);
+  } catch (e) {
+    die(3, `tournament-evaluator summon failed: ${e.message}`);
+  }
+
+  process.stderr.write(`[tournament] evaluator sid=${meta.sid} — polling outbox...\n`);
+
+  const resultMsg = await pollUntilType(meta.outbox, 'result');
+  if (!resultMsg) {
+    die(3, 'tournament-evaluator timed out without delivering a result');
+  }
+
+  let body = resultMsg.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch (_) {}
+  }
+
+  if (!body || typeof body !== 'object') {
+    die(3, `evaluator result body is not a JSON object: ${JSON.stringify(resultMsg.body)}`);
+  }
+
+  // Read scores.json from evaluator's outputDir.
+  const scoresPath = path.join(meta.outputDir, 'scores.json');
+  if (!fs.existsSync(scoresPath)) {
+    die(3, `scores.json not found at expected path: ${scoresPath}`);
+  }
+
+  let scores;
+  try {
+    scores = JSON.parse(fs.readFileSync(scoresPath, 'utf8'));
+  } catch (e) {
+    die(3, `scores.json is malformed: ${e.message}`);
+  }
+
+  if (!scores.winner_sid) {
+    die(3, 'scores.json is missing required field: winner_sid');
+  }
+
+  return { scores, scoresPath, evaluatorMeta: meta };
+}
+
+// ── Phase 4: apply winner ─────────────────────────────────────────────────────
+
+function applyWinner(scores, candidateMap, runId) {
+  const winnerSid = scores.winner_sid;
+  const candidate = candidateMap.get(winnerSid);
+
+  if (!candidate) {
+    die(3, `winner_sid "${winnerSid}" not found among candidate sids: ${[...candidateMap.keys()].join(', ')}`);
+  }
+
+  const wtPath = candidate.worktree_path;
+  if (!wtPath) {
+    die(3, 'winner candidate has no worktree_path');
+  }
+
+  winnerWorktreePath = wtPath;
+
+  process.stderr.write(`[tournament] applying winner sid=${winnerSid} strategy=${candidate.strategy} via git patch...\n`);
+
+  const patchFile = `/tmp/tournament-winner-${runId}.patch`;
+
+  // Step a: create patch from winner worktree diff.
+  // Stage everything (including untracked new files) so git diff --cached sees them.
+  try {
+    childProcess.execFileSync('git', ['-C', wtPath, 'add', '-A'], { stdio: 'ignore' });
+  } catch (e) {
+    die(3, `failed to stage winner worktree changes: ${e.message}`);
+  }
+  try {
+    const patch = childProcess.execFileSync(
+      'git',
+      ['-C', wtPath, 'diff', '--cached', 'HEAD'],
+      { encoding: 'utf8' },
+    );
+    fs.writeFileSync(patchFile, patch);
+  } catch (e) {
+    die(3, `failed to create winner patch: ${e.message}`);
+  }
+
+  // Step b: apply patch to main repo.
+  let patchApplied = false;
+  try {
+    childProcess.execFileSync(
+      'git',
+      ['-C', ADVISOR_ROOT, 'apply', '--whitespace=nowarn', patchFile],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    patchApplied = true;
+  } catch (_) {}
+
+  // Step c: fallback to file copy if patch failed.
+  if (!patchApplied) {
+    process.stderr.write('[tournament] warning: patch did not apply cleanly — fell back to file copy.\n');
+    try {
+      const changedFiles = childProcess.execFileSync(
+        'git',
+        ['-C', wtPath, 'diff', '--cached', '--name-only', 'HEAD'],
+        { encoding: 'utf8' },
+      ).trim().split('\n').filter(Boolean);
+      for (const rel of changedFiles) {
+        const src = path.join(wtPath, rel);
+        const dest = path.join(ADVISOR_ROOT, rel);
+        try {
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          fs.copyFileSync(src, dest);
+        } catch (e) {
+          process.stderr.write(`[tournament] warn: failed to copy ${rel}: ${e.message}\n`);
+        }
+      }
+    } catch (e) {
+      die(3, `fallback file copy failed: ${e.message}`);
+    }
+  }
+
+  // Step d: remove worktrees.
+  // Winner: always remove.
+  try {
+    childProcess.execFileSync(
+      'git',
+      ['-C', ADVISOR_ROOT, 'worktree', 'remove', '--force', wtPath],
+      { stdio: 'ignore' },
+    );
+    removedWorktrees.add(wtPath);
+  } catch (e) {
+    process.stderr.write(`[tournament] warn: failed to remove winner worktree ${wtPath}: ${e.message}\n`);
+  }
+
+  // Losers: remove unless --keep-losers.
+  for (const [sid, c] of candidateMap.entries()) {
+    if (sid === winnerSid) continue;
+    const loserWt = c.worktree_path;
+    if (!loserWt || removedWorktrees.has(loserWt)) continue;
+    if (keepLosersGlobal) {
+      process.stderr.write(`[tournament] loser worktree (--keep-losers): ${loserWt}\n`);
+    } else {
+      try {
+        childProcess.execFileSync(
+          'git',
+          ['-C', ADVISOR_ROOT, 'worktree', 'remove', '--force', loserWt],
+          { stdio: 'ignore' },
+        );
+        removedWorktrees.add(loserWt);
+      } catch (e) {
+        process.stderr.write(`[tournament] warn: failed to remove loser worktree ${loserWt}: ${e.message}\n`);
+      }
+    }
+  }
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  // Validate --spec.
+  if (!args.spec || args.spec === true) {
+    process.stderr.write('Usage: bin/tournament --spec <file> [--strategies "s1,s2,s3"] [--keep-losers] [--dry-run] [--run-id <id>]\n');
+    process.exit(2);
+  }
+
+  const specFile = path.resolve(args.spec);
+  if (!fs.existsSync(specFile)) {
+    die(2, `spec file not found: ${specFile}`);
+  }
+
+  const specContents = fs.readFileSync(specFile, 'utf8').trim();
+  if (!specContents) {
+    die(2, `spec file is empty: ${specFile}`);
+  }
+
+  const strategiesArg = (typeof args.strategies === 'string' && args.strategies)
+    ? args.strategies
+    : 'minimal-diff,idiomatic-refactor,defensive';
+  const strategies = strategiesArg.split(',').map(s => s.trim()).filter(Boolean);
+  if (strategies.length === 0) {
+    die(2, '--strategies must contain at least one non-empty strategy name');
+  }
+
+  keepLosersGlobal = Boolean(args['keep-losers']);
+  const keepLosers = keepLosersGlobal;
+  const dryRun = Boolean(args['dry-run']);
+
+  const runId = (typeof args['run-id'] === 'string' && args['run-id'])
+    ? args['run-id']
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+  // Phase 1: spec agent.
+  const { specMeta, specBody } = await runSpecPhase(specContents);
+
+  // Phase 1.5: worktree creation.
+
+  // Get HEAD sha.
+  let headSha;
+  try {
+    headSha = childProcess.execFileSync(
+      'git',
+      ['-C', ADVISOR_ROOT, 'rev-parse', 'HEAD'],
+      { encoding: 'utf8' },
+    ).trim();
+  } catch (e) {
+    die(4, `failed to get HEAD sha: ${e.message}`);
+  }
+
+  // Warn if repo is dirty.
+  try {
+    const statusOut = childProcess.execFileSync(
+      'git',
+      ['-C', ADVISOR_ROOT, 'status', '--porcelain'],
+      { encoding: 'utf8' },
+    );
+    if (statusOut.trim()) {
+      process.stderr.write('[tournament] warning: repo has uncommitted changes — winner patch may not apply cleanly.\n');
+    }
+  } catch (_) {}
+
+  process.stderr.write(`[tournament] creating ${strategies.length} worktrees (run_id=${runId}, HEAD=${headSha.slice(0, 8)})...\n`);
+  const worktreeMap = createWorktrees(strategies, runId, headSha);
+  copyTestFilesIntoWorktrees(specBody, specMeta, worktreeMap);
+
+  // Phase 2: parallel coder workers.
+  const briefs = buildCoderBriefs(specContents, specBody, strategies, worktreeMap);
+  process.stderr.write(`[tournament] launching ${briefs.length} coder workers (strategies: ${strategies.join(', ')})...\n`);
+
+  // candidateMap: sid -> { sid, strategy, outputDir, paths, summary, worktree_path }
+  const candidateMap = new Map();
+  const strategyByIndex = strategies;
+
+  let scores = null;
+  let scoresPath = null;
+
+  await runParallel(briefs, {
+    onAllComplete: async (workers, _report) => {
+      // Build candidate entries from worker results.
+      const candidates = [];
+      for (let i = 0; i < workers.length; i++) {
+        const w = workers[i];
+        const strategy = strategyByIndex[i] || `strategy-${i}`;
+        const entry = {
+          sid: w.sid,
+          strategy,
+          paths: w.paths || [],
+          summary: w.summary || '',
+          worktree_path: worktreeMap.get(strategy),
+        };
+        candidates.push(entry);
+        candidateMap.set(w.sid, {
+          ...entry,
+          outputDir: w.outputDir,
+        });
+      }
+
+      process.stderr.write(`[tournament] all ${workers.length} coder workers complete. running evaluator...\n`);
+
+      const result = await runEvaluatorPhase(candidates, specBody, keepLosers);
+      scores = result.scores;
+      scoresPath = result.scoresPath;
+    },
+  });
+
+  if (!scores) {
+    die(3, 'evaluator did not produce scores (onAllComplete did not complete)');
+  }
+
+  // Check that at least one candidate passed tests.
+  const ranked = scores.ranked || [];
+  const anyPassing = ranked.some(r => r.tests_passing === true);
+  if (!anyPassing) {
+    process.stderr.write('[tournament] no candidate passed all tests.\n');
+    process.stderr.write(`scores.json: ${JSON.stringify(scores, null, 2)}\n`);
+    process.exit(1);
+  }
+
+  // --dry-run: print scores and exit without applying.
+  if (dryRun) {
+    process.stdout.write(JSON.stringify(scores, null, 2) + '\n');
+    process.stderr.write(`[tournament] --dry-run: scores printed, no changes applied. scores at: ${scoresPath}\n`);
+    process.exit(0);
+  }
+
+  // Apply winner.
+  applyWinner(scores, candidateMap, runId);
+
+  const winner = ranked.find(r => r.sid === scores.winner_sid);
+  process.stdout.write([
+    `[tournament] done.`,
+    `  winner:   ${scores.winner_sid} (strategy: ${winner ? winner.strategy : 'unknown'})`,
+    `  rationale: ${scores.rationale || '(none)'}`,
+    `  scores:   ${scoresPath}`,
+  ].join('\n') + '\n');
+
+  process.exit(0);
+}
+
+main().catch(e => {
+  process.stderr.write(`[tournament] fatal: ${e.message}\n${e.stack || ''}\n`);
+  process.exit(3);
+});
