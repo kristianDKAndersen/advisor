@@ -102,14 +102,14 @@ skills/
 | Agent | Role |
 |-------|------|
 | `code-reviewer` | Reviews code for defects on multiple quality dimensions; produces `review.md`; never writes code |
-| `coder` | Implements fixes from a structured spec; edits files in `$REPO` in place; produces `changes.md` |
+| `coder` | Implements fixes from a structured spec; edits files in `$REPO` in place; produces `changes.md`; default workflow is red-green-refactor with pasted command output as evidence (red + green) |
 | `creative` | Runs the `creative-thinking` skill, which orchestrates mapper → 3 of 5 cognitive-persona subagents in parallel → synthesizer via the Task tool; auto-routes to Solo Mode for trivially scoped problems |
 | `deep-researcher` | Heavyweight three-phase investigation (Discovery → Bias Audit → Synthesis); fans out to `bias-auditor` + `report-architect` subagents via Task tool; produces a structured, bias-audited report |
 | `diff-walker` | Cascade-tests a CLAUDE.md prompt edit against a corpus of real tasks on 4 axes; produces `cascade-report.md` |
 | `evaluator` | Scores a worker result on 5 rubric dimensions (factual accuracy, citation precision, completeness, source quality, tool efficiency); produces `scores.json` |
 | `frontend` | Builds self-contained frontend deliverables (landing pages, components, static sites); verifies in browser before reporting |
 | `philpsych` | Writes the character / behavioral section of an agent's system prompt using psychology frameworks (SDT, Big Five, CBT, Stoicism) |
-| `planner` | Decomposes a task into a wave-parallelized plan (files_modified mutex, stable U-IDs, claim-to-evidence DoD, multi-source coverage audit, banned-phrase list, status enum); produces `plan.md` |
+| `planner` | Decomposes a task into a wave-parallelized plan (files_modified mutex, stable U-IDs, claim-to-evidence DoD, multi-source coverage audit, banned-phrase list, status enum); produces `plan.md`; mandates a failing-test subtask in the earliest wave for every behavior change (Test-first ordering) |
 | `researcher` | Executes research tasks (library evaluation, trend scan, fact-finding); cites every non-trivial claim; produces structured reports |
 | `triage` | Classifies a user prompt into a tier and emits a JSON decomposition seed; invoked via `--model claude-sonnet-4-6` for compatibility with auto mode |
 
@@ -131,6 +131,18 @@ council-result.md
 ```
 
 **Escape hatch — Solo Mode:** The skill auto-routes to Solo Mode (no subagents, no fan-out) when the prompt is ≤ 15 words with no domain anchor, or contains "quick check" / "evaluate an idea" / "don't overthink" phrasing. Council is the default behavior for all other prompts; the "opt-in" framing no longer applies.
+
+## Test-driven development (default)
+
+The planner and coder agents use red-green-refactor as their default workflow. No brief annotation is required to activate it.
+
+**Planner:** inserts a failing-test subtask in Wave 0 (or the earliest applicable wave) before every behavior-changing implementation subtask. The implementation subtask's DoD references the test transitioning from failing to passing.
+
+**Coder:** per-fix loop is Red (write or locate failing test, run it, capture failing output) then Green (implement minimum change, re-run, capture passing output) then Verify (syntax check or broader suite). Both runs must be pasted verbatim with the exact command and exit code in `changes.md`. A claim like "test passes" without pasted output is a protocol violation.
+
+**Exemptions:** pure refactors, doc edits, and spikes can be marked `TDD-waived` with a one-line justification. The worker self-documents these in `changes.md`.
+
+**Verdict semantics:** the result envelope downgrades from `complete` to `partial` when any non-waived fix lacks paired red+green evidence. A `partial` verdict on a docs-only or refactor task usually means the worker marked fixes as TDD-waived — read `changes.md` before treating `partial` as a failure.
 
 ## Skills catalog
 

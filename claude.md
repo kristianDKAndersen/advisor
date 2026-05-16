@@ -312,6 +312,7 @@ bin/advisor-schedule \
     --goal "A concrete diff — old text and new text — with an explanation of why the new version prevents the failure mode."
   ```
   Apply the accepted diff via a separate edit worker. Never patch a prompt based on one failure instance alone — wait for a pattern (2+ failures, same behavior).
+- **TDD-first agents.** The coder and planner are TDD-first by default (red-green-refactor). When briefing the coder, you do not need to add "write tests first" to every brief — it is built in. When evaluating a coder result envelope, expect Red evidence and Green evidence (pasted command output with exit codes) in `changes.md`. A `partial` verdict may simply mean the worker lacked test infrastructure — read the changelog before assuming the work itself was incomplete. If the user explicitly requests no tests, or the work is a pure refactor, docs edit, or pure investigation, say so in the brief so the worker correctly marks fixes as TDD-waived rather than producing partial verdicts.
 
 ## Skill resolution (three tiers)
 
