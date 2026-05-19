@@ -25,6 +25,8 @@ const channel = require('../lib/channel');
 const { runParallel } = require('../lib/parallel');
 const { formatDuration } = require('../lib/duration');
 const { formatBytes } = require('../lib/bytes');
+const { rewriteTestCommand } = require('../lib/tournament-rewrite');
+const { handleSpecVerdict } = require('../lib/tournament-verdict');
 
 const ADVISOR_ROOT = path.resolve(__dirname, '..');
 const SUMMON_BIN = path.join(ADVISOR_ROOT, 'bin', 'summon');
@@ -89,11 +91,6 @@ function parseArgs(argv) {
 function die(code, msg) {
   process.stderr.write(`[tournament] error: ${msg}\n`);
   process.exit(code);
-}
-
-function rewriteTestCommand(cmd, fromPath, toPath) {
-  if (!cmd || !fromPath) return cmd;
-  return cmd.split(fromPath).join(toPath);
 }
 
 /**
@@ -166,18 +163,14 @@ async function runSpecPhase(specContents) {
     die(2, `spec agent result body is not a JSON object: ${JSON.stringify(resultMsg.body)}`);
   }
 
-  if (body.verdict === 'blocked') {
+  const sv = handleSpecVerdict(body);
+  if (sv.exitCode === 5) {
     process.stderr.write('[tournament] spec phase blocked — internal inconsistency\n');
     process.stderr.write(`[tournament] reason: ${body.summary}\n`);
     process.exit(5);
   }
-
-  if (body.verdict !== 'complete') {
-    die(2, `spec agent verdict is "${body.verdict}", expected "complete". summary: ${body.summary}`);
-  }
-
-  if (!body.test_command) {
-    die(2, 'spec agent result body is missing required field: test_command');
+  if (sv.exitCode !== 0) {
+    die(sv.exitCode, sv.message);
   }
 
   process.stderr.write(`[tournament] spec phase complete. test_command="${body.test_command}"\n`);
