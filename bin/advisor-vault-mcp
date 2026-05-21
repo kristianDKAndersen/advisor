@@ -1,0 +1,224 @@
+#!/usr/bin/env bun
+// advisor-vault-mcp — JSON-RPC 2.0 MCP stdio server for the advisor vault.
+// Protocol: newline-delimited JSON (each request/response is one JSON line on stdout).
+// This is simpler than Content-Length/LSP framing and sufficient for all MCP clients
+// that support the newline-delimited variant (including Claude Desktop and claude-code).
+// Tools: search, backlinks, neighbors, shortest_path, hubs, gaps, due.
+// Vault functions are loaded lazily so that initialize/tools-list work even when
+// bun:sqlite is unavailable (e.g. piped through node for a basic handshake test).
+
+import { createInterface } from 'readline';
+
+let _vault = null;
+async function vault() {
+  if (!_vault) _vault = await import('../lib/vault.js');
+  return _vault;
+}
+
+const TOOLS = [
+  {
+    name: 'search',
+    description: 'Full-text search the vault. Optional filters: type, agent, material.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Max results (default 10)' },
+        type: { type: 'string', description: 'Filter by note type' },
+        agent: { type: 'string', description: 'Filter by agent name' },
+        material: { type: 'string', description: 'Filter by material (yes|no|partial)' }
+      },
+      required: ['text']
+    }
+  },
+  {
+    name: 'backlinks',
+    description: 'Return all notes that contain a wikilink to the given note.',
+    inputSchema: {
+      type: 'object',
+      properties: { note: { type: 'string', description: 'Note name or path' } },
+      required: ['note']
+    }
+  },
+  {
+    name: 'neighbors',
+    description: 'Return notes directly adjacent (in or out links) to the given note, with link kind and confidence.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        note: { type: 'string', description: 'Note name or path' },
+        depth: { type: 'number', description: 'Hop depth (default 1; currently only 1 is supported)' }
+      },
+      required: ['note']
+    }
+  },
+  {
+    name: 'shortest_path',
+    description: 'Find shortest link path between two notes using a SQLite recursive CTE.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: 'Starting note name or path' },
+        to: { type: 'string', description: 'Target note name or path' }
+      },
+      required: ['from', 'to']
+    }
+  },
+  {
+    name: 'hubs',
+    description: 'Return the top-N notes by in-degree (most linked-to).',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'number', description: 'Number of results (default 20)' } }
+    }
+  },
+  {
+    name: 'gaps',
+    description: 'Return synthesis notes with worker_verdict=blocked that have no corresponding lesson note.',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'number', description: 'Number of results (default 20)' } }
+    }
+  },
+  {
+    name: 'due',
+    description: 'Return reminder notes due within the next N days.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max results (default 20)' },
+        window_days: { type: 'number', description: 'Look-ahead window in days (default 14)' }
+      }
+    }
+  },
+  {
+    name: 'communities',
+    description: 'Return the top-N communities by node count with sample member names. Pass recompute=true to re-run Louvain before listing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Number of communities to return (default 20)' },
+        recompute: { type: 'boolean', description: 'Re-run Louvain algorithm before listing (default false)' }
+      }
+    }
+  }
+];
+
+async function dispatch(name, params) {
+  const v = await vault();
+  switch (name) {
+    case 'search': {
+      let results = v.searchNotes(params.text, params.limit ?? 10);
+      if (params.type) results = results.filter(r => r.type === params.type);
+      if (params.agent) results = results.filter(r => r.agent === params.agent);
+      if (params.material) results = results.filter(r => r.material === params.material);
+      return results;
+    }
+    case 'backlinks':
+      return v.backlinks(params.note);
+    case 'neighbors':
+      return v.neighbors(params.note, params.depth ?? 1);
+    case 'shortest_path':
+      return v.shortestPath(params.from, params.to);
+    case 'hubs':
+      return v.listHubs(params.limit ?? 20);
+    case 'gaps':
+      return v.listGaps(params.limit ?? 20);
+    case 'due': {
+      const today = new Date().toISOString().slice(0, 10);
+      const rows = v.listDue(today, params.window_days ?? 14);
+      return rows.slice(0, params.limit ?? 20);
+    }
+    case 'communities': {
+      if (params.recompute) await v.computeCommunities();
+      return v.listCommunities(params.limit ?? 20);
+    }
+    default:
+      throw { code: -32601, message: `Unknown tool: ${name}` };
+  }
+}
+
+async function handle(req) {
+  const id = req.id ?? null;
+
+  if (req.method === 'initialize') {
+    return {
+      jsonrpc: '2.0', id,
+      result: {
+        protocolVersion: req.params?.protocolVersion ?? '2024-11-05',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'advisor-vault-mcp', version: '1.0.0' }
+      }
+    };
+  }
+
+  if (req.method === 'notifications/initialized') return null;
+
+  if (req.method === 'tools/list') {
+    return { jsonrpc: '2.0', id, result: { tools: TOOLS } };
+  }
+
+  if (req.method === 'tools/call') {
+    const toolName = req.params?.name;
+    const toolArgs = req.params?.arguments ?? {};
+    try {
+      const data = await dispatch(toolName, toolArgs);
+      return {
+        jsonrpc: '2.0', id,
+        result: { content: [{ type: 'text', text: JSON.stringify(data) }] }
+      };
+    } catch (e) {
+      return {
+        jsonrpc: '2.0', id,
+        error: { code: e.code ?? -32000, message: e.message ?? String(e) }
+      };
+    }
+  }
+
+  return {
+    jsonrpc: '2.0', id,
+    error: { code: -32601, message: `Unknown method: ${req.method}` }
+  };
+}
+
+const rl = createInterface({ input: process.stdin, terminal: false });
+const pending = new Set();
+let inputDone = false;
+
+function tryExit() {
+  if (inputDone && pending.size === 0) process.exit(0);
+}
+
+rl.on('line', (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let req;
+  try {
+    req = JSON.parse(trimmed);
+  } catch (_) {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0', id: null,
+      error: { code: -32700, message: 'Parse error' }
+    }) + '\n');
+    return;
+  }
+  const p = handle(req).then(resp => {
+    if (resp !== null) {
+      process.stdout.write(JSON.stringify(resp) + '\n');
+    }
+  }).catch(err => {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0', id: req.id ?? null,
+      error: { code: -32000, message: String(err) }
+    }) + '\n');
+  }).finally(() => {
+    pending.delete(p);
+    tryExit();
+  });
+  pending.add(p);
+});
+
+rl.on('close', () => {
+  inputDone = true;
+  tryExit();
+});
