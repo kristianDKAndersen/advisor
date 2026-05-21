@@ -26,6 +26,7 @@ TIMEOUT_SEC="900"
 REQUIRED_OUTPUT=""
 TUI=""
 NO_TIMELINE=""
+SUB_TEAM=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --required-output) REQUIRED_OUTPUT="$2"; shift 2 ;;
     --tui)            TUI=1;               shift ;;
     --no-timeline)    NO_TIMELINE=1;       shift ;;
+    --sub-team)       SUB_TEAM=1;          shift ;;
     -h|--help)
       echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--tui] [--no-timeline] [--sid <id>] [--model <model>] [--intelligence <0-100>] [--ensemble <n>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"]"
       exit 0
@@ -69,6 +71,7 @@ NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
 [[ -n "$TIMEOUT_SEC"    ]] && NODE_ARGS+=(--timeoutSec    "$TIMEOUT_SEC")
 [[ -n "$REQUIRED_OUTPUT" ]] && NODE_ARGS+=(--requiredOutput "$REQUIRED_OUTPUT")
 [[ -n "$TUI"            ]] && NODE_ARGS+=(--tui)
+[[ -n "$SUB_TEAM"       ]] && NODE_ARGS+=(--sub-team)
 META=$(node "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
 
 # Parse paths out of the JSON (node one-liner, no deps).
