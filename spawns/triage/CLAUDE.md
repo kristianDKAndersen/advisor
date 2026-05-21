@@ -46,7 +46,7 @@ Emit exactly one JSON object in this shape:
   - `deep_research` — multi-source synthesis requiring several agents
   - `fixated` — the question contains its own framing that may bias the answer
 
-- **recommended_agents** — list agent names that exist in `agents/` directory:
+- **recommended_agents** — list agent names that exist in `spawns/` directory:
   researcher, coder, creative, evaluator, frontend, philpsych, planner, diff-walker (once T-8.1 lands), triage,
   creative-mapper, creative-naturalist, creative-systematist, creative-futurist, creative-oracle, creative-constraintist, creative-synthesizer
 

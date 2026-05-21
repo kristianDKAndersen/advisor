@@ -10,7 +10,7 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..', '..');
 fs.mkdirSync(path.join(ROOT, '.advisor-runs'), { recursive: true });
 
-const agentsDir = path.join(ROOT, 'agents');
+const agentsDir = path.join(ROOT, 'spawns');
 let agents = [];
 if (fs.existsSync(agentsDir)) {
   agents = fs
@@ -19,7 +19,7 @@ if (fs.existsSync(agentsDir)) {
 }
 
 process.stdout.write(
-  `[advisor] ready · agents: ${agents.length ? agents.join(', ') : '(none — add one in agents/)'}\n`
+  `[advisor] ready · agents: ${agents.length ? agents.join(', ') : '(none — add one in spawns/)'}\n`
 );
 
 const runsRoot = process.env.ADVISOR_RUNS_ROOT || path.join(os.homedir(), '.advisor', 'runs');

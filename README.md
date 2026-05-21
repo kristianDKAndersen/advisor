@@ -1,6 +1,6 @@
 # Advisor
 
-A strong-model orchestrator for multi-agent task decomposition. Advisor receives a user prompt, classifies it with a fast triage pre-pass, decomposes it into scoped worker briefs, summons workers via `bin/summon`, and synthesizes their results into a coherent response. Advisor does not execute work it can delegate.
+A strong-model orchestrator for multi-agent task decomposition. Advisor receives a user prompt, decomposes it into scoped worker briefs, summons workers via `bin/summon`, and synthesizes their results into a coherent response. Advisor does not execute work it can delegate.
 
 For the full orchestration protocol, see `CLAUDE.md`.
 
@@ -10,23 +10,19 @@ For the full orchestration protocol, see `CLAUDE.md`.
 User prompt
     │
     ▼
-1. Triage pre-pass  (sonnet, fast)
-   └─ emits: tier, recommended_agents, decomposition_seed, confidence
+1. Decompose → write briefs   (/brief validates 5 required fields)
     │
     ▼
-2. Decompose → write briefs   (/brief validates 5 required fields)
-    │
-    ▼
-3. bin/summon --agent <name> --task "..." --goal "..."  [--model <id>] [--intelligence <score>] [--ensemble N] [--allowedTools <list>]
+2. bin/summon --agent <name> --task "..." --goal "..."  [--model <id>] [--intelligence <score>] [--ensemble N] [--allowed-tools <list>]
    └─ opens Terminal tab, seeds inbox, exports $INBOX/$OUTBOX/$OUTPUT_DIR/$ADV/$REPO
       coder agent: provisions git worktree branch ws/<sid> instead of a copyDir workspace
     │
     ▼
-4. Observe outbox  (tail / recv)
+3. Observe outbox  (tail / recv)
    └─ on `result`: SYNTHESIS REQUIRED block → run /synth before anything else
     │
     ▼
-5. Synthesize → close worker tab → report or spawn refinement worker
+4. Synthesize → close worker tab → report or spawn refinement worker
 ```
 
 Workers run in isolated, ephemeral workspaces. Durable output lands in `$OUTPUT_DIR` (`~/.advisor/runs/<sid>/output/` for self-invocations, `<repo>/.advisor-output/<sid>/` otherwise).
@@ -36,21 +32,30 @@ Workers run in isolated, ephemeral workspaces. Durable output lands in `$OUTPUT_
 ```
 bin/
   advisor-list        # list all sessions under ~/.advisor/runs/ (--json, --repo, --agent)
+  advisor-observe     # tail a session's outbox; emits JSON per message; exits on result/error/timeout (--after, --max-wait, --poll)
   advisor-schedule    # launch autonomous loops detached in a tmux window (--sid, --interval, --task, --once)
   advisor-timeline    # HTTP timeline dashboard on port 7878 — SSE live updates, color-coded by message type
   advisor-vault       # query the native vault index (search / backlinks / path)
-  brief               # validate 5-field brief and emit bin/summon command (auto-populates --allowedTools)
+  advisor-vault-mcp   # JSON-RPC 2.0 MCP stdio server exposing the vault to Claude Desktop and claude-code (internal)
+  brief               # validate 5-field brief and emit bin/summon command (auto-populates --allowed-tools)
+  browser-act         # execute one browser action via the daemon UNIX socket (internal)
+  browser-launch      # start Chrome and browser daemon, print session JSON (internal)
+  browser-state       # read current browser DOM state from the daemon (internal)
+  browser-stop        # stop browser daemon and Chrome for a session (internal)
   close-tab           # close current macOS Terminal tab (called by workers on self-terminate)
   close-worker-tab    # close a specific worker's tab by SID (called by Advisor post-result)
+  run-pipeline        # pipeline orchestrator (internal)
   summon              # provision + open a worker session in a new Terminal tab
+  summon-parallel     # fan out multiple briefs to parallel worker sessions (--briefs <path.json>)
+  tournament          # parallel TDD tournament orchestrator (--spec, --strategies, --keep-losers, --dry-run)
 lib/
   channel.js          # append-only JSONL channel: send / recv / tail / synthesize; acquireSeqLock (mkdir spinlock for seq IDs); Tail class (byte-offset incremental reader)
   session.js          # session plumbing: IDs, workspaces, session.json, output-dir logic
-  summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh; --intelligence flag (resolves tier→model via adapter/intelligence-map.json); --ensemble N (parallel workers + batch envelope); --allowedTools
+  summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh; --intelligence flag (resolves tier→model via adapter/intelligence-map.json); --ensemble N (parallel workers + batch envelope); --allowed-tools (camelCase internally)
   vault.js            # native vault writer + FTS5 search (synthesis notes, session notes, lessons)
 adapter/
   intelligence-map.json  # 4-band tier→model+reasoning manifest used by --intelligence flag
-agents/
+spawns/
   code-reviewer/      # (each contains CLAUDE.md that defines the worker's role)
   coder/
   creative/
@@ -63,7 +68,7 @@ agents/
   researcher/
   triage/
 skills/
-  brief/              # /brief — validates fields and emits bin/summon command (--allowedTools)
+  brief/              # /brief — validates fields and emits bin/summon command (--allowed-tools)
   extract-lesson/     # /extract-lesson — post-mortem analyst; writes negative-polarity lesson notes
   synth/              # /synth — validates fields and runs channel.js synthesize
   worker-protocol/    # /worker-protocol — inbox polling, tracing, self-terminate rules
@@ -75,7 +80,7 @@ skills/
 ~/.advisor/runs/<sid>/
   channel/inbox.jsonl   # Advisor → worker
   channel/outbox.jsonl  # worker → Advisor
-  workspace/            # ephemeral copy of agents/<name>/ — the worker's cwd (coder agent: git worktree at branch ws/<sid>)
+  workspace/            # ephemeral copy of spawns/<name>/ — the worker's cwd (coder agent: git worktree at branch ws/<sid>)
   output/               # durable deliverables (self-invocation) or <repo>/.advisor-output/<sid>/
   meta.json             # session metadata (sid, agent, task, goal, outputDir, repo, …)
   session.json          # tier, decomposition status, next_action (recovery checkpoint)
@@ -95,7 +100,7 @@ skills/
 1. Open this repo in Claude Code. The `.claude/settings.json` activates the Advisor harness and prints an agent banner on session start.
 2. Describe your task. Advisor classifies it, decomposes it, and summons workers automatically.
 3. Each worker opens in a new macOS Terminal tab and reports back via the JSONL channel.
-4. When a worker delivers `result`, the SYNTHESIS REQUIRED block appears. Run `/synth` with the four fields filled in, then `bin/close-worker-tab <sid>`.
+4. When a worker delivers `result`, the SYNTHESIS REQUIRED block appears. Run `/synth` with the four fields filled in. (`bin/close-worker-tab <sid>` is auto-called by synthesize; manual fallback only.)
 
 ## Agents catalog
 
@@ -111,13 +116,18 @@ skills/
 | `philpsych` | Writes the character / behavioral section of an agent's system prompt using psychology frameworks (SDT, Big Five, CBT, Stoicism) |
 | `planner` | Decomposes a task into a wave-parallelized plan (files_modified mutex, stable U-IDs, claim-to-evidence DoD, multi-source coverage audit, banned-phrase list, status enum); produces `plan.md`; mandates a failing-test subtask in the earliest wave for every behavior change (Test-first ordering) |
 | `researcher` | Executes research tasks (library evaluation, trend scan, fact-finding); cites every non-trivial claim; produces structured reports |
-| `triage` | Classifies a user prompt into a tier and emits a JSON decomposition seed; invoked via `--model claude-sonnet-4-6` for compatibility with auto mode |
+| `triage` | *(Deprecated — pre-pass removed 2026-05; Advisor now classifies tier directly.)* Classifies a user prompt into a tier and emits a JSON decomposition seed; available for manual use only |
+| `browser` | Browser automation agent; drives Chrome via the `browser-*` binary suite for web interaction tasks |
+| `coder copy` | TODO: confirm in-use or remove (staging artifact suspected) |
+| `fact-checker` | Spot-checks external-tool pricing, licensing, version, and availability claims against authoritative sources; auto-invoked after synthesis when result body contains dollar amounts, 'free/paid', license names, or version-to-feature assertions |
+| `spec` | TODO: confirm in-use or remove (staging artifact suspected) |
+| `tournament-evaluator` | Scores and ranks competing coder implementations against a shared test suite; used by the `/tournament` skill |
 
 ## Creative Council Mode
 
-The `creative` agent runs the council internally via the **`creative-thinking` skill** (agent-scoped at `agents/creative/.claude/skills/creative-thinking/`). The advisor's only job is to `bin/summon --agent creative` once — no advisor-side persona orchestration.
+The `creative` agent runs the council internally via the **`creative-thinking` skill** (agent-scoped at `spawns/creative/.claude/skills/creative-thinking/`). The advisor's only job is to `bin/summon --agent creative` once — no advisor-side persona orchestration.
 
-Pipeline (run inside the creative agent via the Task tool, enabled by `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `agents/creative/.claude/settings.json`):
+Pipeline (run inside the creative agent via the Task tool, enabled by `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `spawns/creative/.claude/settings.json`):
 
 ```
 mapper  →  forbidden-ideas.md + assumptions.md + persona-plan.md
@@ -146,15 +156,28 @@ The planner and coder agents use red-green-refactor as their default workflow. N
 
 ## Skills catalog
 
-Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a slash command. The `creative-thinking` skill is **agent-scoped** — it lives at `agents/creative/.claude/skills/creative-thinking/`, not in the top-level `skills/` directory, and is only available within the `creative` agent's session.
+Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a slash command. The `creative-thinking` skill is **agent-scoped** — it lives at `spawns/creative/.claude/skills/creative-thinking/`, not in the top-level `skills/` directory, and is only available within the `creative` agent's session.
 
 | Skill | Purpose |
 |-------|---------|
-| `/brief` | Validates 5 required fields (objective, output, tools, scope, parallelism) then emits a `bin/summon` command; auto-populates `--allowedTools` from the brief's tools field and accepts `--intelligence` to resolve model via `adapter/intelligence-map.json` |
+| `/brief` | Validates 5 required fields (objective, output, tools, scope, parallelism) then emits a `bin/summon` command; auto-populates `--allowed-tools` from the brief's tools field and accepts `--intelligence` to resolve model via `adapter/intelligence-map.json` |
 | `/synth` | Validates 4 required fields (sid, seq, established, gap) then invokes `channel.js synthesize` |
 | `/extract-lesson` | Post-mortem analyst — turns a `verdict=blocked, material=yes` synthesis into a negative-polarity lesson note in the vault; auto-triggered on the 2nd evaluator failure for the same task shape |
 | `/worker-protocol` | Loads inbox-polling rules, tracing cadence, and self-terminate behavior into a worker session |
 | `/creative-thinking` | **Agent-scoped** (creative agent only) — orchestrates mapper → 3 of 5 cognitive-persona subagents in parallel → synthesizer via the Task tool; returns `council-result.md`; auto-routes to Solo Mode for trivially scoped prompts |
+| `/tournament` | Runs a parallel TDD tournament — summons N coder workers each with a different strategy, evaluates all against a shared test suite via `tournament-evaluator`, and applies the winning implementation; uses `bin/tournament` |
+
+## Reference docs
+
+The `docs/` directory contains reference materials for advanced features:
+
+| File | Description |
+|------|-------------|
+| `docs/tournament-contract.md` | Tournament protocol specification — defines the contract between spec agent, coder workers, and tournament-evaluator |
+| `docs/tournament-delta.md` | Tournament protocol changelog and delta from prior versions |
+| `docs/specs/` | Additional specification documents |
+| `docs/gunk` | TODO: review and remove if stale |
+| `docs/l-prompt.md` | TODO: review and remove if stale |
 
 ## Channel protocol
 
@@ -247,7 +270,6 @@ The vault is backed by an FTS5 SQLite index at `~/.advisor/vault/.cache/index.sq
 
 ## Guardrails summary
 
-- **Triage first.** Run the triage pre-pass before decomposing. Ratify if `confidence ≥ 0.7`; discard if below.
 - **Brief specificity.** Before summoning, confirm two workers can't end up researching the same thing.
 - **Synthesize before moving on.** Run `/synth` on every `result` before spawning a new worker or reporting to the user.
 - **Spawn-fresh for follow-up.** Workers self-terminate; every refinement is a new `bin/summon` call.

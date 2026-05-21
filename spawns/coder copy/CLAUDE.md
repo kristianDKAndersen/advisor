@@ -99,7 +99,7 @@ Hard rule: every file appears in exactly one row. If a single fix needs files fr
 
 #### Task() invocation
 
-For each worker, call `Task(subagent_type="coder-worker", prompt=...)` (registered at agents/coder/.claude/agents/coder-worker.md — a stripped worker mode that does NOT itself spawn). The prompt must include all of:
+For each worker, call `Task(subagent_type="coder-worker", prompt=...)` (registered at spawns/coder/.claude/agents/coder-worker.md — a stripped worker mode that does NOT itself spawn). The prompt must include all of:
 `worker_id`, `file_list` (absolute paths — "edit ONLY these"), `fix_slice` (verbatim spec items), `read_context` (read-only files), `output_path` (`$OUTPUT_DIR/coder-worker-<N>-changes.md`), `scope_constraints` (paste your scope rules), `escalation_rules` (skip-and-log on edit failure or spec divergence; never halt), `verdict_envelope` (`{"summary":"...","paths":["..."],"verdict":"complete|partial|blocked"}`).
 
 **Spawn all workers in a single assistant turn** (parallel fan-out).

@@ -72,9 +72,9 @@ test('C: composeBootstrapPrompt with discoveryHint:true includes [DISCOVERY_SCAF
   expect(out).toContain('[DISCOVERY_SCAFFOLDING]');
 });
 
-// ── D: resolveNextAgent returns evaluator from real agents/ dir ──────────
+// ── D: resolveNextAgent returns evaluator from real spawns/ dir ──────────
 
-test('D: resolveNextAgent("researcher") returns "evaluator" against real agents/ dir', () => {
+test('D: resolveNextAgent("researcher") returns "evaluator" against real spawns/ dir', () => {
   const { resolveNextAgent } = require('../lib/chain.js');
   const next = resolveNextAgent('researcher');
   expect(next).toBe('evaluator');

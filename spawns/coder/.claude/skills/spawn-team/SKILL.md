@@ -71,7 +71,7 @@ After writing the table, validate it before spawning:
 
 ```bash
 # From your workspace, with $OUTPUT_DIR exported:
-bash "$ADV/agents/coder/.claude/skills/spawn-team/scripts/validate-territory.sh" \
+bash "$ADV/spawns/coder/.claude/skills/spawn-team/scripts/validate-territory.sh" \
   validate "$OUTPUT_DIR/territory.md"
 ```
 
@@ -117,7 +117,7 @@ For each worker, read the final assistant message and extract `summary`, `paths`
 Run the post-spawn check:
 
 ```bash
-bash "$ADV/agents/coder/.claude/skills/spawn-team/scripts/validate-territory.sh" \
+bash "$ADV/spawns/coder/.claude/skills/spawn-team/scripts/validate-territory.sh" \
   verify "$OUTPUT_DIR/territory.md"
 ```
 
