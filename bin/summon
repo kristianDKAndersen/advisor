@@ -18,7 +18,10 @@ MODEL=""
 INTELLIGENCE=""
 ALLOWED_TOOLS=""
 MAX_TOOL_CALLS=""
-TIMEOUT_SEC=""
+# Default 15 min: long enough for planner/researcher passes; can be overridden
+# with --timeout-sec. tmux-runner.js has a 300s safety net if this is unset,
+# which is too aggressive for non-trivial work — hence the explicit default here.
+TIMEOUT_SEC="900"
 REQUIRED_OUTPUT=""
 TUI=""
 NO_TIMELINE=""
@@ -121,11 +124,14 @@ else
     echo "http://127.0.0.1:$TIMELINE_PORT/session/$SID"
   fi
 
-  node "$ROOT/lib/tmux-runner.js" \
+  TIMEOUT_MS=$((TIMEOUT_SEC * 1000))
+  nohup node "$ROOT/lib/tmux-runner.js" \
     --sid "$SID" \
     --launch-script "$LAUNCH_SH" \
     --prompt-file "$PROMPT_FILE" \
-    --log-file "$LOG_FILE"
+    --log-file "$LOG_FILE" \
+    --timeout-ms "$TIMEOUT_MS" \
+    >>"$SESSION_DIR/tmux-runner.log" 2>&1 & disown
 fi
 
 # Emit the full JSON on stdout for the Advisor to consume.
