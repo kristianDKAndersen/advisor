@@ -5,7 +5,7 @@
 //   advisor-vault backlinks --note "sessions/1777631574-208ed7"
 //   advisor-vault path
 
-import { searchNotes, backlinks, listDue, listUnresolved, vaultRoot, rebuildIndex, deleteNote, previewDeleteNote, listHubs, listGaps, backfillVerdicts, retroLink, computeCommunities, listCommunities, embedNotes } from '../lib/vault.js';
+import { searchNotes, backlinks, listDue, listUnresolved, vaultRoot, rebuildIndex, deleteNote, previewDeleteNote, listHubs, listGaps, backfillVerdicts, retroLink, computeCommunities, listCommunities, embedNotes, pruneFixtures } from '../lib/vault.js';
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -49,11 +49,12 @@ if (cmd === 'search') {
   }
 } else if (cmd === 'rebuild') {
   const doEmbed = args.includes('--embed');
-  const embedThreshold = parseFloat(getFlag('--embed-threshold', '0.75'));
+  const embedThreshold = parseFloat(getFlag('--embed-threshold', '0.97'));
+  const embedTopK = parseInt(getFlag('--embed-top-k', '5'), 10);
   const { indexed, communities } = rebuildIndex();
   let msg = `Indexed ${indexed} note(s).`;
   if (doEmbed) {
-    const es = await embedNotes({ threshold: embedThreshold, onlyChanged: true });
+    const es = await embedNotes({ threshold: embedThreshold, topK: embedTopK, onlyChanged: true });
     msg += ` Embedded ${es.embedded} / skipped-hash ${es.skipped_hash}. Semantic links added: ${es.semantic_links_added}.`;
     // Recompute communities so they reflect new semantic edges
     const commResult2 = computeCommunities();
@@ -64,11 +65,21 @@ if (cmd === 'search') {
   console.log(msg);
 } else if (cmd === 'embed') {
   const limit = parseInt(getFlag('--limit', '0'), 10);
-  const threshold = parseFloat(getFlag('--threshold', '0.75'));
+  const threshold = parseFloat(getFlag('--threshold', '0.97'));
+  const topK = parseInt(getFlag('--embed-top-k', '5'), 10);
   const force = args.includes('--force');
-  console.log(`Embedding vault notes (threshold=${threshold}${limit ? `, limit=${limit}` : ''})...`);
-  const result = await embedNotes({ limit, threshold, force });
-  console.log(`Embedded: ${result.embedded}  Skipped-hash: ${result.skipped_hash}  Semantic links added: ${result.semantic_links_added}  Skipped-existing: ${result.semantic_links_skipped_existing}`);
+  const dryRun = args.includes('--dry-run');
+  console.log(`Embedding vault notes (threshold=${threshold}, top-k=${topK}${limit ? `, limit=${limit}` : ''}${dryRun ? ', dry-run' : ''})...`);
+  const result = await embedNotes({ limit, threshold, topK, force, dryRun });
+  if (dryRun) {
+    console.log(`[dry-run] Edges would be inserted: ${result.edges_would_insert}  Skipped-existing: ${result.semantic_links_skipped_existing}`);
+    console.log(`Cosine distribution (pairs ≥ 0.5):`);
+    for (const bucket of ['0.5-0.6', '0.6-0.7', '0.7-0.8', '0.8-0.9', '0.9-0.95', '0.95-1.0']) {
+      console.log(`  [${bucket}]: ${result.histogram[bucket]}`);
+    }
+  } else {
+    console.log(`Embedded: ${result.embedded}  Skipped-hash: ${result.skipped_hash}  Semantic links added: ${result.semantic_links_added}  Skipped-existing: ${result.semantic_links_skipped_existing}`);
+  }
 } else if (cmd === 'delete') {
   const note = getFlag('--note', null);
   if (!note) { console.error('Usage: advisor-vault delete --note <relpath> [--dry-run]'); process.exit(1); }
@@ -133,7 +144,16 @@ if (cmd === 'search') {
       if (titles.length) console.log(`  titles: ${titles.join(' | ').slice(0, 80)}`);
     }
   }
+} else if (cmd === 'prune-fixtures') {
+  const dryRun = args.includes('--dry-run');
+  const minBodyLength = parseInt(getFlag('--min-body-length', '20'), 10);
+  const { count, pruned } = pruneFixtures({ dryRun, minBodyLength });
+  console.log(`${dryRun ? '[dry-run] Would prune' : 'Pruned'}: ${count} note(s) (min-body-length=${minBodyLength})`);
+  for (const n of pruned.slice(0, 20)) {
+    console.log(`  [${n.reason}] ${n.path}  preview: ${n.preview.replace(/\n/g, ' ').slice(0, 60)}`);
+  }
+  if (pruned.length > 20) console.log(`  ... and ${pruned.length - 20} more`);
 } else {
-  console.error('Usage: advisor-vault <search|backlinks|path|due|unresolved|rebuild|embed|delete|hubs|gaps|backfill-verdicts|retro-link|communities> [options]');
+  console.error('Usage: advisor-vault <search|backlinks|path|due|unresolved|rebuild|embed|delete|hubs|gaps|backfill-verdicts|retro-link|communities|prune-fixtures> [options]');
   process.exit(1);
 }
