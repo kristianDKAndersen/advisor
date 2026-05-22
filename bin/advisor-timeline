@@ -83,6 +83,48 @@ function getActiveSessions() {
   return result;
 }
 
+// ── Worker grouping (by agent) ────────────────────────────────────────────────
+function getWorkers(sid) {
+  const msgs = getMessages(sid);
+  const byAgent = {};
+  for (const msg of msgs) {
+    const agent = msg.from || (msg._dir === 'in' ? 'advisor' : 'worker');
+    if (!byAgent[agent]) {
+      byAgent[agent] = [];
+    }
+    byAgent[agent].push(msg);
+  }
+  const result = [];
+  for (const agent in byAgent) {
+    const agentMsgs = byAgent[agent];
+    const latest = agentMsgs[agentMsgs.length - 1];
+    const status = latest ? latest.type : null;
+    let lastProgressBody = null;
+    for (let i = agentMsgs.length - 1; i >= 0; i--) {
+      if (agentMsgs[i].type === 'progress') {
+        lastProgressBody = agentMsgs[i].body;
+        break;
+      }
+    }
+    let resultEnvelope = null;
+    for (let i = agentMsgs.length - 1; i >= 0; i--) {
+      if (agentMsgs[i].type === 'result' && typeof agentMsgs[i].body === 'object') {
+        resultEnvelope = agentMsgs[i].body;
+        break;
+      }
+    }
+    result.push({
+      agent,
+      status,
+      lastProgressBody: lastProgressBody ? (typeof lastProgressBody === 'string' ? lastProgressBody : JSON.stringify(lastProgressBody)) : null,
+      resultEnvelope,
+      messages: agentMsgs,
+      lastTs: latest ? latest.ts : null
+    });
+  }
+  return result;
+}
+
 // ── SSE client registry ───────────────────────────────────────────────────────
 // Map<sid, Map<clientId, {res, afterSeq}>>
 const sseClients = new Map();
@@ -108,238 +150,122 @@ setInterval(() => {
 
 // ── HTML page ─────────────────────────────────────────────────────────────────
 function htmlPage() {
-  return '<!DOCTYPE html>\n' +
-'<html lang="en">\n' +
-'<head>\n' +
-'<meta charset="utf-8">\n' +
-'<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
-'<title>Advisor Timeline</title>\n' +
-'<style>\n' +
-':root {\n' +
-'  --bg:#0f1117; --surface:#1a1d27; --border:#2a2d3e; --text:#e2e4f0;\n' +
-'  --muted:#6b7094; --accent:#7c6af7;\n' +
-'  --c-task:#3b82f6; --c-progress:#f59e0b; --c-result:#22c55e;\n' +
-'  --c-guidance:#f97316; --c-terminate:#ef4444; --c-question:#a855f7; --c-default:#6b7094;\n' +
-'}\n' +
-'* { box-sizing:border-box; margin:0; padding:0; }\n' +
-'body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; font-size:14px; display:flex; flex-direction:column; height:100vh; overflow:hidden; }\n' +
-'.content-row { flex:1; display:flex; min-height:0; overflow:hidden; }\n' +
-'.active-bar { flex-shrink:0; background:var(--surface); border-bottom:1px solid var(--border); padding:7px 16px 9px; }\n' +
-'.active-bar-hdr { display:flex; align-items:center; justify-content:space-between; margin-bottom:5px; }\n' +
-'.active-bar-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); }\n' +
-'.active-link { font-size:12px; color:var(--accent); text-decoration:none; font-weight:600; }\n' +
-'.active-link:hover { text-decoration:underline; }\n' +
-'.active-rows { display:flex; gap:8px; flex-wrap:wrap; min-height:22px; align-items:center; }\n' +
-'.active-empty { font-size:12px; color:var(--muted); }\n' +
-'.active-row { display:flex; align-items:center; gap:6px; padding:4px 10px; border-radius:7px; border:1px solid rgba(124,106,247,.3); background:rgba(124,106,247,.08); text-decoration:none; color:var(--text); overflow:hidden; max-width:640px; }\n' +
-'.active-row:hover { background:rgba(124,106,247,.18); }\n' +
-'.active-row-sid { font-family:monospace; font-size:11px; color:var(--accent); white-space:nowrap; }\n' +
-'.active-row-agent { font-size:12px; font-weight:500; white-space:nowrap; }\n' +
-'.active-row-badge { font-size:10px; font-weight:700; text-transform:uppercase; padding:1px 5px; border-radius:3px; color:#fff; white-space:nowrap; }\n' +
-'.active-row-ts { font-size:11px; color:var(--muted); white-space:nowrap; }\n' +
-'.active-row-body { font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:300px; }\n' +
-'.sidebar { width:260px; min-width:260px; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }\n' +
-'.sidebar-header { padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; letter-spacing:-.03em; font-size:15px; }\n' +
-'.sidebar-header em { color:var(--accent); font-style:normal; }\n' +
-'.session-list { flex:1; overflow-y:auto; padding:8px; }\n' +
-'.session-item { padding:10px 12px; border-radius:8px; cursor:pointer; margin-bottom:4px; border:1px solid transparent; transition:background .15s; }\n' +
-'.session-item:hover { background:rgba(124,106,247,.1); border-color:rgba(124,106,247,.3); }\n' +
-'.session-item.active { background:rgba(124,106,247,.18); border-color:rgba(124,106,247,.55); }\n' +
-'.session-sid { font-family:monospace; font-size:11px; color:var(--muted); margin-bottom:3px; }\n' +
-'.session-agent { font-size:13px; font-weight:500; }\n' +
-'.session-count { font-size:11px; color:var(--muted); margin-top:2px; }\n' +
-'.main { flex:1; display:flex; flex-direction:column; overflow:hidden; }\n' +
-'.main-header { padding:14px 18px; border-bottom:1px solid var(--border); background:var(--surface); display:flex; align-items:center; gap:12px; }\n' +
-'.main-header h2 { font-size:14px; font-weight:600; letter-spacing:-.02em; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }\n' +
-'.live { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }\n' +
-'.live-dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }\n' +
-'.live-dot.on { background:var(--c-result); animation:blink 2s infinite; }\n' +
-'@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }\n' +
-'.wrap { flex:1; overflow-y:auto; padding:20px; }\n' +
-'.timeline { max-width:860px; margin:0 auto; position:relative; padding-left:110px; }\n' +
-'.tl-line { position:absolute; left:100px; top:0; bottom:0; width:2px; background:var(--border); border-radius:1px; }\n' +
-'.entry { display:flex; gap:0; margin-bottom:14px; position:relative; }\n' +
-'.entry-time { position:absolute; left:-110px; width:94px; text-align:right; font-family:monospace; font-size:11px; color:var(--muted); padding-top:13px; }\n' +
-'.entry-dot { position:absolute; left:-6px; top:12px; width:12px; height:12px; border-radius:50%; border:2px solid var(--bg); flex-shrink:0; z-index:1; }\n' +
-'.card { flex:1; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:11px 14px; min-width:0; }\n' +
-'.card-head { display:flex; align-items:center; gap:8px; margin-bottom:7px; }\n' +
-'.badge { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; padding:2px 7px; border-radius:4px; color:#fff; }\n' +
-'.badge-progress { color:#000; }\n' +
-'.badge-result { color:#000; }\n' +
-'.from { font-family:monospace; font-size:12px; color:var(--muted); }\n' +
-'.seq { margin-left:auto; font-family:monospace; font-size:11px; color:var(--muted); }\n' +
-'.body-text { font-size:13px; line-height:1.55; white-space:pre-wrap; word-break:break-word; max-height:180px; overflow:hidden; cursor:pointer; position:relative; }\n' +
-'.body-text.long::after { content:""; position:absolute; bottom:0; left:0; right:0; height:36px; background:linear-gradient(transparent,var(--surface)); }\n' +
-'.body-text.open { max-height:none; }\n' +
-'.body-text.open::after { display:none; }\n' +
-'.empty { text-align:center; color:var(--muted); padding:60px 20px; }\n' +
-'.empty .icon { font-size:30px; margin-bottom:10px; }\n' +
-/* type → dot and badge background colors */
-'.t-task .entry-dot,.t-task .badge{background:var(--c-task)}\n' +
-'.t-progress .entry-dot,.t-progress .badge{background:var(--c-progress)}\n' +
-'.t-result .entry-dot,.t-result .badge{background:var(--c-result)}\n' +
-'.t-guidance .entry-dot,.t-guidance .badge{background:var(--c-guidance)}\n' +
-'.t-terminate .entry-dot,.t-terminate .badge{background:var(--c-terminate)}\n' +
-'.t-question .entry-dot,.t-question .badge{background:var(--c-question)}\n' +
-'.t-default .entry-dot,.t-default .badge{background:var(--c-default)}\n' +
-'::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-track{background:transparent} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}\n' +
-'</style>\n' +
-'</head>\n' +
-'<body>\n' +
-'<div class="active-bar">\n' +
-'  <div class="active-bar-hdr"><span class="active-bar-title">Active Workers</span><a class="active-link" href="/live">Live &nearr;</a></div>\n' +
-'  <div class="active-rows" id="activeList"><span class="active-empty">No active workers.</span></div>\n' +
-'</div>\n' +
-'<div class="content-row">\n' +
-'<div class="sidebar">\n' +
-'  <div class="sidebar-header">Advisor <em>Timeline</em></div>\n' +
-'  <div class="session-list" id="sessionList"><div class="empty"><div class="icon">&#8987;</div>Loading…</div></div>\n' +
-'</div>\n' +
-'<div class="main">\n' +
-'  <div class="main-header">\n' +
-'    <h2 id="mainTitle">Select a session</h2>\n' +
-'    <div class="live"><div class="live-dot" id="liveDot"></div><span id="liveLabel">SSE</span></div>\n' +
-'  </div>\n' +
-'  <div class="wrap">\n' +
-'    <div class="timeline" id="timeline"><div class="empty"><div class="icon">&#128225;</div>Pick a session on the left</div></div>\n' +
-'  </div>\n' +
-'</div>\n' +
-'</div>\n' +
-'<script>\n' +
-'function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}\n' +
-'function fmt(ts){var d=new Date(ts*1000);return d.toLocaleTimeString("en-GB",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"})}\n' +
-'function bodyText(b){if(typeof b==="object"&&b){var p=[];if(b.summary)p.push(b.summary);if(b.verdict)p.push("verdict: "+b.verdict);if(b.paths&&b.paths.length)p.push("paths:\\n  "+b.paths.join("\\n  "));return p.join("\\n")}return String(b||"")}\n' +
-'function typeClass(t){var ok=["task","progress","result","guidance","terminate","question"];return ok.indexOf(t)>=0?"t-"+t:"t-default"}\n' +
-'\n' +
-'function makeEntry(msg){\n' +
-'  var div=document.createElement("div");\n' +
-'  var tc=typeClass(msg.type);\n' +
-'  div.className="entry "+tc;\n' +
-'  var body=bodyText(msg.body);\n' +
-'  var isLong=body.length>260;\n' +
-'  var from=msg.from||(msg._dir==="in"?"advisor":"worker");\n' +
-'  var badgeClass="badge"+(msg.type==="progress"?" badge-progress":msg.type==="result"?" badge-result":"");\n' +
-'  div.innerHTML=\n' +
-'    "<div class=\\"entry-time\\">"+esc(fmt(msg.ts))+"</div>"\n' +
-'    +"<div class=\\"entry-dot\\"></div>"\n' +
-'    +"<div class=\\"card\\">"\n' +
-'      +"<div class=\\"card-head\\">"\n' +
-'        +"<span class=\\""+badgeClass+"\\">"+esc(msg.type)+"</span>"\n' +
-'        +"<span class=\\"from\\">"+esc(from)+"</span>"\n' +
-'        +"<span class=\\"seq\\">#"+esc(msg.seq)+"</span>"\n' +
-'      +"</div>"\n' +
-'      +"<div class=\\"body-text"+(isLong?" long":"")+"\\">"+esc(body)+"</div>"\n' +
-'    +"</div>";\n' +
-'  var bodyEl=div.querySelector(".body-text");\n' +
-'  bodyEl.onclick=function(){this.classList.toggle("open");this.classList.remove("long");};\n' +
-'  return div;\n' +
-'}\n' +
-'\n' +
-'var currentSid=null;\n' +
-'var evtSrc=null;\n' +
-'\n' +
-'function renderTimeline(msgs){\n' +
-'  var tl=document.getElementById("timeline");\n' +
-'  tl.innerHTML="";\n' +
-'  if(!msgs.length){tl.innerHTML="<div class=\\"empty\\"><div class=\\"icon\\">&#128237;</div>No messages yet</div>";return;}\n' +
-'  var line=document.createElement("div");line.className="tl-line";tl.appendChild(line);\n' +
-'  for(var i=0;i<msgs.length;i++)tl.appendChild(makeEntry(msgs[i]));\n' +
-'}\n' +
-'\n' +
-'function appendEntries(msgs){\n' +
-'  var tl=document.getElementById("timeline");\n' +
-'  if(tl.querySelector(".empty")){tl.innerHTML="";var line=document.createElement("div");line.className="tl-line";tl.appendChild(line);}\n' +
-'  for(var i=0;i<msgs.length;i++)tl.appendChild(makeEntry(msgs[i]));\n' +
-'  tl.parentElement.scrollTop=tl.parentElement.scrollHeight;\n' +
-'}\n' +
-'\n' +
-'function loadSession(sid){\n' +
-'  currentSid=sid;\n' +
-'  document.getElementById("mainTitle").textContent=sid;\n' +
-'  document.querySelectorAll(".session-item").forEach(function(el){el.classList.toggle("active",el.dataset.sid===sid);});\n' +
-'  if(evtSrc){evtSrc.close();evtSrc=null;}\n' +
-'  var liveDot=document.getElementById("liveDot");\n' +
-'  liveDot.className="live-dot";\n' +
-'  document.getElementById("liveLabel").textContent="connecting…";\n' +
-'  fetch("/api/sessions/"+encodeURIComponent(sid)+"/messages")\n' +
-'    .then(function(r){return r.json();})\n' +
-'    .then(function(msgs){\n' +
-'      renderTimeline(msgs);\n' +
-'      var maxSeq=msgs.length?Math.max.apply(null,msgs.map(function(m){return m.seq||0;})):0;\n' +
-'      connectSse(sid,maxSeq);\n' +
-'    });\n' +
-'}\n' +
-'\n' +
-'function connectSse(sid,afterSeq){\n' +
-'  var url="/events?sid="+encodeURIComponent(sid)+"&after="+afterSeq;\n' +
-'  evtSrc=new EventSource(url);\n' +
-'  evtSrc.onopen=function(){\n' +
-'    document.getElementById("liveDot").className="live-dot on";\n' +
-'    document.getElementById("liveLabel").textContent="live";\n' +
-'  };\n' +
-'  evtSrc.onmessage=function(e){\n' +
-'    try{\n' +
-'      var ev=JSON.parse(e.data);\n' +
-'      if(ev.event==="messages")appendEntries(ev.msgs);\n' +
-'    }catch(_){}\n' +
-'  };\n' +
-'  evtSrc.onerror=function(){\n' +
-'    document.getElementById("liveDot").className="live-dot";\n' +
-'    document.getElementById("liveLabel").textContent="reconnecting…";\n' +
-'  };\n' +
-'}\n' +
-'\n' +
-'function loadSessions(){\n' +
-'  fetch("/api/sessions")\n' +
-'    .then(function(r){return r.json();})\n' +
-'    .then(function(sessions){\n' +
-'      var list=document.getElementById("sessionList");\n' +
-'      if(!sessions.length){list.innerHTML="<div class=\\"empty\\"><div class=\\"icon\\">&#128193;</div>No sessions found</div>";return;}\n' +
-'      list.innerHTML="";\n' +
-'      for(var i=0;i<sessions.length;i++){\n' +
-'        var s=sessions[i];\n' +
-'        var el=document.createElement("div");\n' +
-'        el.className="session-item";\n' +
-'        el.dataset.sid=s.sid;\n' +
-'        el.innerHTML="<div class=\\"session-sid\\">"+esc(s.sid)+"</div>"\n' +
-'          +"<div class=\\"session-agent\\">"+esc(s.agent||"unknown")+"</div>"\n' +
-'          +"<div class=\\"session-count\\">"+s.count+" message"+(s.count!==1?"s":"")+"</div>";\n' +
-'        el.onclick=(function(id){return function(){loadSession(id);};})(s.sid);\n' +
-'        list.appendChild(el);\n' +
-'      }\n' +
-'    });\n' +
-'}\n' +
-'\n' +
-'var TYPE_COLORS={"task":"var(--c-task)","progress":"var(--c-progress)","result":"var(--c-result)","guidance":"var(--c-guidance)","terminate":"var(--c-terminate)","question":"var(--c-question)"};\n' +
-'function fmtRel(ts){if(!ts)return"";var s=Math.floor(Date.now()/1000-ts);if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";return Math.floor(s/3600)+"h ago";}\n' +
-'function loadActive(){\n' +
-'  fetch("/api/active").then(function(r){return r.json();}).then(function(workers){\n' +
-'    var list=document.getElementById("activeList");\n' +
-'    if(!list)return;\n' +
-'    if(!workers.length){list.innerHTML="<span class=\\"active-empty\\">No active workers.</span>";return;}\n' +
-'    list.innerHTML="";\n' +
-'    for(var i=0;i<workers.length;i++){\n' +
-'      var w=workers[i];\n' +
-'      var el=document.createElement("a");\n' +
-'      el.className="active-row";\n' +
-'      el.href="/session/"+encodeURIComponent(w.sid);\n' +
-'      var shortSid=w.sid.length>20?w.sid.slice(0,10)+"\\u2026"+w.sid.slice(-6):w.sid;\n' +
-'      var tc=TYPE_COLORS[w.lastType]||"var(--c-default)";\n' +
-'      el.innerHTML="<span class=\\"active-row-sid\\">"+esc(shortSid)+"</span>"\n' +
-'        +"<span class=\\"active-row-agent\\">"+esc(w.agent||"unknown")+"</span>"\n' +
-'        +"<span class=\\"active-row-badge\\" style=\\"background:"+tc+"\\">"+esc(w.lastType||"?")+"</span>"\n' +
-'        +"<span class=\\"active-row-ts\\">"+esc(fmtRel(w.lastTs))+"</span>"\n' +
-'        +(w.lastBody?"<span class=\\"active-row-body\\">&mdash; "+esc(w.lastBody)+"</span>":"");\n' +
-'      list.appendChild(el);\n' +
-'    }\n' +
-'  }).catch(function(){});\n' +
-'}\n' +
-'loadActive();\n' +
-'setInterval(loadActive,5000);\n' +
-'loadSessions();\n' +
-'</script>\n' +
-'</body>\n' +
-'</html>\n';
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Advisor Timeline</title>
+<style>
+:root {
+  --bg:#0f1117; --surface:#1a1d27; --border:#2a2d3e; --text:#e2e4f0;
+  --muted:#6b7094; --accent:#7c6af7;
+  --c-task:#3b82f6; --c-progress:#f59e0b; --c-result:#22c55e;
+  --c-guidance:#f97316; --c-terminate:#ef4444; --c-question:#a855f7; --c-default:#6b7094;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; font-size:14px; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+.content-row { flex:1; display:flex; min-height:0; overflow:hidden; }
+.active-bar { flex-shrink:0; background:var(--surface); border-bottom:1px solid var(--border); padding:7px 16px 9px; }
+.active-bar-hdr { display:flex; align-items:center; justify-content:space-between; margin-bottom:5px; }
+.active-bar-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); }
+.active-link { font-size:12px; color:var(--accent); text-decoration:none; font-weight:600; }
+.active-link:hover { text-decoration:underline; }
+.active-rows { display:flex; gap:8px; flex-wrap:wrap; min-height:22px; align-items:center; }
+.active-empty { font-size:12px; color:var(--muted); }
+.active-row { display:flex; align-items:center; gap:6px; padding:4px 10px; border-radius:7px; border:1px solid rgba(124,106,247,.3); background:rgba(124,106,247,.08); text-decoration:none; color:var(--text); overflow:hidden; max-width:640px; }
+.active-row:hover { background:rgba(124,106,247,.18); }
+.active-row-sid { font-family:monospace; font-size:11px; color:var(--accent); white-space:nowrap; }
+.active-row-agent { font-size:12px; font-weight:500; white-space:nowrap; }
+.active-row-badge { font-size:10px; font-weight:700; text-transform:uppercase; padding:1px 5px; border-radius:3px; color:#fff; white-space:nowrap; }
+.active-row-ts { font-size:11px; color:var(--muted); white-space:nowrap; }
+.active-row-body { font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:300px; }
+.sidebar { width:260px; min-width:260px; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }
+.sidebar-header { padding:14px 16px; border-bottom:1px solid var(--border); font-weight:700; letter-spacing:-.03em; font-size:15px; }
+.sidebar-header em { color:var(--accent); font-style:normal; }
+.session-list { flex:1; overflow-y:auto; padding:8px; }
+.session-item { padding:10px 12px; border-radius:8px; cursor:pointer; margin-bottom:4px; border:1px solid transparent; transition:background .15s; }
+.session-item:hover { background:rgba(124,106,247,.1); border-color:rgba(124,106,247,.3); }
+.session-item.active { background:rgba(124,106,247,.18); border-color:rgba(124,106,247,.55); }
+.session-sid { font-family:monospace; font-size:11px; color:var(--muted); margin-bottom:3px; }
+.session-agent { font-size:13px; font-weight:500; }
+.session-count { font-size:11px; color:var(--muted); margin-top:2px; }
+.main { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+.main-header { padding:14px 18px; border-bottom:1px solid var(--border); background:var(--surface); display:flex; align-items:center; gap:12px; }
+.main-header h2 { font-size:14px; font-weight:600; letter-spacing:-.02em; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.live { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+.live-dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+.live-dot.on { background:var(--c-result); animation:blink 2s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
+.wrap { flex:1; overflow-y:auto; padding:20px; }
+.workers-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(420px,1fr)); gap:20px; padding:24px; max-width:1600px; margin:0 auto; }
+.worker-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; display:flex; flex-direction:column; gap:14px; }
+.worker-card-header { display:flex; align-items:center; gap:10px; }
+.worker-name { font-family:monospace; font-size:15px; font-weight:700; color:var(--accent); flex:1; }
+.worker-ts { font-size:11px; color:var(--muted); font-family:monospace; }
+.worker-progress-body { font-size:13px; line-height:1.65; color:var(--text); }
+.worker-progress-body pre { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px 12px; overflow-x:auto; font-family:monospace; font-size:12px; }
+.worker-progress-body code { font-family:monospace; background:var(--bg); padding:1px 5px; border-radius:3px; font-size:12px; }
+.worker-progress-body ul { padding-left:20px; }
+.worker-progress-body h1,.worker-progress-body h2,.worker-progress-body h3 { font-size:13px; font-weight:700; margin:8px 0 4px; }
+.worker-result { background:rgba(34,197,94,.07); border:1px solid rgba(34,197,94,.25); border-radius:8px; padding:12px 14px; }
+.worker-result-verdict { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.worker-result-summary { font-size:13px; line-height:1.55; }
+.worker-result-paths { margin-top:8px; }
+.worker-result-paths code { display:block; font-family:monospace; font-size:11px; color:var(--muted); padding:2px 0; }
+.worker-subteam { border-top:1px solid var(--border); padding-top:12px; }
+.subteam-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:10px; }
+.subteam-cards { display:flex; flex-direction:column; gap:8px; }
+.subteam-card { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
+.subteam-card-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.subteam-role { font-family:monospace; font-size:12px; font-weight:600; color:var(--muted); }
+.subteam-summary { font-size:12px; line-height:1.5; color:var(--text); }
+.badge { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; padding:2px 7px; border-radius:4px; color:#fff; }
+.empty { text-align:center; color:var(--muted); padding:60px 20px; }
+.empty .icon { font-size:30px; margin-bottom:10px; }
+::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-track{background:transparent} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
+</head>
+<body>
+<div class="active-bar">
+  <div class="active-bar-hdr"><span class="active-bar-title">Active Workers</span><a class="active-link" href="/live">Live &nearr;</a></div>
+  <div class="active-rows" id="activeList"><span class="active-empty">No active workers.</span></div>
+</div>
+<div class="content-row">
+<div class="sidebar">
+  <div class="sidebar-header">Advisor <em>Timeline</em></div>
+  <div class="session-list" id="sessionList"><div class="empty"><div class="icon">&#8987;</div>Loading…</div></div>
+</div>
+<div class="main">
+  <div class="main-header">
+    <h2 id="mainTitle">Select a session</h2>
+    <div class="live"><div class="live-dot" id="liveDot"></div><span id="liveLabel">SSE</span></div>
+  </div>
+  <div class="wrap">
+    <div class="workers-grid" id="workersGrid"><div class="empty"><div class="icon">&#128225;</div>Pick a session on the left</div></div>
+  </div>
+</div>
+</div>
+<script>
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
+function fmt(ts){var d=new Date(ts*1000);return d.toLocaleTimeString("en-GB",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"})}
+function typeClass(t){var ok=["task","progress","result","guidance","terminate","question"];return ok.indexOf(t)>=0?"t-"+t:"t-default"}
+function renderMd(text){if(!text)return '';var s=String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');s=s.replace(/\`\`\`[\\w]*\\n([\\s\\S]*?)\`\`\`/g,'<pre><code>\$1</code></pre>');s=s.replace(/\`([^\`]+)\`/g,'<code>\$1</code>');s=s.replace(/^### (.+)\$/gm,'<h3>\$1</h3>');s=s.replace(/^## (.+)\$/gm,'<h2>\$1</h2>');s=s.replace(/^# (.+)\$/gm,'<h1>\$1</h1>');s=s.replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>\$1</strong>');s=s.replace(/\\*([^*]+)\\*/g,'<em>\$1</em>');s=s.replace(/((?:^[ \\t]*[-*] .+\\n?)+)/gm,function(block){var items=block.trim().split('\\n').map(function(l){return '<li>'+l.replace(/^[ \\t]*[-*] /,'')+'</li>'}).join('');return '<ul>'+items+'</ul>'});s=s.split(/\\n\\n+/).map(function(p){if(/^<(pre|ul|h[123])/.test(p.trim()))return p;return '<p>'+p.replace(/\\n/g,'<br>')+'</p>'}).join('\\n');return s}
+var currentSid=null;
+var evtSrc=null;
+function loadWorkers(sid){fetch('/api/sessions/'+encodeURIComponent(sid)+'/workers').then(function(r){return r.json();}).then(function(workers){renderWorkerCards(workers,sid);})}
+function renderWorkerCards(workers,sid){var grid=document.getElementById('workersGrid');if(!grid)return;grid.innerHTML='';if(!workers.length){grid.innerHTML='<div class="empty"><div class="icon">&#128237;</div>No messages yet</div>';return;}workers.forEach(function(w){var card=buildWorkerCard(w,sid);grid.appendChild(card);})}
+function buildWorkerCard(w,sid){var div=document.createElement('div');div.className='worker-card';div.dataset.agent=w.agent;var hdr=document.createElement('div');hdr.className='worker-card-header';hdr.innerHTML='<span class="worker-name">'+esc(w.agent||'unknown')+'</span><span class="badge '+typeClass(w.status)+'">'+esc(w.status||'?')+'</span><span class="worker-ts">'+esc(w.lastTs?fmt(w.lastTs):'')+'</span>';div.appendChild(hdr);var progressDiv=document.createElement('div');progressDiv.className='worker-progress-body';progressDiv.innerHTML=renderMd(w.lastProgressBody||'');div.appendChild(progressDiv);if(w.resultEnvelope){var re=w.resultEnvelope;var resultDiv=document.createElement('div');resultDiv.className='worker-result';var verdictColor=re.verdict==='complete'?'var(--c-result)':re.verdict==='partial'?'var(--c-progress)':'var(--c-terminate)';resultDiv.innerHTML='<div class="worker-result-verdict"><span class="badge" style="background:'+verdictColor+'">'+esc(re.verdict||'result')+'</span></div><div class="worker-result-summary">'+esc(re.summary||'')+'</div>'+(re.paths&&re.paths.length?'<div class="worker-result-paths">'+re.paths.map(function(p){return '<code>'+esc(p)+'</code>'}).join('')+'</div>':'');div.appendChild(resultDiv);if(re.sub_team_run_id){var stDiv=document.createElement('div');stDiv.className='worker-subteam';stDiv.innerHTML='<div class="subteam-title">Sub-team: '+esc(re.sub_team_run_id)+'</div><div class="subteam-cards" id="st-'+esc(re.sub_team_run_id)+'">Loading...</div>';div.appendChild(stDiv);fetch('/api/sessions/'+encodeURIComponent(sid)+'/sub-team-run/'+encodeURIComponent(re.sub_team_run_id)).then(function(r){return r.json();}).then(function(data){var container=document.getElementById('st-'+re.sub_team_run_id);if(!container)return;if(data.error){container.textContent=data.error;return;}var summaries=(data.state&&data.state.final_result&&data.state.final_result.summaries)||[];if(!summaries.length){container.textContent='No completed tasks yet.';return;}container.innerHTML='';summaries.forEach(function(s){var sc=document.createElement('div');sc.className='subteam-card';var result=s.output&&s.output.result?String(s.output.result):'';sc.innerHTML='<div class="subteam-card-header"><span class="subteam-role">'+esc(s.task_id)+'</span>'+(s.input&&s.input.description?'<span style="font-size:11px;color:var(--muted)">'+esc(s.input.description.slice(0,60))+'</span>':'')+'</div><div class="subteam-summary">'+esc(result.slice(0,300))+'</div>';container.appendChild(sc);});}).catch(function(){});}}}return div}
+function loadSession(sid){currentSid=sid;document.getElementById('mainTitle').textContent=sid;document.querySelectorAll('.session-item').forEach(function(el){el.classList.toggle('active',el.dataset.sid===sid);});if(evtSrc){evtSrc.close();evtSrc=null;}var liveDot=document.getElementById('liveDot');liveDot.className='live-dot';document.getElementById('liveLabel').textContent='connecting…';loadWorkers(sid);setTimeout(function(){var maxSeq=0;fetch('/api/sessions/'+encodeURIComponent(sid)+'/workers').then(function(r){return r.json();}).then(function(workers){for(var i=0;i<workers.length;i++){for(var j=0;j<workers[i].messages.length;j++){var seq=workers[i].messages[j].seq||0;if(seq>maxSeq)maxSeq=seq;}}connectSse(sid,maxSeq);});},100);}
+function connectSse(sid,afterSeq){var url='/events?sid='+encodeURIComponent(sid)+'&after='+afterSeq;evtSrc=new EventSource(url);evtSrc.onopen=function(){document.getElementById('liveDot').className='live-dot on';document.getElementById('liveLabel').textContent='live';};evtSrc.onmessage=function(e){try{var ev=JSON.parse(e.data);if(ev.event==='messages')loadWorkers(sid);}catch(_){}};evtSrc.onerror=function(){document.getElementById('liveDot').className='live-dot';document.getElementById('liveLabel').textContent='reconnecting…';};}
+function loadSessions(){fetch('/api/sessions').then(function(r){return r.json();}).then(function(sessions){var list=document.getElementById('sessionList');if(!sessions.length){list.innerHTML='<div class="empty"><div class="icon">&#128193;</div>No sessions found</div>';return;}list.innerHTML='';for(var i=0;i<sessions.length;i++){var s=sessions[i];var el=document.createElement('div');el.className='session-item';el.dataset.sid=s.sid;el.innerHTML='<div class="session-sid">'+esc(s.sid)+'</div><div class="session-agent">'+esc(s.agent||'unknown')+'</div><div class="session-count">'+s.count+' message'+(s.count!==1?'s':'')+'</div>';el.onclick=(function(id){return function(){loadSession(id);}})(s.sid);list.appendChild(el);}})}
+var TYPE_COLORS={"task":"var(--c-task)","progress":"var(--c-progress)","result":"var(--c-result)","guidance":"var(--c-guidance)","terminate":"var(--c-terminate)","question":"var(--c-question)"};
+function fmtRel(ts){if(!ts)return"";var s=Math.floor(Date.now()/1000-ts);if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";return Math.floor(s/3600)+"h ago";}
+function loadActive(){fetch('/api/active').then(function(r){return r.json();}).then(function(workers){var list=document.getElementById('activeList');if(!list)return;if(!workers.length){list.innerHTML='<span class="active-empty">No active workers.</span>';return;}list.innerHTML='';for(var i=0;i<workers.length;i++){var w=workers[i];var el=document.createElement('a');el.className='active-row';el.href='/session/'+encodeURIComponent(w.sid);var shortSid=w.sid.length>20?w.sid.slice(0,10)+'…'+w.sid.slice(-6):w.sid;var tc=TYPE_COLORS[w.lastType]||'var(--c-default)';el.innerHTML='<span class="active-row-sid">'+esc(shortSid)+'</span><span class="active-row-agent">'+esc(w.agent||'unknown')+'</span><span class="active-row-badge" style="background:'+tc+'">'+esc(w.lastType||'?')+'</span><span class="active-row-ts">'+esc(fmtRel(w.lastTs))+'</span>'+(w.lastBody?'<span class="active-row-body">— '+esc(w.lastBody)+'</span>':'');list.appendChild(el);}}).catch(function(){});}
+loadActive();setInterval(loadActive,5000);loadSessions();
+</script>
+</body>
+</html>`;
 }
 
 // ── Per-session live page ─────────────────────────────────────────────────────
@@ -825,6 +751,33 @@ const server = http.createServer((req, res) => {
   // Active sessions
   if (req.method === 'GET' && urlPath === '/api/active') {
     jsonRes(res, getActiveSessions());
+    return;
+  }
+
+  // Workers grouped by agent
+  const workersMatch = urlPath.match(/^\/api\/sessions\/([^/]+)\/workers$/);
+  if (req.method === 'GET' && workersMatch) {
+    const sid = decodeURIComponent(workersMatch[1]);
+    jsonRes(res, getWorkers(sid));
+    return;
+  }
+
+  // Sub-team run state and tasks
+  const subteamMatch = urlPath.match(/^\/api\/sessions\/([^/]+)\/sub-team-run\/([^/]+)$/);
+  if (req.method === 'GET' && subteamMatch) {
+    const sid = decodeURIComponent(subteamMatch[1]);
+    const runId = decodeURIComponent(subteamMatch[2]);
+    const stateFile = path.join(RUNS_DIR, sid, 'output', 'sub-team-runs', runId, 'state.json');
+    const taskFile = path.join(RUNS_DIR, sid, 'output', 'sub-team-runs', runId, 'task-list.json');
+    let state = null;
+    let tasks = null;
+    try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch (_) {}
+    try { tasks = JSON.parse(fs.readFileSync(taskFile, 'utf8')); } catch (_) {}
+    if (!state && !tasks) {
+      jsonRes(res, { error: 'not found' }, 404);
+      return;
+    }
+    jsonRes(res, { state, tasks });
     return;
   }
 

@@ -130,7 +130,13 @@ else
       nohup node "$ROOT/bin/advisor-timeline" --port "$TIMELINE_PORT" >>"$HOME/.advisor/timeline.log" 2>&1 &
       disown
     fi
-    echo "http://127.0.0.1:$TIMELINE_PORT/session/$SID"
+    TIMELINE_URL="http://127.0.0.1:$TIMELINE_PORT/session/$SID"
+    echo "$TIMELINE_URL"
+    if [[ "$(uname)" == "Darwin" ]]; then
+      open "$TIMELINE_URL" 2>/dev/null || true
+    else
+      xdg-open "$TIMELINE_URL" 2>/dev/null || true
+    fi
   fi
 
   TIMEOUT_MS=$((TIMEOUT_SEC * 1000))
