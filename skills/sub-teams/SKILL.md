@@ -110,6 +110,9 @@ Parse `state.json`:
 
 ### §4.1 Post-run protocol
 
+Output objects produced by the current advisor sub-teams emit `schema_version:1`.
+When reading historical run artifacts, treat absent `schema_version` as version `0` (legacy).
+
 **5.1** If `phase == "done"` and `failures.length == 0`:
   - Verdict: `complete`
   - Summarize results from `summaries[].output.result`

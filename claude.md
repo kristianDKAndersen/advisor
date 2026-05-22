@@ -198,6 +198,8 @@ written to disk.
 
 Note: the PreCompact hook is now installed in `.claude/settings.json` — it auto-commits a checkpoint (`git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"`) before auto-compaction fires, so the handover write above is already persisted. Caveat GH#13572: PreCompact does not fire on manual `/compact`; in that case, complete the handover write manually before issuing `/compact`, or rely on the Stop hook which fires after every response.
 
+**Active experiment (hook rollout, until 2026-06-01):** planner + researcher at `ADVISOR_WORKER_HOOKS=1`, others at 0. Eval checklist and rollback: `~/.advisor/vault/lessons/manual-20260522-worker-hooks-rollout-advisor-1.md`.
+
 ## Recovery after compression
 
 On resume or after context compression, call `readSessionState(sid)` before

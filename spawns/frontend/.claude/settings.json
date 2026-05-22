@@ -2,7 +2,8 @@
   "agent": "frontend",
   "model": "sonnet",
   "env": {
-    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku",
+    "ADVISOR_WORKER_HOOKS": "0"
   },
   "permissions": {
     "allow": [
@@ -17,6 +18,37 @@
       "Bash(node *)",
       "Bash(bash *)",
       "Bash(mkdir *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $ADV/lib/hooks/worker-trace.js"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $ADV/lib/hooks/worker-inbox-poll.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $ADV/lib/hooks/worker-auto-close.sh"
+          }
+        ]
+      }
     ]
   }
 }

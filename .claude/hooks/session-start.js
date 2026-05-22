@@ -42,3 +42,18 @@ if (fs.existsSync(runsRoot)) {
     }
   }
 }
+
+// Surface vault notes due within the next 14 days (graceful no-op on failure)
+try {
+  const { spawnSync } = require('child_process');
+  const vaultBin = path.join(ROOT, 'bin', 'advisor-vault');
+  const result = spawnSync('bun', [vaultBin, 'due', '--window', '14'], {
+    encoding: 'utf8', timeout: 5000,
+  });
+  const out = (result.stdout || '').trim();
+  if (out && out !== '(no due notes)') {
+    process.stdout.write(
+      `[advisor] vault due (next 14d):\n${out.split('\n').map(l => '  ' + l).join('\n')}\n`
+    );
+  }
+} catch (_) {}

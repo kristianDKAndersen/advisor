@@ -34,9 +34,10 @@ if (cmd === 'search') {
   console.log(vaultRoot());
 } else if (cmd === 'due') {
   const today = new Date().toISOString().slice(0, 10);
-  const window = parseInt(getFlag('--window', '14'), 10);
+  const withinStr = getFlag('--within', null);
+  const window = withinStr ? parseInt(withinStr, 10) : parseInt(getFlag('--window', '14'), 10);
   const rows = listDue(today, window);
-  if (!rows.length) { console.log('(no due reminders)'); process.exit(0); }
+  if (!rows.length) { console.log('(no due notes)'); process.exit(0); }
   for (const r of rows) {
     const preview = (r.established || r.body || '').replace(/\n/g, ' ').slice(0, 80);
     console.log(`${r.due_date}  ${r.path} — ${preview}`);

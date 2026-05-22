@@ -71,7 +71,7 @@ Read `input.description`. Use `input.context` to gather needed files or informat
 On success — call complete:
 
 ```bash
-bun {{lib_dir}}/complete.js --run-dir {{run_dir}} --task-id <task_id> --output '{"result":"<what was done>","files_modified":[]}'
+bun {{lib_dir}}/complete.js --run-dir {{run_dir}} --task-id <task_id> --output '{"schema_version":1,"result":"<what was done>","files_modified":[]}'
 ```
 
 The `files_modified` array is optional — populate it for code-edit tasks, leave it empty for analysis or search tasks.
