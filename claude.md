@@ -72,6 +72,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    ```
    Filter the results for entries marked `[lesson]` in the output. If any `[lesson]` entries have `task_type` keywords that match the current task, append a `Prior failure constraints:` section at the bottom of the brief with each lesson's `## Heuristic` text (read the lesson file at the returned path). Omit the section entirely if no matching lessons are found — do not inject empty or irrelevant lessons.
 
+   Note: lessons and other vault notes due in the next 14 days are also surfaced by the SessionStart hook at the start of each session; the Step 5 search is still recommended for task-type-specific filtering.
+
    Use `/brief` to compose the brief — it validates all 5 required fields (objective, output, tools, scope, parallelism) and emits the `bin/summon` command. A brief missing any of these five fields produces duplicated work, gaps, or misinterpretation:
    - **Objective:** one sentence on what to answer (not the topic — the question)
    - **Output format:** what the deliverable looks like (bullet list of findings? markdown report? JSON? exact file name?)
@@ -192,13 +194,13 @@ own judgement (long session, many syntheses, repeated rework)), take these steps
 3. Record: active sid, tier, decomposition[] statuses, next_action, and synthesis_seq for each worker.
 4. Issue `/clear`.
 
-The session-start.js hook will surface the last handover on the next session start.
+The session-start.js hook will surface the last handover on the next session start. It also surfaces a 'vault due (next 14d)' banner listing any vault notes due within 14 days, including lessons.
 Do NOT /clear before completing step 2 — the sid is lost after /clear if it is not
 written to disk.
 
 Note: the PreCompact hook is now installed in `.claude/settings.json` — it auto-commits a checkpoint (`git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"`) before auto-compaction fires, so the handover write above is already persisted. Caveat GH#13572: PreCompact does not fire on manual `/compact`; in that case, complete the handover write manually before issuing `/compact`, or rely on the Stop hook which fires after every response.
 
-**Active experiment (hook rollout, until 2026-06-01):** planner + researcher at `ADVISOR_WORKER_HOOKS=1`, others at 0. Eval checklist and rollback: `~/.advisor/vault/lessons/manual-20260522-worker-hooks-rollout-advisor-1.md`.
+**Active experiment (hook rollout, until 2026-06-01):** planner + researcher at `ADVISOR_WORKER_HOOKS=1`, others at 0. When enabled, three PostToolUse hooks (`lib/hooks/worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) automate the trace/recv/close-tab boilerplate that workers otherwise handle manually via the `/worker-protocol` skill. Hooks are an opt-in mechanism; the 14 remaining agents stay at 0 (manual) until the experiment concludes. Eval checklist and rollback: `~/.advisor/vault/lessons/manual-20260522-worker-hooks-rollout-advisor-1.md`.
 
 ## Recovery after compression
 
@@ -267,9 +269,10 @@ bun lib/channel.js tail --file <outbox> --after <N> --timeout 60 --json
 The native vault indexes every synthesis record and session note into `~/.advisor/vault/` as Markdown files with YAML frontmatter, backed by an FTS5 SQLite index. These commands are read-only and safe to run at any time from the advisor repo root.
 
 ```bash
-bin/advisor-vault search --text <keyword>    # BM25 full-text search across all notes
-bin/advisor-vault backlinks --note <name>    # list notes that wikilink to <name>
-bin/advisor-vault path                       # print the vault root path
+bin/advisor-vault search --text <keyword>          # BM25 full-text search across all notes
+bin/advisor-vault backlinks --note <name>          # list notes that wikilink to <name>
+bin/advisor-vault path                             # print the vault root path
+bin/advisor-vault due [--within <days>]            # list all due notes within N days (default 14); returns all note types, not just reminders
 ```
 
 The vault is populated automatically during `bun lib/channel.js synthesize` and when sessions are created via `bin/summon`. Each synthesis note lands at `~/.advisor/vault/synthesis/<sid>-<seq>.md` with frontmatter fields `type`, `sid`, `seq`, `established`, `gap`, `material`, and `next_action`.

@@ -35,7 +35,7 @@ bin/
   advisor-observe     # tail a session's outbox; emits JSON per message; exits on result/error/timeout (--after, --max-wait, --poll)
   advisor-schedule    # launch autonomous loops detached in a tmux window (--sid, --interval, --task, --once)
   advisor-timeline    # HTTP timeline dashboard on port 7878 — SSE live updates, color-coded by message type
-  advisor-vault       # query the native vault index (search / backlinks / path)
+  advisor-vault       # query the native vault index (search / backlinks / path / due [--within <days>])
   advisor-vault-mcp   # JSON-RPC 2.0 MCP stdio server exposing the vault to Claude Desktop and claude-code (internal)
   brief               # validate 5-field brief and emit bin/summon command (auto-populates --allowed-tools)
   browser-act         # execute one browser action via the daemon UNIX socket (internal)
@@ -74,7 +74,7 @@ skills/
   worker-protocol/    # /worker-protocol — inbox polling, tracing, self-terminate rules
 .claude/
   settings.json       # Advisor harness config (permissions, hooks, env vars)
-  hooks/              # SessionStart banner, PostToolUse session.json updater, statusline
+  hooks/              # SessionStart banner (vault-due next 14d + last handover), PostToolUse session.json updater, statusline
   skills/
     context-timeline/ # /context-timeline — triggers bin/advisor-timeline for the current session
 ~/.advisor/runs/<sid>/
@@ -233,12 +233,15 @@ Read with `readSessionState(sid)` · Update with `updateSessionState(sid, patchF
 
 ## Hooks
 
-Two lifecycle hooks are registered in `.claude/settings.json`:
+Three lifecycle hooks are registered in `.claude/settings.json`:
 
 | Hook | Event | What it does |
 |------|-------|--------------|
+| `SessionStart` | Session start | Surfaces a 'vault due (next 14d)' banner (all note types, not just reminders) and the last context-handover file via `spawnSync`. |
 | `PreCompact` | Before auto-compaction | `git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"` — preserves session state across context resets. Note GH#13572: does not fire on manual `/compact`; the Stop hook covers that path. |
 | `Stop` | After each Claude response | Reads `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, sums all four token fields, and appends a record to `~/.advisor/state/token-usage.jsonl` for cross-session cost tracking. |
+
+**Worker PostToolUse hooks (opt-in):** Three hooks in `lib/hooks/` (`worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) are installed in all 16 `spawns/*/.claude/settings.json` files, gated by `ADVISOR_WORKER_HOOKS` (default 0). When enabled, they automate the trace/recv/close-tab boilerplate; when disabled, workers rely on the `/worker-protocol` skill for manual handling. See the active-experiment bullet in `CLAUDE.md` for rollout status.
 
 ## Iteration and spawn-fresh model
 
@@ -267,6 +270,8 @@ Matching `[lesson]` entries are appended as a `Prior failure constraints:` block
 **Trigger threshold:** lesson extraction is auto-triggered on the **2nd or subsequent** `overall_pass: false` evaluator verdict for the same task shape in a session — a single failure is treated as task-specific noise. Lessons are always negative-polarity (what to avoid); positive-polarity success notes are not stored.
 
 The vault is backed by an FTS5 SQLite index at `~/.advisor/vault/.cache/index.sqlite` and indexes synthesis records, session notes, and lessons. All three are written automatically — no manual indexing step.
+
+Vault due notes (including lessons due in the next 14 days) are also surfaced automatically by the SessionStart hook at the start of each session. Use `bin/advisor-vault due [--within <days>]` to query due notes at any time.
 
 ## Guardrails summary
 
