@@ -125,3 +125,57 @@ describe('--sub-team bootstrap injection', () => {
     expect(prompt).not.toContain('Sub-Team Mode');
   });
 });
+
+// ============================================================================
+// U7: --sub-team-model flag — model directive in bootstrap prompt
+// ============================================================================
+
+describe('--sub-team-model bootstrap injection', () => {
+  test('--sub-team alone defaults to sonnet in the prompt', () => {
+    const meta = runSummon(['--sub-team']);
+    const prompt = fs.readFileSync(meta.promptFile, 'utf8');
+    expect(prompt).toContain('model: "sonnet"');
+  });
+
+  test('--sub-team --sub-team-model sonnet includes sonnet directive', () => {
+    const meta = runSummon(['--sub-team', '--sub-team-model', 'sonnet']);
+    const prompt = fs.readFileSync(meta.promptFile, 'utf8');
+    expect(prompt).toContain('model: "sonnet"');
+  });
+
+  test('--sub-team --sub-team-model haiku includes haiku directive', () => {
+    const meta = runSummon(['--sub-team', '--sub-team-model', 'haiku']);
+    const prompt = fs.readFileSync(meta.promptFile, 'utf8');
+    expect(prompt).toContain('model: "haiku"');
+  });
+
+  test('--sub-team --sub-team-model opus includes opus directive', () => {
+    const meta = runSummon(['--sub-team', '--sub-team-model', 'opus']);
+    const prompt = fs.readFileSync(meta.promptFile, 'utf8');
+    expect(prompt).toContain('model: "opus"');
+  });
+
+  test('--sub-team-model with invalid value exits non-zero', () => {
+    const { execFileSync: exec } = require('child_process');
+    expect(() => {
+      exec('node', [
+        path.join(REPO, 'lib', 'summon.js'),
+        '--agent', 'coder',
+        '--task', 'T',
+        '--goal', 'G',
+        '--sub-team',
+        '--sub-team-model', 'gpt-4',
+      ], { cwd: REPO, encoding: 'utf8', timeout: 10000 });
+    }).toThrow();
+  });
+
+  test('--sub-team-model without --sub-team is silently ignored (exits 0)', () => {
+    // Design choice: silently ignored so callers can always pass --sub-team-model
+    // alongside an optional --sub-team without needing to branch.
+    let meta;
+    expect(() => { meta = runSummon(['--sub-team-model', 'haiku']); }).not.toThrow();
+    expect(meta).toHaveProperty('sid');
+    const prompt = fs.readFileSync(meta.promptFile, 'utf8');
+    expect(prompt).not.toContain('Sub-Team Mode');
+  });
+});

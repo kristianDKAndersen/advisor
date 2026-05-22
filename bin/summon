@@ -27,6 +27,7 @@ REQUIRED_OUTPUT=""
 TUI=""
 NO_TIMELINE=""
 SUB_TEAM=""
+SUB_TEAM_MODEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,8 +45,9 @@ while [[ $# -gt 0 ]]; do
     --tui)            TUI=1;               shift ;;
     --no-timeline)    NO_TIMELINE=1;       shift ;;
     --sub-team)       SUB_TEAM=1;          shift ;;
+    --sub-team-model) SUB_TEAM_MODEL="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--tui] [--no-timeline] [--sid <id>] [--model <model>] [--intelligence <0-100>] [--ensemble <n>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"]"
+      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--tui] [--no-timeline] [--sid <id>] [--model <model>] [--intelligence <0-100>] [--ensemble <n>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"] [--sub-team] [--sub-team-model sonnet|haiku|opus]"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -72,6 +74,7 @@ NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
 [[ -n "$REQUIRED_OUTPUT" ]] && NODE_ARGS+=(--requiredOutput "$REQUIRED_OUTPUT")
 [[ -n "$TUI"            ]] && NODE_ARGS+=(--tui)
 [[ -n "$SUB_TEAM"       ]] && NODE_ARGS+=(--sub-team)
+[[ -n "$SUB_TEAM_MODEL" ]] && NODE_ARGS+=(--sub-team-model "$SUB_TEAM_MODEL")
 META=$(node "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
 
 # Parse paths out of the JSON (node one-liner, no deps).

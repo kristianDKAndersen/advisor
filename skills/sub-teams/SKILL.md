@@ -87,11 +87,13 @@ TEAMMATE2_PROMPT=$(cat "$RUN_DIR/role-prompts.json" | node -e "process.stdout.wr
 
 **MANDATORY:** Spawn ALL agents (delegator + every teammate) in a SINGLE message with multiple Task tool calls. Spawning them sequentially defeats parallelism and will cause the delegator to time out waiting for teammates that haven't started yet.
 
+Each Task call MUST include `model: "<value>"` where the value comes from the Sub-Team Mode section of your bootstrap prompt (e.g. `model: "sonnet"`). If the bootstrap prompt did not specify a sub-team model, default to `model: "sonnet"`. Use the same model value for both the delegator and every teammate.
+
 Spawn using the Task tool, one call per role, all in the same message:
 
-- Task 1: `description="sub-team delegator"`, `prompt=$DELEGATOR_PROMPT`
-- Task 2: `description="sub-team teammate-1"`, `prompt=$TEAMMATE1_PROMPT`
-- Task 3: `description="sub-team teammate-2"`, `prompt=$TEAMMATE2_PROMPT`
+- Task 1: `description="sub-team delegator"`, `prompt=$DELEGATOR_PROMPT`, `model=<sub-team-model>`
+- Task 2: `description="sub-team teammate-1"`, `prompt=$TEAMMATE1_PROMPT`, `model=<sub-team-model>`
+- Task 3: `description="sub-team teammate-2"`, `prompt=$TEAMMATE2_PROMPT`, `model=<sub-team-model>`
 
 Wait for all Tasks to complete before proceeding to Step 5.
 
