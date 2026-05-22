@@ -51,13 +51,8 @@ Send structured result bodies as a JSON object:
 }
 ```
 
-Hybrid rule: if your deliverable content is <500 chars (e.g., creative output inline, short answers), set `"paths": []` and include the content directly in `"summary"`. For file-based deliverables always include the absolute path in `"paths"`.
-
 Example (file-based):
 `--body '{"summary":"Applied 5/6 fixes. 1 skipped (diverged spec). Files: lib/channel.js","paths":["/Users/x/.advisor/runs/abc/output/changes.md"],"verdict":"complete"}'`
-
-Example (inline):
-`--body '{"summary":"Option A (lazy-init) beats Option B: simpler, no boot cost. See reasoning in progress messages.","paths":[],"verdict":"complete"}'`
 
 ## Result body cap
 
