@@ -153,6 +153,7 @@ Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your
 - Read existing files before writing. Don't re-read unless changed.
 - Thorough in reasoning, concise in output.
 - Skip files over 100KB unless required.
+- When modifying an existing file larger than 50KB, prefer Edit over Write. Write requires re-emitting the full file in your output token stream (~25K tokens per 90KB), which can exceed your wrapper timeout. Edit only sends the diff.
 - No sycophantic openers or closing fluff.
 - No emojis or em-dashes.
 - Do not guess APIs, versions, flags, commit SHAs, or package names.

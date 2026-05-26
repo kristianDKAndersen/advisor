@@ -64,3 +64,19 @@ test('T3: omitting --timeoutSec leaves the field unset in meta JSON', () => {
   expect(meta.timeoutSec).toBeUndefined();
   expect(metaOnDisk.timeoutSec).toBeUndefined();
 });
+
+// --timeout alias tests (new short-form CLI flag)
+test('T4: --timeout 1200 surfaces as timeoutSec:1200 in stdout meta JSON', () => {
+  const { meta } = provision(['--timeout', '1200']);
+  expect(meta.timeoutSec).toBe(1200);
+});
+
+test('T5: --timeout 30 (below 60s min) is clamped to 60', () => {
+  const { meta } = provision(['--timeout', '30']);
+  expect(meta.timeoutSec).toBe(60);
+});
+
+test('T6: --timeout 7200 (above 3600s max) is clamped to 3600', () => {
+  const { meta } = provision(['--timeout', '7200']);
+  expect(meta.timeoutSec).toBe(3600);
+});
