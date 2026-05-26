@@ -45,32 +45,40 @@ bin/
   close-tab           # close current macOS Terminal tab (called by workers on self-terminate)
   close-worker-tab    # close a specific worker's tab by SID (called by Advisor post-result)
   run-pipeline        # pipeline orchestrator (internal)
-  summon              # provision + open a worker session in a new Terminal tab
+  summon              # provision + open a worker session in a new Terminal tab; flags: --agent, --task, --goal, --model, --intelligence, --ensemble, --allowed-tools, --sub-team, --sub-team-model, --timeout
   summon-parallel     # fan out multiple briefs to parallel worker sessions (--briefs <path.json>)
   tournament          # parallel TDD tournament orchestrator (--spec, --strategies, --keep-losers, --dry-run)
 lib/
   channel.js          # append-only JSONL channel: send / recv / tail / synthesize; acquireSeqLock (mkdir spinlock for seq IDs); Tail class (byte-offset incremental reader)
+  compactor.js        # PreCompact hook entry — git-commits the pre-compaction checkpoint
   session.js          # session plumbing: IDs, workspaces, session.json, output-dir logic
-  summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh; --intelligence flag (resolves tier→model via adapter/intelligence-map.json); --ensemble N (parallel workers + batch envelope); --allowed-tools (camelCase internally)
+  summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh; --intelligence flag (resolves tier→model via adapter/intelligence-map.json); --ensemble N (parallel workers + batch envelope); --allowed-tools (camelCase internally); --sub-team injects the delegator/teammate skill
+  tmux-runner.js      # detached background-loop runner used by bin/advisor-schedule
   vault.js            # native vault writer + FTS5 search (synthesis notes, session notes, lessons)
+  hooks/              # PostToolUse worker hooks (worker-trace.js, worker-inbox-poll.sh, worker-auto-close.sh) — opt-in via ADVISOR_WORKER_HOOKS
 adapter/
   intelligence-map.json  # 4-band tier→model+reasoning manifest used by --intelligence flag
 spawns/
-  code-reviewer/      # (each contains CLAUDE.md that defines the worker's role)
+  browser/            # (each contains CLAUDE.md that defines the worker's role)
+  code-reviewer/
   coder/
   creative/
   deep-researcher/
   diff-walker/
   evaluator/
+  fact-checker/
   frontend/
   philpsych/
   planner/
   researcher/
-  triage/
+  spec/
+  tournament-evaluator/
 skills/
   brief/              # /brief — validates fields and emits bin/summon command (--allowed-tools)
   extract-lesson/     # /extract-lesson — post-mortem analyst; writes negative-polarity lesson notes
+  sub-teams/          # /sub-teams — orchestrates a delegator + N teammates via the Task tool
   synth/              # /synth — validates fields and runs channel.js synthesize
+  tournament/         # /tournament — parallel TDD tournament orchestrator
   worker-protocol/    # /worker-protocol — inbox polling, tracing, self-terminate rules
 .claude/
   settings.json       # Advisor harness config (permissions, hooks, env vars)
@@ -116,11 +124,9 @@ skills/
 | `philpsych` | Writes the character / behavioral section of an agent's system prompt using psychology frameworks (SDT, Big Five, CBT, Stoicism) |
 | `planner` | Decomposes a task into a wave-parallelized plan (files_modified mutex, stable U-IDs, claim-to-evidence DoD, multi-source coverage audit, banned-phrase list, status enum); produces `plan.md`; mandates a failing-test subtask in the earliest wave for every behavior change (Test-first ordering) |
 | `researcher` | Executes research tasks (library evaluation, trend scan, fact-finding); cites every non-trivial claim; produces structured reports |
-| `triage` | *(Deprecated — pre-pass removed 2026-05; Advisor now classifies tier directly.)* Classifies a user prompt into a tier and emits a JSON decomposition seed; available for manual use only |
 | `browser` | Browser automation agent; drives Chrome via the `browser-*` binary suite for web interaction tasks |
-| `coder copy` | TODO: confirm in-use or remove (staging artifact suspected) |
 | `fact-checker` | Spot-checks external-tool pricing, licensing, version, and availability claims against authoritative sources; auto-invoked after synthesis when result body contains dollar amounts, 'free/paid', license names, or version-to-feature assertions |
-| `spec` | TODO: confirm in-use or remove (staging artifact suspected) |
+| `spec` | Drafts implementation specs from a goal — produces an executable spec the `coder` agent can implement; used as the upstream stage of `/tournament` |
 | `tournament-evaluator` | Scores and ranks competing coder implementations against a shared test suite; used by the `/tournament` skill |
 
 ## Creative Council Mode
@@ -165,6 +171,7 @@ Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a s
 | `/extract-lesson` | Post-mortem analyst — turns a `verdict=blocked, material=yes` synthesis into a negative-polarity lesson note in the vault; auto-triggered on the 2nd evaluator failure for the same task shape |
 | `/worker-protocol` | Loads inbox-polling rules, tracing cadence, and self-terminate behavior into a worker session |
 | `/creative-thinking` | **Agent-scoped** (creative agent only) — orchestrates mapper → 3 of 5 cognitive-persona subagents in parallel → synthesizer via the Task tool; returns `council-result.md`; auto-routes to Solo Mode for trivially scoped prompts |
+| `/sub-teams` | Runs a sub-team inside a single worker — delegator agent spawns N teammates via the Task tool; opt in with `bin/summon --sub-team` and (optionally) `--sub-team-model <sonnet\|haiku\|opus>` |
 | `/tournament` | Runs a parallel TDD tournament — summons N coder workers each with a different strategy, evaluates all against a shared test suite via `tournament-evaluator`, and applies the winning implementation; uses `bin/tournament` |
 
 ## Reference docs
@@ -294,7 +301,8 @@ Without this setting, worker tabs linger with "Process completed" after workers 
 ## Tests
 
 ```bash
-bash test/close-tab.test.sh
+bun test                              # full suite
+bash tests/close-tab.test.sh          # close-tab integration only
 ```
 
-Expect: `3/3 PASS`.
+Test files live under `tests/` (renamed from `test/` in audit-fix Wave A).

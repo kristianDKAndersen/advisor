@@ -21,6 +21,10 @@ async function main() {
     lines = fs.readFileSync(transcript_path, 'utf8').split('\n').filter(Boolean);
   } catch { process.exit(0); }
 
+  // Bound work: only the tail of the transcript needs to be scanned for the
+  // most recent assistant usage record. Prevents O(n) cost as transcripts grow.
+  if (lines.length > 1000) lines = lines.slice(-1000);
+
   const breakdown = {
     input_tokens: 0,
     output_tokens: 0,
@@ -31,8 +35,9 @@ async function main() {
   for (const line of lines) {
     try {
       const msg = JSON.parse(line);
-      if (msg.role !== 'assistant' || !msg.usage) continue;
-      const u = msg.usage;
+      const inner = msg.message;
+      if (!inner || inner.role !== 'assistant' || !inner.usage) continue;
+      const u = inner.usage;
       breakdown.input_tokens += (u.input_tokens || 0);
       breakdown.output_tokens += (u.output_tokens || 0);
       breakdown.cache_read_input_tokens += (u.cache_read_input_tokens || 0);
