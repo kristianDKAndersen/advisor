@@ -11,7 +11,7 @@ const ADVISOR_ROOT = path.resolve(import.meta.dir, '..');
 const RUNS_ROOT = path.join(os.homedir(), '.advisor', 'runs');
 
 const agentName = `test-skill-expand-${Date.now()}`;
-const agentDir = path.join(ADVISOR_ROOT, 'agents', agentName);
+const agentDir = path.join(ADVISOR_ROOT, 'spawns', agentName);
 const agentSkillsDir = path.join(agentDir, '.claude', 'skills');
 
 const createdSids = [];

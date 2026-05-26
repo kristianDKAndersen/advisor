@@ -26,16 +26,16 @@ const HOME_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'adv-dflt-home-'));
 // ── Synthetic agents ──────────────────────────────────────────────────────
 
 const AGENT_WITH = `test-dflt-with-${TS}`;
-const agentWithDir = path.join(ADVISOR_ROOT, 'agents', AGENT_WITH);
+const agentWithDir = path.join(ADVISOR_ROOT, 'spawns', AGENT_WITH);
 
 const AGENT_WITHOUT = `test-dflt-none-${TS}`;
-const agentWithoutDir = path.join(ADVISOR_ROOT, 'agents', AGENT_WITHOUT);
+const agentWithoutDir = path.join(ADVISOR_ROOT, 'spawns', AGENT_WITHOUT);
 
 // Delete any leftover test-dflt-* dirs from previous failed runs before creating new ones.
-const agentsDir = path.join(ADVISOR_ROOT, 'agents');
-for (const entry of fs.readdirSync(agentsDir)) {
+const spawnsDir = path.join(ADVISOR_ROOT, 'spawns');
+for (const entry of fs.readdirSync(spawnsDir)) {
   if (entry.startsWith('test-dflt-')) {
-    fs.rmSync(path.join(agentsDir, entry), { recursive: true, force: true });
+    fs.rmSync(path.join(spawnsDir, entry), { recursive: true, force: true });
   }
 }
 

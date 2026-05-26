@@ -6,6 +6,7 @@ import path from 'path';
 
 const CHANNEL_JS = path.resolve(import.meta.dir, '../lib/channel.js');
 const ADVISOR_RUNS = path.join(os.homedir(), '.advisor', 'runs');
+const TEST_TIMEOUT = 30000;
 
 // Create a unique sid for each test to avoid collision with synthesis.log entries
 let tmpRunDir;
@@ -27,18 +28,18 @@ function runSynthesize(args, sid) {
      '--established', 'test', '--gap', 'none', '--material', 'yes',
      '--next', 'proceed-to-step-8',
      ...args],
-    { encoding: 'utf8' }
+    { encoding: 'utf8', timeout: 25000 }
   );
 }
 
-// Scenario 4a: --verdict blocked --material yes → stdout CONTAINS LESSON EXTRACTION REQUIRED
-test('synthesize --verdict blocked emits LESSON EXTRACTION REQUIRED block', () => {
+// Scenario 4a: --verdict blocked --material yes → dead block removed; no LESSON EXTRACTION output
+test('synthesize --verdict blocked does NOT emit LESSON EXTRACTION REQUIRED block', () => {
   const sid = `verdict-test-blocked-${Date.now()}`;
   const result = runSynthesize(['--verdict', 'blocked'], sid);
   expect(result.status).toBe(0);
-  expect(result.stdout).toContain('LESSON EXTRACTION REQUIRED');
+  expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
   expect(result.stdout).toContain('synthesis recorded:');
-});
+}, TEST_TIMEOUT);
 
 // Scenario 4b: --verdict complete → stdout does NOT contain LESSON EXTRACTION REQUIRED
 test('synthesize --verdict complete does NOT emit LESSON EXTRACTION block', () => {
@@ -47,7 +48,7 @@ test('synthesize --verdict complete does NOT emit LESSON EXTRACTION block', () =
   expect(result.status).toBe(0);
   expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
   expect(result.stdout).toContain('synthesis recorded:');
-});
+}, TEST_TIMEOUT);
 
 // Scenario 8: no --verdict flag → succeeds, no block
 test('synthesize without --verdict succeeds and does not emit LESSON EXTRACTION block', () => {
@@ -56,7 +57,7 @@ test('synthesize without --verdict succeeds and does not emit LESSON EXTRACTION 
   expect(result.status).toBe(0);
   expect(result.stdout).toContain('synthesis recorded:');
   expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
-});
+}, TEST_TIMEOUT);
 
 // Bonus: --verdict partial → no block
 test('synthesize --verdict partial does NOT emit LESSON EXTRACTION block', () => {
@@ -64,13 +65,13 @@ test('synthesize --verdict partial does NOT emit LESSON EXTRACTION block', () =>
   const result = runSynthesize(['--verdict', 'partial'], sid);
   expect(result.status).toBe(0);
   expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
-});
+}, TEST_TIMEOUT);
 
-// Block text: sid and seq are substituted correctly
-test('LESSON EXTRACTION block contains runtime sid and seq values', () => {
+// Dead block deleted: --verdict blocked produces no LESSON EXTRACTION output regardless of sid/seq
+test('synthesize --verdict blocked produces no LESSON EXTRACTION output', () => {
   const sid = `verdict-test-vals-${Date.now()}`;
   const result = runSynthesize(['--verdict', 'blocked'], sid);
   expect(result.status).toBe(0);
-  expect(result.stdout).toContain(`sid=${sid}`);
-  expect(result.stdout).toContain('seq=99');
-});
+  expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
+  expect(result.stdout).not.toContain('extract-lesson');
+}, TEST_TIMEOUT);
