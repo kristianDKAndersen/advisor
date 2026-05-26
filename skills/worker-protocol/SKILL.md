@@ -26,7 +26,11 @@ Re-tail on every timeout. Only exit via `close-tab` after `terminate` or after s
 ## Tracing
 
 After each tool call, append one JSON line to `$OUTPUT_DIR/trace.jsonl` with shape `{tool, args_summary, result_summary, ts}`.
-Example: `echo "{\"tool\":\"Read\",\"args_summary\":\"file:line\",\"result_summary\":\"patched\",\"ts\":$(date +%s)}" >> "$OUTPUT_DIR/trace.jsonl"` # substitute your actual tool name in the echo command
+
+**Guard:** When `ADVISOR_WORKER_HOOKS=1`, skip the manual write — `lib/hooks/worker-trace.js` writes the entry automatically via the PostToolUse hook and a second manual write would produce duplicate entries. Only write manually when `ADVISOR_WORKER_HOOKS` is unset or `0`.
+
+Example (manual path, when `ADVISOR_WORKER_HOOKS` is unset or `0`):
+`echo "{\"tool\":\"Read\",\"args_summary\":\"file:line\",\"result_summary\":\"patched\",\"ts\":$(date +%s)}" >> "$OUTPUT_DIR/trace.jsonl"` # substitute your actual tool name in the echo command
 Keep entries terse — one line per tool call.
 
 ## After a `result` — self-terminate

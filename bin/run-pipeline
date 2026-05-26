@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-const fs = require('fs');
 const path = require('path');
 
 function parseArgs(argv) {
@@ -17,46 +16,25 @@ function parseArgs(argv) {
   return args;
 }
 
-function loadPipeline(taskType, repoRoot) {
-  const filePath = path.join(repoRoot, 'pipelines', `${taskType}.json`);
-  try {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function validatePipeline(obj) {
-  if (!obj.steps || !Array.isArray(obj.steps)) {
-    throw new Error('Pipeline must have a steps array');
-  }
-  if (!obj.name || typeof obj.name !== 'string') {
-    throw new Error('Pipeline must have a name string');
-  }
-  if (obj.steps.length === 0) {
-    throw new Error('Pipeline steps must not be empty');
-  }
-  for (const step of obj.steps) {
-    if (!step.agent || !step.task_template || !step.goal_template) {
-      throw new Error('Each step must have agent, task_template, and goal_template');
-    }
-  }
-}
-
 async function main() {
   const argv = parseArgs(process.argv);
   const taskType = argv['--task-type'];
   const repoRoot = argv['--repo'] || process.cwd();
   const dryRun = argv['--dry-run'] || process.env.ADVISOR_DRY_RUN === '1';
 
-  const pipeline = loadPipeline(taskType, repoRoot);
+  // Load raw pipeline JSON synchronously (avoids ESM dynamic import for Node compat).
+  const filePath = path.join(repoRoot, 'pipelines', `${taskType}.json`);
+  let pipeline;
+  try {
+    pipeline = JSON.parse(require('fs').readFileSync(filePath, 'utf8'));
+  } catch {
+    pipeline = null;
+  }
+
   if (!pipeline) {
     process.stderr.write('no pipeline found\n');
     process.exit(1);
   }
-
-  validatePipeline(pipeline);
 
   if (dryRun) {
     const now = new Date().toISOString();
@@ -78,7 +56,8 @@ async function main() {
     process.exit(0);
   }
 
-  const { runPipeline } = await import(path.join(__dirname, '../lib/pipeline.js'));
+  const { validatePipeline, runPipeline } = await import(path.join(__dirname, '../lib/pipeline.js'));
+  validatePipeline(pipeline);
   const report = await runPipeline(pipeline, {});
   process.stdout.write(JSON.stringify(report) + '\n');
   process.exit(0);

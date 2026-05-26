@@ -5,6 +5,9 @@
 #
 # Called by the Advisor after receiving a worker's `result` or after sending
 # `terminate`. Idempotent — safe if the worker already self-closed its tab.
+#
+# Supports both Apple Terminal (osascript) and headless tmux sessions.
+# For tmux, it looks for any session whose name starts with "advisor-<sid>".
 
 set -u
 
@@ -28,6 +31,16 @@ ps -ax -o pid=,comm=,args= 2>/dev/null | while IFS= read -r line; do
   fi
 done
 
+# ── Headless tmux path ────────────────────────────────────────────────────────
+# Look for any tmux session whose name starts with "advisor-<sid>" (covers
+# both the old "advisor-<sid>" format and the new "advisor-<sid>-<agent>" format).
+if command -v tmux >/dev/null 2>&1; then
+  tmux ls -F '#{session_name}' 2>/dev/null | grep "^advisor-${sid}" | while IFS= read -r _sess; do
+    tmux kill-session -t "$_sess" 2>/dev/null || true
+  done
+fi
+
+# ── Apple Terminal (TUI) path ─────────────────────────────────────────────────
 ttyFile="$runDir/tty.txt"
 [[ ! -f "$ttyFile" ]] && exit 0
 

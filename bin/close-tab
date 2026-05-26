@@ -5,11 +5,40 @@
 # `terminate` message from the Advisor. Backgrounds osascript so the shell
 # exits immediately before the window closes.
 #
+# Headless tmux workers: set ADVISOR_TMUX=1 or run inside a tmux session
+# whose name matches ^advisor-. In that mode, tmux kill-session is used
+# instead of osascript (which only works for Apple Terminal tabs).
+#
 # Fails silently on non-macOS or if osascript is unavailable — the worker
 # session will still exit when claude quits; the tab just sticks around.
 
 set -u
 
+# ── Headless tmux path ────────────────────────────────────────────────────────
+_is_tmux=0
+if [[ "${ADVISOR_TMUX:-}" == "1" ]]; then
+  _is_tmux=1
+elif [[ -n "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
+  _sess=$(tmux display-message -p '#S' 2>/dev/null || true)
+  [[ "$_sess" =~ ^advisor- ]] && _is_tmux=1
+fi
+
+if [[ "$_is_tmux" == "1" ]]; then
+  # Kill parent claude/node process before destroying the session.
+  _parent_name=$(ps -o comm= -p $PPID 2>/dev/null | awk -F'/' '{print $NF}')
+  if [[ "$_parent_name" == "claude" || "$_parent_name" == "node" ]]; then
+    kill -TERM $PPID 2>/dev/null || true
+    sleep 0.5
+    kill -0 $PPID 2>/dev/null && kill -KILL $PPID 2>/dev/null || true
+  fi
+  if [[ -n "${TMUX:-}" ]]; then
+    _sess=$(tmux display-message -p '#S' 2>/dev/null || true)
+    [[ -n "$_sess" ]] && tmux kill-session -t "$_sess" 2>/dev/null || true
+  fi
+  exit 0
+fi
+
+# ── Apple Terminal (TUI) path ─────────────────────────────────────────────────
 if [[ "$(uname)" != "Darwin" ]]; then
   exit 0
 fi

@@ -43,13 +43,13 @@ Execute all three phases in sequence. Do not skip phases. Do not hand off to the
    - `checkpoint.md` written to `$OUTPUT_DIR/checkpoint.md` after every 10 tool calls.
 3. Send a `progress` message via channel.js: "Phase 1 complete. N sources read, M primary. Proceeding to bias audit."
 
-### Phase 2 — Bias Audit (delegate to bias-auditor sub-agent)
+### Phase 2 — Bias Audit (delegate to fact-checker sub-agent)
 
-Use the Task tool to invoke `@bias-auditor`:
+Use the Task tool to invoke `@fact-checker`:
 
 ```
 Task(
-  agent_type="bias-auditor",
+  agent_type="fact-checker",
   prompt="Audit the research findings at $OUTPUT_DIR/checkpoint.md and any evidence files in $OUTPUT_DIR. 
   Produce: (1) ACH matrix in $OUTPUT_DIR/ach-matrix.md, (2) assumption audit in $OUTPUT_DIR/assumptions.md, 
   (3) counter-narratives in $OUTPUT_DIR/counter-narratives.md. 
@@ -59,13 +59,13 @@ Task(
 
 Wait for the Task result. Read the returned verdict. If the verdict flags HIGH-SEVERITY weaknesses (underdetermined evidence for a major claim, single-source finding, no counter-narrative possible), loop back to Phase 1 and gather additional sources targeting the flagged gaps. Emit another `progress` message: "Phase 2 complete. Audit verdict: [paste one-line summary]. Proceeding to synthesis."
 
-### Phase 3 — Synthesis (delegate to report-architect sub-agent)
+### Phase 3 — Synthesis (delegate to planner sub-agent)
 
-Use the Task tool to invoke `@report-architect`:
+Use the Task tool to invoke `@planner`:
 
 ```
 Task(
-  agent_type="report-architect",
+  agent_type="planner",
   prompt="Synthesize a final research report using: 
   - Evidence files: $OUTPUT_DIR/checkpoint.md (and any evidence/*.md files in $OUTPUT_DIR) 
   - Audit outputs: $OUTPUT_DIR/ach-matrix.md, $OUTPUT_DIR/assumptions.md, $OUTPUT_DIR/counter-narratives.md
@@ -74,7 +74,7 @@ Task(
 )
 ```
 
-Wait for the Task result. Read `$OUTPUT_DIR/research-report.md` and verify it contains all 7 mandatory sections (Executive Summary, Key Findings, Counter-Narratives & Dissenting Views, Technical Analysis, Evidence Appendix, Unresolved Gaps, Audit Summary). If any section is missing, send a follow-up Task to the report-architect to add it.
+Wait for the Task result. Read `$OUTPUT_DIR/research-report.md` and verify it contains all 7 mandatory sections (Executive Summary, Key Findings, Counter-Narratives & Dissenting Views, Technical Analysis, Evidence Appendix, Unresolved Gaps, Audit Summary). If any section is missing, send a follow-up Task to the planner to add it.
 
 ### Phase 4 — Deliver result
 
@@ -83,7 +83,7 @@ Send a structured result:
 ```bash
 bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type result \
   --body '{"summary":"Deep research complete. N sources, M primary. Report + audit files at output dir.","paths":["$OUTPUT_DIR/research-report.md","$OUTPUT_DIR/ach-matrix.md","$OUTPUT_DIR/assumptions.md","$OUTPUT_DIR/counter-narratives.md"],"verdict":"complete"}' \
-  --from researcher --quiet
+  --from deep-researcher --quiet
 ```
 
 Then run your final action:
@@ -109,8 +109,8 @@ Emit a `progress` message at minimum:
 
 ## What you must not do
 
-- Do not synthesize the final report yourself. That is the report-architect's job.
-- Do not skip the bias audit phase. If the bias-auditor Task fails or returns `blocked`, emit a `progress` explaining why and produce what you have with `verdict: "partial"`.
+- Do not synthesize the final report yourself. That is the planner's job.
+- Do not skip the bias audit phase. If the fact-checker Task fails or returns `blocked`, emit a `progress` explaining why and produce what you have with `verdict: "partial"`.
 - Do not exit before running `bash "$ADV/bin/close-tab"`.
 
 ## Approach

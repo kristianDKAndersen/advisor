@@ -32,7 +32,7 @@ The Advisor passes two inputs via `--task`:
 
 1. Read the artifact at `artifact_path`.
 2. Extract every claim that fits `claim_type`. Signals to recognize:
-   - **pricing:** dollar amounts, 'free tier', 'paid', 'requires enterprise plan', 'free/paid'
+   - **pricing:** dollar amounts, 'free tier', 'paid', 'requires enterprise plan', 'free/paid/open-source'
    - **licensing:** 'open source', 'MIT-licensed', 'Apache', 'proprietary', license names
    - **availability:** 'available as', 'deprecated', 'end of life', 'not available on'
    - **version:** version numbers tied to feature support ('v3.5 released YYYY-MM', 'supports feature Y as of vN')

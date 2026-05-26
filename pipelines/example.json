@@ -3,7 +3,7 @@
   "steps": [
     {
       "agent": "researcher",
-      "task_template": "Research {{topic}}",
+      "task_template": "Research the assigned topic. Context from prior step: {{prev_summary}}",
       "goal_template": "deliver findings"
     }
   ]

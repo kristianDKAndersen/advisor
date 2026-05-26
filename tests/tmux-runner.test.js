@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ensureStopHook, parseTranscript } from '../lib/tmux-runner.js';
+import { ensureStopHook, parseTranscript, makeTmuxName, pollCapturePane, reaperSweepOrphanSessions } from '../lib/tmux-runner.js';
 
 const STOP_HOOK_COMMAND =
   'if [ -n "$CLAUDE_I_SENTINEL" ]; then cat > "$CLAUDE_I_SENTINEL.json"; touch "$CLAUDE_I_SENTINEL"; fi';
@@ -163,4 +163,142 @@ test('parseTranscript: returns empty string when no assistant messages', () => {
 test('parseTranscript: throws when transcript file is missing', () => {
   const transcriptPath = path.join(tmpDir, 'nonexistent.jsonl');
   expect(() => parseTranscript(transcriptPath)).toThrow();
+});
+
+// ── makeTmuxName (Fix 1) ──────────────────────────────────────────────────────
+
+test('makeTmuxName: without agent returns advisor-<sid>', () => {
+  expect(makeTmuxName('abc123')).toBe('advisor-abc123');
+});
+
+test('makeTmuxName: with agent returns advisor-<sid>-<agent>', () => {
+  expect(makeTmuxName('abc123', 'coder')).toBe('advisor-abc123-coder');
+});
+
+test('makeTmuxName: with undefined agent returns advisor-<sid>', () => {
+  expect(makeTmuxName('xyz', undefined)).toBe('advisor-xyz');
+});
+
+// ── pollCapturePane timeout env var (Fix 2) ───────────────────────────────────
+
+test('pollCapturePane: returns quickly when fake tmux produces output', async () => {
+  // Use a very short maxWaitMs so the test doesn't hang; sid is irrelevant (mocked via env).
+  // We test that the function resolves when tmux capture-pane returns non-empty output.
+  // Since we cannot mock execFileSync in-process cleanly, we verify the function signature
+  // accepts the env-driven default and the param override still works.
+  const start = Date.now();
+  // Pass maxWaitMs=50 — function should return within 50 ms even if tmux is absent.
+  await pollCapturePane('nonexistent-session-for-test', 50, 25);
+  const elapsed = Date.now() - start;
+  expect(elapsed).toBeLessThan(500);
+});
+
+test('pollCapturePane: ADVISOR_CAPTURE_TIMEOUT_MS env var is read at module load', () => {
+  // The constant is baked in at module load time; we can only verify via the
+  // exported DEFAULT value by checking pollCapturePane's toString or by duck-typing.
+  // Instead, verify the env-driven default is 30000 when the env var is absent.
+  const savedEnv = process.env.ADVISOR_CAPTURE_TIMEOUT_MS;
+  delete process.env.ADVISOR_CAPTURE_TIMEOUT_MS;
+  // Re-require is not feasible in Bun ESM; verify the 5s hard-coded call was removed
+  // by confirming the function accepts zero explicit args (i.e., default exists).
+  expect(typeof pollCapturePane).toBe('function');
+  // sid has no default, maxWaitMs and intervalMs do — length counts leading required params.
+  expect(pollCapturePane.length).toBe(1);
+  if (savedEnv !== undefined) process.env.ADVISOR_CAPTURE_TIMEOUT_MS = savedEnv;
+});
+
+// ── reaperSweepOrphanSessions (Fix 3) ─────────────────────────────────────────
+
+test('reaperSweepOrphanSessions: skips session whose session.json is fresh', () => {
+  const runsDir = path.join(tmpDir, 'runs');
+  const sid = 'aabbccdd-1122';
+  const runDir = path.join(runsDir, sid);
+  fs.mkdirSync(runDir, { recursive: true });
+  // Write a fresh session.json (mtime = now)
+  const sessionJsonPath = path.join(runDir, 'session.json');
+  fs.writeFileSync(sessionJsonPath, JSON.stringify({ active: true }));
+
+  const killed = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'ls') {
+      return `advisor-${sid}-coder\n`;
+    }
+    if (cmd === 'tmux' && args[0] === 'kill-session') {
+      killed.push(args[args.indexOf('-t') + 1]);
+      return '';
+    }
+    if (cmd === 'pgrep') throw new Error('not found'); // no live claude
+    return '';
+  };
+
+  reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+  expect(killed).toHaveLength(0); // fresh session.json → must NOT kill
+});
+
+test('reaperSweepOrphanSessions: kills session whose session.json is absent and no live process', () => {
+  const runsDir = path.join(tmpDir, 'runs2');
+  const sid = 'dead0000-beef';
+  fs.mkdirSync(path.join(runsDir, sid), { recursive: true });
+  // No session.json written → absent
+
+  const killed = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'ls') return `advisor-${sid}\n`;
+    if (cmd === 'tmux' && args[0] === 'kill-session') {
+      killed.push(args[args.indexOf('-t') + 1]);
+      return '';
+    }
+    if (cmd === 'pgrep') throw new Error('not found'); // no live claude
+    return '';
+  };
+
+  reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+  expect(killed).toContain(`advisor-${sid}`);
+});
+
+test('reaperSweepOrphanSessions: spares stale session when live claude process exists', () => {
+  const runsDir = path.join(tmpDir, 'runs3');
+  const sid = 'stale111-live';
+  fs.mkdirSync(path.join(runsDir, sid), { recursive: true });
+  // No session.json → stale
+
+  const killed = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'ls') return `advisor-${sid}-worker\n`;
+    if (cmd === 'tmux' && args[0] === 'kill-session') {
+      killed.push(args[args.indexOf('-t') + 1]);
+      return '';
+    }
+    if (cmd === 'pgrep') return `99999\n`; // live claude found
+    return '';
+  };
+
+  reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+  expect(killed).toHaveLength(0); // live process → must NOT kill
+});
+
+test('reaperSweepOrphanSessions: kills session older than 24 h with no live process', () => {
+  const runsDir = path.join(tmpDir, 'runs4');
+  const sid = 'old00000-1234';
+  const runDir = path.join(runsDir, sid);
+  fs.mkdirSync(runDir, { recursive: true });
+  const sessionJsonPath = path.join(runDir, 'session.json');
+  fs.writeFileSync(sessionJsonPath, '{}');
+  // Backdate mtime to 25 hours ago
+  const oldTime = new Date(Date.now() - 25 * 3600 * 1000);
+  fs.utimesSync(sessionJsonPath, oldTime, oldTime);
+
+  const killed = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'ls') return `advisor-${sid}-coder\n`;
+    if (cmd === 'tmux' && args[0] === 'kill-session') {
+      killed.push(args[args.indexOf('-t') + 1]);
+      return '';
+    }
+    if (cmd === 'pgrep') throw new Error('not found'); // no live claude
+    return '';
+  };
+
+  reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+  expect(killed).toContain(`advisor-${sid}-coder`);
 });

@@ -111,7 +111,7 @@ Record the exit code and failure count in your result summary.
 
 ### Phase 4: Result
 
-Send exactly this shape:
+The result body must conform to the spec-agent data contract defined in `docs/tournament-contract.md`. Send exactly this shape:
 
 ```bash
 bun $ADV/lib/channel.js send --file "$OUTBOX" --type result \
