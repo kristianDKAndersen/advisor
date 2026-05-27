@@ -11,12 +11,8 @@
 
 set -u
 
-_tab_trace() {
-  mkdir -p "$HOME/.advisor/state" || true
-  printf '%s %s sid=%s tty=%s action=%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "$0")" "${sid:--}" "${2:--}" "$1" \
-    >> "$HOME/.advisor/state/tab-close-trace.log" || true
-}
+# shellcheck source=../lib/tab-trace.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/tab-trace.sh"
 
 sid="${1:-}"
 if [[ -z "$sid" ]]; then _tab_trace no-match -; exit 0; fi

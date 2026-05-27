@@ -21,3 +21,23 @@ test('spawns/deep-researcher/CLAUDE.md uses --from deep-researcher (not --from r
   const wrongFrom = content.match(/--from researcher(?!-)/g);
   expect(wrongFrom).toBeNull();
 });
+
+test('spawns/deep-researcher/CLAUDE.md contains no agent_type="fact-checker"', () => {
+  const matches = content.match(/agent_type\s*=\s*["']fact-checker["']/g);
+  expect(matches).toBeNull();
+});
+
+test('spawns/deep-researcher/CLAUDE.md contains no agent_type="planner"', () => {
+  const matches = content.match(/agent_type\s*=\s*["']planner["']/g);
+  expect(matches).toBeNull();
+});
+
+test('spawns/deep-researcher/CLAUDE.md default_tools includes Task', () => {
+  const defaultToolsMatch = content.match(/default_tools:\s*\n([\s\S]*?)(?=\n---|\n[^\s])/);
+  expect(defaultToolsMatch).toBeTruthy();
+  if (defaultToolsMatch) {
+    const toolsSection = defaultToolsMatch[1];
+    const hasTask = /^\s*-\s+Task\s*$/m.test(toolsSection);
+    expect(hasTask).toBe(true);
+  }
+});

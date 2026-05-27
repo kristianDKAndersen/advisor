@@ -22,7 +22,7 @@ MAX_TOOL_CALLS=""
 # Default 15 min: long enough for planner/researcher passes; can be overridden
 # with --timeout-sec. tmux-runner.js has a 300s safety net if this is unset,
 # which is too aggressive for non-trivial work — hence the explicit default here.
-TIMEOUT_SEC="900"
+TIMEOUT_SEC="1500"
 REQUIRED_OUTPUT=""
 TUI=""
 NO_TIMELINE=""

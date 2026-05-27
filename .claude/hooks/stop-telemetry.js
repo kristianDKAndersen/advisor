@@ -9,6 +9,7 @@ const path = require('path');
 const DEBUG_LOG = path.join(os.homedir(), '.advisor', 'state', 'stop-hook-debug.jsonl');
 
 function debugLog(entry) {
+  if (process.env.ADVISOR_DEBUG !== '1') return;
   try {
     fs.appendFileSync(DEBUG_LOG, JSON.stringify(entry) + '\n');
   } catch { /* ignore */ }

@@ -34,7 +34,7 @@ afterAll(() => {
 // U9-1: nonexistent task-type → exit 1 with 'no pipeline found' in stderr
 test('bin/run-pipeline exits 1 with "no pipeline found" for unknown task-type', () => {
   const result = spawnSync(
-    'node',
+    'bun',
     [BIN_RUN_PIPELINE, '--task-type', 'nonexistent', '--repo', tmpDir],
     { encoding: 'utf8' }
   );
@@ -45,7 +45,7 @@ test('bin/run-pipeline exits 1 with "no pipeline found" for unknown task-type', 
 // U9-2: --dry-run with valid pipeline fixture prints JSON report with full nested shape
 test('bin/run-pipeline --dry-run prints JSON report with full nested shape', () => {
   const result = spawnSync(
-    'node',
+    'bun',
     [BIN_RUN_PIPELINE, '--task-type', 'example', '--repo', tmpDir, '--dry-run'],
     { encoding: 'utf8', env: { ...process.env, ADVISOR_DRY_RUN: '1' } }
   );
@@ -65,12 +65,19 @@ test('bin/run-pipeline --dry-run prints JSON report with full nested shape', () 
   expect(typeof report.steps[0].agent).toBe('string');
 });
 
-// U9-3: without --dry-run / ADVISOR_DRY_RUN, non-zero exit is acceptable (no real workers)
-test('bin/run-pipeline without --dry-run exits non-zero (no real workers in test)', () => {
+// U9-4: --dry-run with malformed pipeline (no steps) → validation error, not TypeError (Fix #2)
+test('bin/run-pipeline --dry-run exits with validation error for pipeline missing steps', () => {
+  const pipelinesDir = path.join(tmpDir, 'pipelines');
+  fs.writeFileSync(
+    path.join(pipelinesDir, 'noSteps.json'),
+    JSON.stringify({ name: 'noSteps' }) // missing steps array
+  );
   const result = spawnSync(
-    'node',
-    [BIN_RUN_PIPELINE, '--task-type', 'example', '--repo', tmpDir],
+    'bun',
+    [BIN_RUN_PIPELINE, '--task-type', 'noSteps', '--repo', tmpDir, '--dry-run'],
     { encoding: 'utf8' }
   );
   expect(result.status).not.toBe(0);
+  // Must be a validation error, not an unhandled TypeError
+  expect(result.stderr).not.toContain('TypeError');
 });

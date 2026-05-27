@@ -302,3 +302,48 @@ test('reaperSweepOrphanSessions: kills session older than 24 h with no live proc
   reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
   expect(killed).toContain(`advisor-${sid}-coder`);
 });
+
+test('reaperSweepOrphanSessions: spares session with no run dir but live process', () => {
+  const runsDir = path.join(tmpDir, 'runs5');
+  const sid = 'nodir0000-live';
+  // Do NOT create the run dir — this is the key scenario
+  fs.mkdirSync(runsDir, { recursive: true });
+
+  const killed = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'ls') return `advisor-${sid}-worker\n`;
+    if (cmd === 'tmux' && args[0] === 'kill-session') {
+      killed.push(args[args.indexOf('-t') + 1]);
+      return '';
+    }
+    if (cmd === 'pgrep') {
+      // Live claude process found matching the suffix
+      return `88888\n`;
+    }
+    return '';
+  };
+
+  reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+  expect(killed).toHaveLength(0); // live process → must NOT kill
+});
+
+test('reaperSweepOrphanSessions: kills session with no run dir and no live process', () => {
+  const runsDir = path.join(tmpDir, 'runs6');
+  const sid = 'nodir0000-dead';
+  // Do NOT create the run dir
+  fs.mkdirSync(runsDir, { recursive: true });
+
+  const killed = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'ls') return `advisor-${sid}\n`;
+    if (cmd === 'tmux' && args[0] === 'kill-session') {
+      killed.push(args[args.indexOf('-t') + 1]);
+      return '';
+    }
+    if (cmd === 'pgrep') throw new Error('not found'); // no live process
+    return '';
+  };
+
+  reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+  expect(killed).toContain(`advisor-${sid}`);
+});

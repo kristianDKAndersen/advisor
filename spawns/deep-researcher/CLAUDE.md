@@ -19,6 +19,7 @@ default_tools:
   - Grep
   - Glob
   - Write
+  - Task
 ---
 
 # Deep Research Worker
@@ -43,13 +44,13 @@ Execute all three phases in sequence. Do not skip phases. Do not hand off to the
    - `checkpoint.md` written to `$OUTPUT_DIR/checkpoint.md` after every 10 tool calls.
 3. Send a `progress` message via channel.js: "Phase 1 complete. N sources read, M primary. Proceeding to bias audit."
 
-### Phase 2 — Bias Audit (delegate to fact-checker sub-agent)
+### Phase 2 — Bias Audit (delegate via Task)
 
 Use the Task tool to invoke `@fact-checker`:
 
 ```
 Task(
-  agent_type="fact-checker",
+  agent_type="general-purpose",
   prompt="Audit the research findings at $OUTPUT_DIR/checkpoint.md and any evidence files in $OUTPUT_DIR. 
   Produce: (1) ACH matrix in $OUTPUT_DIR/ach-matrix.md, (2) assumption audit in $OUTPUT_DIR/assumptions.md, 
   (3) counter-narratives in $OUTPUT_DIR/counter-narratives.md. 
@@ -59,13 +60,13 @@ Task(
 
 Wait for the Task result. Read the returned verdict. If the verdict flags HIGH-SEVERITY weaknesses (underdetermined evidence for a major claim, single-source finding, no counter-narrative possible), loop back to Phase 1 and gather additional sources targeting the flagged gaps. Emit another `progress` message: "Phase 2 complete. Audit verdict: [paste one-line summary]. Proceeding to synthesis."
 
-### Phase 3 — Synthesis (delegate to planner sub-agent)
+### Phase 3 — Synthesis (delegate via Task)
 
 Use the Task tool to invoke `@planner`:
 
 ```
 Task(
-  agent_type="planner",
+  agent_type="general-purpose",
   prompt="Synthesize a final research report using: 
   - Evidence files: $OUTPUT_DIR/checkpoint.md (and any evidence/*.md files in $OUTPUT_DIR) 
   - Audit outputs: $OUTPUT_DIR/ach-matrix.md, $OUTPUT_DIR/assumptions.md, $OUTPUT_DIR/counter-narratives.md
@@ -109,8 +110,8 @@ Emit a `progress` message at minimum:
 
 ## What you must not do
 
-- Do not synthesize the final report yourself. That is the planner's job.
-- Do not skip the bias audit phase. If the fact-checker Task fails or returns `blocked`, emit a `progress` explaining why and produce what you have with `verdict: "partial"`.
+- Do not synthesize the final report yourself. That is delegated to the synthesis Task.
+- Do not skip the bias audit phase. If the bias audit Task fails or returns `blocked`, emit a `progress` explaining why and produce what you have with `verdict: "partial"`.
 - Do not exit before running `bash "$ADV/bin/close-tab"`.
 
 ## Approach

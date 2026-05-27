@@ -21,25 +21,8 @@ MATCHES=$(echo "$INPUT" | node -e "
 " 2>/dev/null || true)
 
 if [[ "$MATCHES" == "1" ]]; then
-  # Brief sleep to let channel.js append fully flush before killing the process
+  # Brief sleep to let channel.js append fully flush before killing the process.
+  # bin/close-tab owns the ancestor-walk-and-kill; no duplicate walk needed here.
   sleep 0.3
-  # Walk the ancestor chain from $PPID looking for the claude process.
-  # The hook is invoked by claude directly, so $PPID is typically claude,
-  # but we traverse up to 3 levels to handle shell-wrapper intermediaries.
-  _pid=$PPID
-  _claude_pid=""
-  for _i in 1 2 3; do
-    _comm=$(ps -o comm= -p "$_pid" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d ' ')
-    if [[ "$_comm" == "claude" ]]; then
-      _claude_pid="$_pid"
-      break
-    fi
-    _next=$(ps -o ppid= -p "$_pid" 2>/dev/null | tr -d ' ')
-    [[ -z "$_next" || "$_next" == "0" || "$_next" == "$_pid" ]] && break
-    _pid="$_next"
-  done
-  if [[ -n "$_claude_pid" ]]; then
-    kill -TERM "$_claude_pid" 2>/dev/null || true
-  fi
   bash "$ADV/bin/close-tab"
 fi

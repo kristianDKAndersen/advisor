@@ -301,3 +301,28 @@ test('H2: non-Bash tool call exits 0 without action (AT-2.3)', () => {
   expect(result.status).toBe(0);
   expect(fs.existsSync(flagFile)).toBe(false);
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Hook centralization in summon.js (Fix #4)
+// ────────────────────────────────────────────────────────────────────────────
+
+test('summon.js centralizes PostToolUse hooks with correct matchers (Fix #4-1)', () => {
+  const summonSource = fs.readFileSync(path.join(ADVISOR_ROOT, 'lib', 'summon.js'), 'utf8');
+  // Source must reference PostToolUse, all 3 hook scripts, and both empty and Bash matchers
+  expect(summonSource).toContain('PostToolUse');
+  expect(summonSource).toContain('worker-trace.js');
+  expect(summonSource).toContain('worker-inbox-poll.sh');
+  expect(summonSource).toContain('worker-auto-close.sh');
+  // Exact matchers: two empty-string entries and one 'Bash'
+  const emptyMatcherCount = (summonSource.match(/matcher: ''/g) || []).length;
+  expect(emptyMatcherCount).toBeGreaterThanOrEqual(4); // PreToolUse + PreCompact + 2 PostToolUse
+  expect(summonSource).toContain("matcher: 'Bash'");
+});
+
+test('summon.js injects ADVISOR_WORKER_HOOKS env correctly (Fix #4-2)', () => {
+  const summonSource = fs.readFileSync(path.join(ADVISOR_ROOT, 'lib', 'summon.js'), 'utf8');
+  expect(summonSource).toContain('ADVISOR_WORKER_HOOKS');
+  expect(summonSource).toContain('WORKER_HOOKS_ALLOWLIST');
+  expect(summonSource).toContain("'planner'");
+  expect(summonSource).toContain("'researcher'");
+});

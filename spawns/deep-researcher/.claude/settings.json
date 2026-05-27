@@ -3,8 +3,7 @@
   "model": "sonnet",
   "env": {
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "ADVISOR_WORKER_HOOKS": "0"
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
   "permissions": {
     "allow": [
@@ -22,37 +21,6 @@
       "Bash(find *)",
       "Bash(bun *)",
       "Bash(echo *)"
-    ]
-  },
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node $ADV/lib/hooks/worker-trace.js"
-          }
-        ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash $ADV/lib/hooks/worker-inbox-poll.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash $ADV/lib/hooks/worker-auto-close.sh"
-          }
-        ]
-      }
     ]
   }
 }

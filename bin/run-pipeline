@@ -36,6 +36,9 @@ async function main() {
     process.exit(1);
   }
 
+  const { validatePipeline, runPipeline } = await import(path.join(__dirname, '../lib/pipeline.js'));
+  validatePipeline(pipeline);
+
   if (dryRun) {
     const now = new Date().toISOString();
     const steps = pipeline.steps.map((step, i) => ({
@@ -56,8 +59,6 @@ async function main() {
     process.exit(0);
   }
 
-  const { validatePipeline, runPipeline } = await import(path.join(__dirname, '../lib/pipeline.js'));
-  validatePipeline(pipeline);
   const report = await runPipeline(pipeline, {});
   process.stdout.write(JSON.stringify(report) + '\n');
   process.exit(0);
