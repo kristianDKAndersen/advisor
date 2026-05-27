@@ -1,7 +1,7 @@
 // Sub-teams advisor integration tests
 // Wave 1 (U0): written first as failing tests
 // Wave 2 (U6): --sub-team flag wiring tests pass after bin/summon + lib/summon.js changes
-import { test, expect, describe, afterEach } from 'bun:test';
+import { test, expect, describe, afterEach, beforeAll } from 'bun:test';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
@@ -11,6 +11,17 @@ const SUMMON_JS = path.join(REPO, 'lib', 'summon.js');
 
 // Track session dirs created during tests for cleanup
 const createdSids = [];
+
+function cleanupAll() {
+  for (const sid of createdSids.splice(0)) {
+    try { fs.rmSync(path.join(process.env.HOME, '.advisor', 'runs', sid), { recursive: true, force: true }); } catch (_) {}
+  }
+}
+
+beforeAll(() => {
+  process.on('exit', cleanupAll);
+  process.on('SIGINT', () => { cleanupAll(); process.exit(1); });
+});
 
 function runSummon(extraArgs = []) {
   const args = [

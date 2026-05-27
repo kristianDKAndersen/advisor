@@ -81,6 +81,13 @@ fs.writeFileSync(path.join(fakeSidDir, 'synthesis.log'),
   '{"seq":2,"established":"thing2"}\n'
 );
 
+// A test-session dir that should be filtered out of /api/sessions
+const testSessionSid = 'test-session-filter-check';
+const testSessionDir = path.join(tmpHome, '.advisor', 'runs', testSessionSid);
+fs.mkdirSync(path.join(testSessionDir, 'channel'), { recursive: true });
+fs.writeFileSync(path.join(testSessionDir, 'meta.json'),
+  JSON.stringify({ agent: 'coder', task: 'Test task T', isTestSession: true }));
+
 const tmpDist = fs.mkdtempSync(path.join(os.tmpdir(), 'adv-test-dist-'));
 const tmpAssetsDir = path.join(tmpDist, 'assets');
 fs.mkdirSync(tmpAssetsDir, { recursive: true });
@@ -163,4 +170,14 @@ test('GET /api/sessions no regression', async () => {
   assert.strictEqual(r.status, 200, 'status 200');
   const body = JSON.parse(r.body);
   assert.ok(Array.isArray(body), 'returns an array');
+});
+
+test('GET /api/sessions excludes dirs with isTestSession:true in meta.json', async () => {
+  const r = await httpGet(serverWithDist.port, '/api/sessions');
+  assert.strictEqual(r.status, 200, 'status 200');
+  const body = JSON.parse(r.body);
+  assert.ok(Array.isArray(body), 'returns an array');
+  const sids = body.map(s => s.sid);
+  assert.ok(sids.includes(fakeSid), 'normal session is present');
+  assert.ok(!sids.includes(testSessionSid), 'isTestSession dir is excluded');
 });

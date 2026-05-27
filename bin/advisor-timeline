@@ -35,10 +35,28 @@ function readJsonl(filePath) {
 // ── Session helpers ───────────────────────────────────────────────────────────
 function getSessions() {
   if (!fs.existsSync(RUNS_DIR)) return [];
+  const nowSec = Date.now() / 1000;
   return fs.readdirSync(RUNS_DIR)
     .filter(name => {
       const p = path.join(RUNS_DIR, name);
-      try { return fs.statSync(p).isDirectory(); } catch { return false; }
+      let stat;
+      try { stat = fs.statSync(p); } catch { return false; }
+      if (!stat.isDirectory()) return false;
+      // Skip dirs marked as test sessions
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(p, 'meta.json'), 'utf8'));
+        if (meta.isTestSession) return false;
+      } catch (_) {}
+      // Skip dirs with no worker activity (empty outbox) older than 24h
+      let outboxEmpty = true;
+      try {
+        outboxEmpty = fs.readFileSync(path.join(p, 'channel', 'outbox.jsonl'), 'utf8').trim() === '';
+      } catch (_) {}
+      if (outboxEmpty) {
+        const ageSec = nowSec - stat.mtimeMs / 1000;
+        if (ageSec > 24 * 3600) return false;
+      }
+      return true;
     })
     .sort()
     .reverse();
