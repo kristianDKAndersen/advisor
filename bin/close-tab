@@ -14,6 +14,13 @@
 
 set -u
 
+_tab_trace() {
+  mkdir -p "$HOME/.advisor/state" || true
+  printf '%s %s sid=- tty=%s action=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "$0")" "${2:--}" "$1" \
+    >> "$HOME/.advisor/state/tab-close-trace.log" || true
+}
+
 # ── Headless tmux path ────────────────────────────────────────────────────────
 _is_tmux=0
 if [[ "${ADVISOR_TMUX:-}" == "1" ]]; then
@@ -35,26 +42,30 @@ if [[ "$_is_tmux" == "1" ]]; then
     _sess=$(tmux display-message -p '#S' 2>/dev/null || true)
     [[ -n "$_sess" ]] && tmux kill-session -t "$_sess" 2>/dev/null || true
   fi
+  if [[ -n "${_sess:-}" ]]; then _tab_trace tmux-kill -; else _tab_trace no-match -; fi
   exit 0
 fi
 
 # ── Apple Terminal (TUI) path ─────────────────────────────────────────────────
 if [[ "$(uname)" != "Darwin" ]]; then
+  _tab_trace no-match -
   exit 0
 fi
 if ! command -v osascript >/dev/null 2>&1; then
+  _tab_trace no-match -
   exit 0
 fi
 
 myTTY=$(tty 2>/dev/null) || true
 [[ "$myTTY" != /dev/* ]] && { _pt=$(ps -o tty= -p "$PPID" 2>/dev/null | tr -d ' '); [[ "$_pt" =~ ^tty ]] && myTTY="/dev/$_pt"; }
-[[ -z "$myTTY" ]] && exit 0   # headless / non-TTY: no-op
+if [[ -z "$myTTY" ]]; then _tab_trace no-tty-noop -; exit 0; fi   # headless / non-TTY: no-op
 parent_name=$(ps -o comm= -p $PPID 2>/dev/null | awk -F'/' '{print $NF}')
 if [[ "$parent_name" == "claude" || "$parent_name" == "node" ]]; then
   kill -TERM $PPID 2>/dev/null || true
   sleep 0.5
   kill -0 $PPID 2>/dev/null && kill -KILL $PPID 2>/dev/null || true
 fi
+_tab_trace close-tab "$myTTY"
 osascript - "$myTTY" <<'EOF' &
 on run argv
   set myTTY to item 1 of argv

@@ -11,8 +11,15 @@
 
 set -u
 
+_tab_trace() {
+  mkdir -p "$HOME/.advisor/state" || true
+  printf '%s %s sid=%s tty=%s action=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "$0")" "${sid:--}" "${2:--}" "$1" \
+    >> "$HOME/.advisor/state/tab-close-trace.log" || true
+}
+
 sid="${1:-}"
-[[ -z "$sid" ]] && exit 0
+if [[ -z "$sid" ]]; then _tab_trace no-match -; exit 0; fi
 
 # Resolve runDir: primary location, then repo-local fallback.
 runDir="$HOME/.advisor/runs/$sid"
@@ -20,7 +27,7 @@ if [[ ! -d "$runDir" ]]; then
   advisorRepo="$(dirname "$(dirname "$0")")"
   runDir="$advisorRepo/.advisor-runs/$sid"
 fi
-[[ ! -d "$runDir" ]] && exit 0
+if [[ ! -d "$runDir" ]]; then _tab_trace no-match -; exit 0; fi
 
 # Defense in depth: kill any lingering claude processes whose argv contains sid.
 ps -ax -o pid=,comm=,args= 2>/dev/null | while IFS= read -r line; do
@@ -36,24 +43,28 @@ done
 # both the old "advisor-<sid>" format and the new "advisor-<sid>-<agent>" format).
 if command -v tmux >/dev/null 2>&1; then
   tmux ls -F '#{session_name}' 2>/dev/null | grep "^advisor-${sid}" | while IFS= read -r _sess; do
+    _tab_trace tmux-kill "$_sess"
     tmux kill-session -t "$_sess" 2>/dev/null || true
   done
 fi
 
 # ── Apple Terminal (TUI) path ─────────────────────────────────────────────────
 ttyFile="$runDir/tty.txt"
-[[ ! -f "$ttyFile" ]] && exit 0
+if [[ ! -f "$ttyFile" ]]; then _tab_trace no-match -; exit 0; fi
 
 myTTY=$(tr -d '[:space:]' < "$ttyFile")
-[[ -z "$myTTY" ]] && exit 0
+if [[ -z "$myTTY" ]]; then _tab_trace no-tty-noop -; exit 0; fi
 
 if [[ "$(uname)" != "Darwin" ]]; then
+  _tab_trace no-match "$myTTY"
   exit 0
 fi
 if ! command -v osascript >/dev/null 2>&1; then
+  _tab_trace no-match "$myTTY"
   exit 0
 fi
 
+_tab_trace close-tab "$myTTY"
 osascript - "$myTTY" <<'EOF'
 on run argv
   set myTTY to item 1 of argv
