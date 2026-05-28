@@ -38,6 +38,15 @@
             "command": "node -e \"const a=process.env.CLAUDE_TOOL_INPUT||''; if(!a.includes('channel.js')&&!a.includes('synthesize'))process.exit(0); const m=a.match(/--sid\\s+(\\S+)/); const q=a.match(/--seq\\s+(\\S+)/); const nx=a.match(/--next\\s+'([^']+)'/); if(!m||!q)process.exit(0); const {updateSessionState}=require('$CLAUDE_PROJECT_DIR/lib/session'); updateSessionState(m[1],s=>({...s,next_action:(nx&&nx[1])||s.next_action}));\""
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/test-on-edit.js"
+          }
+        ]
       }
     ],
     "Stop": [
