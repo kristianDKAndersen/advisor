@@ -63,21 +63,23 @@ fi
 echo ""
 
 # --- Process state ------------------------------------------------------
+# SID is interpolated as a literal (grep -F, ps+grep pipeline) so a SID
+# containing regex metacharacters cannot corrupt the count.
 echo "## Process State"
 TMUX_COUNT=0
 if command -v tmux >/dev/null 2>&1; then
-  TMUX_COUNT=$(tmux ls 2>/dev/null | grep -c "advisor-${SID}" || echo 0)
+  TMUX_COUNT=$(tmux ls 2>/dev/null | grep -Fc "advisor-${SID}" || echo 0)
 fi
 echo "- tmux sessions matching pattern: $TMUX_COUNT"
 
-PROC_COUNT=$(pgrep -f "$SID" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+PROC_COUNT=$(ps -eo pid,args 2>/dev/null | grep -F -- "$SID" | grep -v grep | wc -l | tr -d ' ' || echo 0)
 echo "- processes matching sid: $PROC_COUNT"
 echo ""
 
 # --- Sentinel files -----------------------------------------------------
 echo "## Sentinel Files"
 SENTINEL_COUNT=$(find /tmp -maxdepth 1 -name "claude-i-*.done" 2>/dev/null \
-  | grep -c "$SID" || echo 0)
+  | grep -Fc "$SID" || echo 0)
 echo "- /tmp/claude-i-*.done matching sid: $SENTINEL_COUNT"
 
 TTY_FILE="$RUN_DIR/tty.txt"
