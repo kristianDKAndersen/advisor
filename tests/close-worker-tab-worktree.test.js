@@ -7,7 +7,11 @@
 // in .git, which accumulated to 322 worktrees + 433 branches before the
 // 2026-05-28 bulk sweep. This test pins the cleanup contract.
 
+// NB: each test is given a 30s budget — git worktree add/remove against a
+// macOS /var/folders tmpdir routinely takes 2-4s, so the default 5s budget
+// trips the no-op test mid-setup.
 import { test, expect, beforeEach, afterEach } from 'bun:test';
+const TEST_TIMEOUT = 30000;
 import { spawnSync, execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -57,7 +61,7 @@ function listWorktrees() {
   return execFileSync('git', ['-C', ADVISOR_ROOT, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });
 }
 
-test('close-worker-tab removes the worker worktree and its ws/<sid> branch', () => {
+test('close-worker-tab removes the worker worktree and its ws/<sid> branch', { timeout: TEST_TIMEOUT }, () => {
   // Pre-conditions: worktree present, branch present.
   expect(fs.existsSync(workspaceDir)).toBe(true);
   expect(listBranches()).toContain(branchName);
@@ -75,7 +79,7 @@ test('close-worker-tab removes the worker worktree and its ws/<sid> branch', () 
   expect(listBranches()).toBe('');
 });
 
-test('close-worker-tab skips worktree cleanup when ADVISOR_SKIP_WORKTREE_CLEANUP=1', () => {
+test('close-worker-tab skips worktree cleanup when ADVISOR_SKIP_WORKTREE_CLEANUP=1', { timeout: TEST_TIMEOUT }, () => {
   const result = spawnSync(CLOSE_WORKER_TAB, [sid], {
     env: { ...process.env, HOME: tmpHome, ADVISOR_SKIP_WORKTREE_CLEANUP: '1' },
     encoding: 'utf8'
@@ -87,7 +91,7 @@ test('close-worker-tab skips worktree cleanup when ADVISOR_SKIP_WORKTREE_CLEANUP
   expect(listBranches()).toContain(branchName);
 });
 
-test('close-worker-tab is a no-op when no worktree is registered for the sid', () => {
+test('close-worker-tab is a no-op when no worktree is registered for the sid', { timeout: TEST_TIMEOUT }, () => {
   // Pre-emptively clean the worktree so the script has nothing to remove.
   execFileSync('git', ['-C', ADVISOR_ROOT, 'worktree', 'remove', '--force', workspaceDir]);
   execFileSync('git', ['-C', ADVISOR_ROOT, 'branch', '-D', branchName]);

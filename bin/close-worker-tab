@@ -85,3 +85,27 @@ on run argv
   end tell
 end run
 EOF
+
+# ── Worktree cleanup ─────────────────────────────────────────────────────────
+# Remove the per-worker git worktree (provisioned by lib/summon.js for coder
+# agents on branch ws/<sid>) so the .git/worktrees registry and the branch
+# refs don't accumulate. Set ADVISOR_SKIP_WORKTREE_CLEANUP=1 to preserve the
+# worktree for post-mortem debugging.
+#
+# Strategy: just try `git worktree remove` and treat success as proof that
+# this was a registered worktree. If the dir exists but isn't a worktree
+# (e.g. copyDir-provisioned non-coder workers), the remove fails silently
+# and we skip the branch delete. Avoids macOS /var ↔ /private/var symlink
+# headaches that a grep-based pre-check would hit.
+_cleanup_worktree() {
+  [[ "${ADVISOR_SKIP_WORKTREE_CLEANUP:-}" == "1" ]] && return 0
+  local advisorRoot workspaceDir
+  advisorRoot="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  workspaceDir="$runDir/workspace"
+  [[ -d "$workspaceDir" ]] || return 0
+  _tab_trace worktree-remove "$workspaceDir"
+  if git -C "$advisorRoot" worktree remove --force "$workspaceDir" 2>/dev/null; then
+    git -C "$advisorRoot" branch -D "ws/${sid}" 2>/dev/null || true
+  fi
+}
+_cleanup_worktree
