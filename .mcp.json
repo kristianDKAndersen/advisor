@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp", "--api-key", "YOUR_API_KEY"]
+    },
+    "sqlite": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@bytebase/dbhub@latest",
+        "--transport",
+        "stdio",
+        "--config",
+        "~/.advisor/vault/dbhub.toml"
+      ]
+    }
+  }
+}
