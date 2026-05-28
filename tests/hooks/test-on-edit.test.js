@@ -108,3 +108,43 @@ test('H5: ADVISOR_TEST_ON_EDIT=0 disables hook (AT-5.4)', () => {
   expect(result.status).toBe(0);
   expect(result.stderr.trim()).toBe('');
 });
+
+// ── RED tests (new, code-review patches) ───────────────────────────────────
+
+// AT-5.5: subdirectory lib files (e.g. lib/hooks/worker-trace.js) should map to
+// tests/hooks/worker-trace.test.js — current regex [^/]+ blocks subdirs.
+test('H5: lib/hooks/foo.js edit triggers tests/hooks/foo.test.js (subdir-mapping, RED)', () => {
+  fs.mkdirSync(path.join(fakeProjectDir, 'lib', 'hooks'), { recursive: true });
+  fs.mkdirSync(path.join(fakeProjectDir, 'tests', 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(fakeProjectDir, 'lib', 'hooks', 'foo.js'), 'module.exports = { foo: 1 };\n');
+  fs.writeFileSync(
+    path.join(fakeProjectDir, 'tests', 'hooks', 'foo.test.js'),
+    "import { test, expect } from 'bun:test';\ntest('subdir trivial', () => { expect(1).toBe(1); });\n"
+  );
+
+  const input = JSON.stringify({
+    tool_name: 'Edit',
+    tool_input: { file_path: path.join(fakeProjectDir, 'lib', 'hooks', 'foo.js') },
+    tool_response: { output: '' }
+  });
+
+  const result = spawnSync('node', [HOOK_PATH], {
+    input,
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_PROJECT_DIR: fakeProjectDir }
+  });
+
+  expect(result.status).toBe(0);
+  const lines = result.stderr.trim().split('\n').filter(Boolean);
+  expect(lines.length).toBeGreaterThan(0);
+  const parsed = JSON.parse(lines[lines.length - 1]);
+  expect(parsed.test_file).toBe('tests/hooks/foo.test.js');
+});
+
+// AT-5.6: hook source must include a timeout: option on the spawnSync call to
+// prevent a hanging test suite from blocking PostToolUse indefinitely.
+test('H5: hook source declares spawnSync timeout (timeout-contract, RED)', () => {
+  const src = fs.readFileSync(HOOK_PATH, 'utf8');
+  // The hook must pass an explicit timeout option to spawnSync.
+  expect(src).toMatch(/timeout:\s*\d+/);
+});
