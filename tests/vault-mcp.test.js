@@ -52,9 +52,9 @@ test('T2b MCP initialize handshake returns serverInfo', () => {
   expect(resp.result.protocolVersion).toBeDefined();
 });
 
-test('T2b MCP tools/list returns 7 tools', () => {
+test('T2b MCP tools/list returns 8 tools', () => {
   const resp = mcpCall({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-  expect(resp.result.tools.length).toBe(7);
+  expect(resp.result.tools.length).toBe(8);
   const names = resp.result.tools.map(t => t.name);
   expect(names).toContain('search');
   expect(names).toContain('backlinks');
@@ -63,6 +63,7 @@ test('T2b MCP tools/list returns 7 tools', () => {
   expect(names).toContain('hubs');
   expect(names).toContain('gaps');
   expect(names).toContain('due');
+  expect(names).toContain('communities');
 });
 
 test('T2b MCP search tool returns FTS results', () => {

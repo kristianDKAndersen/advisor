@@ -107,7 +107,7 @@ test('E: channel.js synthesize persists terminal.json for a result message', () 
     '--next',        'done',
   ], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: HOME_TMP, ADVISOR_RUNS_ROOT: runsDir },
+    env: { ...process.env, HOME: HOME_TMP, ADVISOR_RUNS_ROOT: runsDir, ADVISOR_SKIP_TAB_CLOSE: '1' },
     timeout: 10000,
   });
 
