@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(bin/advisor-vault *)",
+      "Bash(sqlite3 *)",
+      "Bash(find *)",
+      "Bash(ls *)",
+      "Bash(wc *)",
+      "Bash(stat *)"
+    ],
+    "deny": [
+      "Write",
+      "Edit"
+    ]
+  },
+  "env": {}
+}
