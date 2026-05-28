@@ -70,3 +70,29 @@ test('(d) setDueDate updates frontmatter due_date field and SQLite due_date colu
   d.close();
   expect(row?.due_date).toBe('2099-01-01');
 });
+
+// ── RED tests (new) ──────────────────────────────────────────────────────────
+
+test('(new-a) _upsertIndex syncs status column to SQLite', () => {
+  vault.writeNote('lessons/status-sync.md', { type: 'lesson', status: 'done' }, 'body');
+  const d = openDb();
+  const row = d.prepare("SELECT status FROM notes WHERE path = 'lessons/status-sync.md'").get();
+  d.close();
+  expect(row?.status).toBe('done');
+});
+
+test('(new-b) listDue window math is timezone-invariant (UTC+12)', () => {
+  process.env.TZ = 'Pacific/Auckland';
+  vault.writeNote('lessons/tz-test.md', { type: 'lesson', due_date: '2026-06-12' }, 'tz test body');
+  const results = vault.listDue('2026-05-28', 14);
+  const paths = results.map(r => r.path);
+  // May 28 + 14 = June 11; note due June 12 must NOT be returned
+  expect(paths).not.toContain('lessons/tz-test.md');
+});
+
+test('(new-c) setStatus throws on multi-line YAML frontmatter', () => {
+  const abs = path.join(tmpDir, 'lessons', 'multiline-fm.md');
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, '---\ntype: lesson\ntags:\n  - foo\n  - bar\n---\n\nBody here.\n');
+  expect(() => vault.setStatus('lessons/multiline-fm.md', 'done')).toThrow(/multi-line frontmatter/);
+});
