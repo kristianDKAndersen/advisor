@@ -18,10 +18,10 @@ async function main() {
   const filePath = event?.tool_input?.file_path;
   if (!filePath) return;
 
-  const match = filePath.match(/(^|\/)lib\/([^/]+)\.js$/);
+  const match = filePath.match(/(^|\/)lib\/(.+)\.js$/);
   if (!match) return;
 
-  const name = match[2];
+  const name = match[2]; // may contain '/' for lib subdirs (e.g. hooks/foo)
   const projectDir = process.env.CLAUDE_PROJECT_DIR;
   if (!projectDir) return;
 
@@ -31,7 +31,8 @@ async function main() {
   const start = Date.now();
   const result = spawnSync('bun', ['test', `tests/${name}.test.js`], {
     cwd: projectDir,
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 30000 // 30s — kill if the test hangs so PostToolUse never blocks
   });
   const elapsed = Date.now() - start;
 
@@ -39,6 +40,7 @@ async function main() {
     test_file: `tests/${name}.test.js`,
     exit_code: result.status,
     elapsed_ms: elapsed,
+    timed_out: result.signal === 'SIGTERM' || result.error?.code === 'ETIMEDOUT',
     stdout: (result.stdout || '').toString().slice(0, 500),
     stderr: (result.stderr || '').toString().slice(0, 500)
   };
