@@ -72,13 +72,18 @@ Parse the resulting `messages` array. For each message:
 Drain unresponsive teammates. After processing inbox messages, emit a proactive terminate to any teammate that has no done signal and no observed claim. A role with neither is unresponsive and will never make forward progress; emitting terminate now surfaces the failure early rather than waiting for the end-of-run sweep at Step 3. This is the mid-run intervention described in spec §6 ("Delegator writes `type: terminate` to teammate's inbox … teammate exits claim loop immediately on terminate").
 
 ```bash
-# Drain unresponsive teammates — proactive mid-run terminate
-# TODO: once lib/reclaim.js liveness-timeout branch lands, also emit
-#       terminate for roles in reclaim_result.liveness_timeouts.
+# Drain unresponsive teammates — proactive mid-run terminate.
+# Grace period: do not fire until TASK_DEADLINE_SECS (120s) after run start,
+# matching reclaim.js Branch 3. This gives teammates time to start and claim
+# their first task before the delegator declares them unresponsive. Also
+# consumes reclaim_result.liveness_timeouts when present.
 node -e "
 const fs=require('fs');
 const st=JSON.parse(fs.readFileSync('{{run_dir}}/state.json','utf8'));
 const tl=JSON.parse(fs.readFileSync('{{run_dir}}/task-list.json','utf8'));
+const GRACE=120;
+const elapsed=Math.floor(Date.now()/1000)-(st.ts_started||0);
+if(elapsed<GRACE){process.exit(0);}
 for(const role of (st.teammate_roles||[])){
   const done=fs.existsSync('{{run_dir}}/signals/done.'+role);
   const hasClaim=tl.tasks.some(t=>t.claimed_by===role);
@@ -94,7 +99,7 @@ for(const role of (st.teammate_roles||[])){
     process.stdout.write(lines.some(l=>{try{const m=JSON.parse(l);return m.from==='delegator'&&m.type==='terminate';}catch(e){return false;}})?'yes':'no');
   " "$INBOX_FILE")
   [ "$ALREADY_SENT" = "yes" ] && continue
-  bun {{lib_dir}}/inbox.js send --run-dir {{run_dir}} --to "$role" --type terminate --task-id '' --body 'no activity detected — exit claim loop'
+  bun {{lib_dir}}/inbox.js send --run-dir {{run_dir}} --to "$role" --type terminate --task-id '' --body 'no activity detected — exit claim loop' --from delegator
   echo "[delegator] proactive terminate sent to $role (no done signal, no claims observed)"
 done
 ```
