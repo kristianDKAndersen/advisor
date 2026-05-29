@@ -84,38 +84,46 @@ LAUNCH_SH=$(extract launchScript)
 
 if [[ -n "$TUI" ]]; then
   if [[ "${ADVISOR_TMUX_MULTIPLEX:-}" == "1" ]]; then
-    # --tui routed through tmux: spawn worker into shared 'advisor' session,
-    # then open Terminal attached to that session so the user lands in the window.
-    WIN_NAME="${AGENT}-${SID}"
+    # --tui tiled: all workers share one 'tui' window in the advisor session.
+    # ensureTuiPane handles the spinlock, session setup, window-or-split,
+    # pane tagging, and layout — prints the pane_id to stdout.
     SESSION_DIR="$(dirname "$LAUNCH_SH")"
     LOG_FILE="$SESSION_DIR/claude.log"
     PROMPT_FILE="$(extract promptFile)"
     TIMEOUT_MS=$((TIMEOUT_SEC * 1000))
-    # Ensure the advisor session exists before opening Terminal (idempotent, race-safe).
-    tmux new-session -d -s advisor -x 220 -y 50 -n __advisor_scratch__ 2>/dev/null || tmux has-session -t advisor
+    if ! PANE_ID=$(node "$ROOT/lib/tmux-runner.js" --ensure-tui-pane --sid "$SID"); then
+      echo "[summon] ensureTuiPane failed for sid=$SID" >&2
+      exit 1
+    fi
+    echo "[summon] --tui (tiled) — agent=$AGENT sid=$SID pane=$PANE_ID" >&2
     nohup env ADVISOR_TMUX_MULTIPLEX=1 node "$ROOT/lib/tmux-runner.js" \
       --sid "$SID" --agent "$AGENT" \
       --launch-script "$LAUNCH_SH" \
       --prompt-file "$PROMPT_FILE" \
       --log-file "$LOG_FILE" \
+      --pane-id "$PANE_ID" \
       --timeout-ms "$TIMEOUT_MS" \
       >>"$SESSION_DIR/tmux-runner.log" 2>&1 & disown
-    echo "[summon] --tui (multiplex) — agent=$AGENT sid=$SID window=$WIN_NAME" >&2
-    if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
-      WIN_NAME_QUOTED="${WIN_NAME//\'/\'\\\'\'}"
-      osascript \
-        -e "set wasRunning to application \"Terminal\" is running" \
-        -e "tell application \"Terminal\"" \
-        -e "activate" \
-        -e "if wasRunning then" \
-        -e "do script \"tmux attach -t advisor \\\\; select-window -t '${WIN_NAME_QUOTED}'\"" \
-        -e "else" \
-        -e "delay 0.2" \
-        -e "do script \"tmux attach -t advisor \\\\; select-window -t '${WIN_NAME_QUOTED}'\" in window 1" \
-        -e "end if" \
-        -e "end tell" >/dev/null
-    else
-      echo "[summon] run: tmux attach -t advisor \\; select-window -t '${WIN_NAME}'" >&2
+    # Open Terminal only when no client is already attached to the advisor session.
+    # An existing client already sees the new tiled pane — a second Terminal would
+    # duplicate the view.
+    CLIENT_COUNT=$(tmux list-clients -t advisor 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "${CLIENT_COUNT}" == "0" ]]; then
+      if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+        osascript \
+          -e "set wasRunning to application \"Terminal\" is running" \
+          -e "tell application \"Terminal\"" \
+          -e "activate" \
+          -e "if wasRunning then" \
+          -e "do script \"tmux attach -t advisor \\\\; select-window -t tui\"" \
+          -e "else" \
+          -e "delay 0.2" \
+          -e "do script \"tmux attach -t advisor \\\\; select-window -t tui\" in window 1" \
+          -e "end if" \
+          -e "end tell" >/dev/null
+      else
+        echo "[summon] run: tmux attach -t advisor \\; select-window -t tui" >&2
+      fi
     fi
   else
     # Legacy --tui: open an interactive claude session in a new macOS Terminal tab.
