@@ -38,10 +38,18 @@ done
 # Look for any tmux session whose name starts with "advisor-<sid>" (covers
 # both the old "advisor-<sid>" format and the new "advisor-<sid>-<agent>" format).
 if command -v tmux >/dev/null 2>&1; then
-  tmux ls -F '#{session_name}' 2>/dev/null | grep "^advisor-${sid}" | while IFS= read -r _sess; do
-    _tab_trace tmux-kill "$_sess"
-    tmux kill-session -t "$_sess" 2>/dev/null || true
-  done
+  WIN_ID=$(tmux list-windows -t advisor -F '#{window_id} #{window_name}' 2>/dev/null \
+    | grep " .*${sid}" | awk '{print $1}' | head -1)
+  if [[ -n "$WIN_ID" ]]; then
+    _tab_trace tmux-kill "advisor:${WIN_ID}"
+    tmux kill-window -t "advisor:${WIN_ID}" 2>/dev/null || true
+  else
+    # Fallback: old session-per-worker (flag-off path or pre-migration sessions)
+    tmux ls -F '#{session_name}' 2>/dev/null | grep "^advisor-${sid}" | while IFS= read -r _sess; do
+      _tab_trace tmux-kill "$_sess"
+      tmux kill-session -t "$_sess" 2>/dev/null || true
+    done
+  fi
 fi
 
 # ── Apple Terminal (TUI) path ─────────────────────────────────────────────────

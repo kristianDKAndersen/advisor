@@ -83,36 +83,70 @@ SID=$(extract sid)
 LAUNCH_SH=$(extract launchScript)
 
 if [[ -n "$TUI" ]]; then
-  # TUI mode: open an interactive claude session in a new macOS Terminal tab.
-  #
-  # Wrap $LAUNCH_SH for safe embedding inside the do-script shell command.
-  # The AppleScript string itself is double-quoted, but Terminal then re-parses
-  # the contents as a shell command — so we need shell-level quoting around the
-  # path to survive spaces. We also escape single quotes (rare but real, e.g.
-  # /Users/O'Brien/...) using the standard '\'' bash trick.
-  #
-  # Window-handling note: if Terminal isn't already running, `activate` cold-launches it
-  # and macOS auto-opens a blank window. A naked `do script` then opens a SECOND window,
-  # leaving an empty terminal behind. We detect the cold-start case and reuse window 1.
-  LAUNCH_SH_QUOTED="'${LAUNCH_SH//\'/\'\\\'\'}'"
-
-  if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
-    osascript \
-      -e "set wasRunning to application \"Terminal\" is running" \
-      -e "tell application \"Terminal\"" \
-      -e "activate" \
-      -e "if wasRunning then" \
-      -e "do script \"bash $LAUNCH_SH_QUOTED\"" \
-      -e "else" \
-      -e "delay 0.2" \
-      -e "do script \"bash $LAUNCH_SH_QUOTED\" in window 1" \
-      -e "end if" \
-      -e "end tell" >/dev/null
-    echo "[summon] opened Terminal tab — agent=$AGENT sid=$SID" >&2
+  if [[ "${ADVISOR_TMUX_MULTIPLEX:-}" == "1" ]]; then
+    # --tui routed through tmux: spawn worker into shared 'advisor' session,
+    # then open Terminal attached to that session so the user lands in the window.
+    WIN_NAME="${AGENT}-${SID}"
+    SESSION_DIR="$(dirname "$LAUNCH_SH")"
+    LOG_FILE="$SESSION_DIR/claude.log"
+    PROMPT_FILE="$(extract promptFile)"
+    TIMEOUT_MS=$((TIMEOUT_SEC * 1000))
+    # Ensure the advisor session exists before opening Terminal (idempotent, race-safe).
+    tmux new-session -A -d -s advisor -x 220 -y 50 -n __advisor_scratch__ 2>/dev/null || tmux has-session -t advisor
+    nohup env ADVISOR_TMUX_MULTIPLEX=1 node "$ROOT/lib/tmux-runner.js" \
+      --sid "$SID" --agent "$AGENT" \
+      --launch-script "$LAUNCH_SH" \
+      --prompt-file "$PROMPT_FILE" \
+      --log-file "$LOG_FILE" \
+      --timeout-ms "$TIMEOUT_MS" \
+      >>"$SESSION_DIR/tmux-runner.log" 2>&1 & disown
+    echo "[summon] --tui (multiplex) — agent=$AGENT sid=$SID window=$WIN_NAME" >&2
+    if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+      WIN_NAME_QUOTED="${WIN_NAME//\'/\'\\\'\'}"
+      osascript \
+        -e "set wasRunning to application \"Terminal\" is running" \
+        -e "tell application \"Terminal\"" \
+        -e "activate" \
+        -e "if wasRunning then" \
+        -e "do script \"tmux attach -t advisor \\\\; select-window -t '${WIN_NAME_QUOTED}'\"" \
+        -e "else" \
+        -e "delay 0.2" \
+        -e "do script \"tmux attach -t advisor \\\\; select-window -t '${WIN_NAME_QUOTED}'\" in window 1" \
+        -e "end if" \
+        -e "end tell" >/dev/null
+    else
+      echo "[summon] run: tmux attach -t advisor \\; select-window -t '${WIN_NAME}'" >&2
+    fi
   else
-    echo "[summon] non-macOS or no osascript. Run this in a new terminal:" >&2
+    # Legacy --tui: open an interactive claude session in a new macOS Terminal tab.
+    #
+    # Wrap $LAUNCH_SH for safe embedding inside the do-script shell command.
+    # The AppleScript string itself is double-quoted, but Terminal then re-parses
+    # the contents as a shell command — so we need shell-level quoting around the
+    # path to survive spaces. We also escape single quotes (rare but real, e.g.
+    # /Users/O'Brien/...) using the standard '\'' bash trick.
+    #
+    # Window-handling note: if Terminal isn't already running, `activate` cold-launches it
+    # and macOS auto-opens a blank window. A naked `do script` then opens a SECOND window,
+    # leaving an empty terminal behind. We detect the cold-start case and reuse window 1.
     LAUNCH_SH_QUOTED="'${LAUNCH_SH//\'/\'\\\'\'}'"
-    echo "  bash $LAUNCH_SH_QUOTED" >&2
+    if [[ "$(uname)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+      osascript \
+        -e "set wasRunning to application \"Terminal\" is running" \
+        -e "tell application \"Terminal\"" \
+        -e "activate" \
+        -e "if wasRunning then" \
+        -e "do script \"bash $LAUNCH_SH_QUOTED\"" \
+        -e "else" \
+        -e "delay 0.2" \
+        -e "do script \"bash $LAUNCH_SH_QUOTED\" in window 1" \
+        -e "end if" \
+        -e "end tell" >/dev/null
+      echo "[summon] opened Terminal tab — agent=$AGENT sid=$SID" >&2
+    else
+      echo "[summon] non-macOS or no osascript. Run this in a new terminal:" >&2
+      echo "  bash $LAUNCH_SH_QUOTED" >&2
+    fi
   fi
 else
   # Headless mode (default): run via tmux+Stop-hook; blocks until claude finishes.
@@ -140,13 +174,53 @@ else
   fi
 
   TIMEOUT_MS=$((TIMEOUT_SEC * 1000))
-  nohup node "$ROOT/lib/tmux-runner.js" \
-    --sid "$SID" \
-    --launch-script "$LAUNCH_SH" \
-    --prompt-file "$PROMPT_FILE" \
-    --log-file "$LOG_FILE" \
-    --timeout-ms "$TIMEOUT_MS" \
-    >>"$SESSION_DIR/tmux-runner.log" 2>&1 & disown
+
+  if [[ "${ADVISOR_TMUX_MULTIPLEX:-}" == "1" && -n "$ENSEMBLE" ]]; then
+    # ENSEMBLE + MULTIPLEX: orchestrate window+panes in bin/summon, pass --pane-id per worker.
+    N_SESSIONS=$(echo "$META" | node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8')); console.log(m.sessions ? m.sessions.length : 1);")
+    SID_SHORT_TS="$(date +%Y%m%d)"
+    WIN_NAME="ensemble-${N_SESSIONS}-${SID_SHORT_TS}"
+
+    tmux new-session -A -d -s advisor -x 220 -y 50 -n __advisor_scratch__ 2>/dev/null || tmux has-session -t advisor
+
+    FIRST=$(tmux new-window -d -t advisor -n "$WIN_NAME" -P -F '#{window_id}:#{pane_id}')
+    WIN_ID="${FIRST%%:*}"
+    PANE_IDS=("${FIRST##*:}")
+
+    tmux kill-window -t 'advisor:__advisor_scratch__' 2>/dev/null || true
+
+    for i in $(seq 1 $((N_SESSIONS - 1))); do
+      pid=$(tmux split-window -d -t "advisor:${WIN_ID}" -P -F '#{pane_id}')
+      PANE_IDS+=("$pid")
+    done
+
+    tmux select-layout -t "advisor:${WIN_ID}" tiled
+
+    for i in $(seq 0 $((N_SESSIONS - 1))); do
+      SID_i=$(echo "$META" | node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8')); console.log(m.sessions[$i].sid);")
+      LAUNCH_i=$(echo "$META" | node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8')); console.log(m.sessions[$i].launchScript);")
+      PROMPT_i=$(echo "$META" | node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8')); console.log(m.sessions[$i].promptFile);")
+      SESSION_DIR_i="$(dirname "$LAUNCH_i")"
+      LOG_i="$SESSION_DIR_i/claude.log"
+      nohup env ADVISOR_TMUX_MULTIPLEX=1 node "$ROOT/lib/tmux-runner.js" \
+        --sid "$SID_i" --agent "$AGENT" \
+        --launch-script "$LAUNCH_i" \
+        --prompt-file "$PROMPT_i" \
+        --log-file "$LOG_i" \
+        --pane-id "${PANE_IDS[$i]}" \
+        --timeout-ms "$TIMEOUT_MS" \
+        >> "$SESSION_DIR_i/tmux-runner.log" 2>&1 & disown
+    done
+  else
+    # Solo headless (or non-multiplex): forward ADVISOR_TMUX_MULTIPLEX into the runner process.
+    nohup env ADVISOR_TMUX_MULTIPLEX="${ADVISOR_TMUX_MULTIPLEX:-}" node "$ROOT/lib/tmux-runner.js" \
+      --sid "$SID" --agent "$AGENT" \
+      --launch-script "$LAUNCH_SH" \
+      --prompt-file "$PROMPT_FILE" \
+      --log-file "$LOG_FILE" \
+      --timeout-ms "$TIMEOUT_MS" \
+      >>"$SESSION_DIR/tmux-runner.log" 2>&1 & disown
+  fi
 fi
 
 # Emit the full JSON on stdout for the Advisor to consume.

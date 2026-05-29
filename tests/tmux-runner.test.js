@@ -350,12 +350,20 @@ test('reaperSweepOrphanSessions: kills session with no run dir and no live proce
 
 // ── makeWindowName (multiplex) ────────────────────────────────────────────────
 
-test('makeWindowName: agent+sid returns agent-8chars', () => {
-  expect(makeWindowName('planner', '1780038229-ca2f0f1234')).toBe('planner-17800382');
+test('makeWindowName: agent+sid returns agent-fullsid', () => {
+  expect(makeWindowName('planner', '1780038229-ca2f0f1234')).toBe('planner-1780038229-ca2f0f1234');
 });
 
-test('makeWindowName: no agent returns worker-8chars', () => {
-  expect(makeWindowName(null, '1780038229-ca2f0f1234')).toBe('worker-17800382');
+test('makeWindowName: no agent returns worker-fullsid', () => {
+  expect(makeWindowName(null, '1780038229-ca2f0f1234')).toBe('worker-1780038229-ca2f0f1234');
+});
+
+test('makeWindowName: same-second sids produce distinct window names', () => {
+  const name1 = makeWindowName('coder', '1780040900-175760');
+  const name2 = makeWindowName('coder', '1780040900-ea7fd1');
+  expect(name1).toBe('coder-1780040900-175760');
+  expect(name2).toBe('coder-1780040900-ea7fd1');
+  expect(name1).not.toBe(name2);
 });
 
 // ── ensureAdvisorSession (multiplex) ─────────────────────────────────────────
@@ -363,7 +371,95 @@ test('makeWindowName: no agent returns worker-8chars', () => {
 test('ensureAdvisorSession: calls new-session -A -d -s advisor with correct args', () => {
   const calls = [];
   ensureAdvisorSession((cmd, args) => calls.push([cmd, ...args]));
-  expect(calls[0]).toEqual(['tmux', 'new-session', '-A', '-d', '-s', 'advisor', '-x', '220', '-y', '50']);
+  expect(calls[0]).toEqual(['tmux', 'new-session', '-A', '-d', '-s', 'advisor', '-x', '220', '-y', '50', '-n', '__advisor_scratch__']);
+});
+
+test('ensureAdvisorSession: includes -n __advisor_scratch__ in new-session call', () => {
+  const calls = [];
+  ensureAdvisorSession((cmd, args) => calls.push([cmd, ...args]));
+  const newSession = calls.find(c => c[0] === 'tmux' && c[1] === 'new-session');
+  expect(newSession).toBeDefined();
+  expect(newSession).toContain('-n');
+  expect(newSession).toContain('__advisor_scratch__');
+});
+
+test('ensureAdvisorSession: race-tolerant — new-session throws but has-session succeeds → does not throw', () => {
+  let hasCalled = false;
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'new-session') throw new Error('session already exists');
+    if (cmd === 'tmux' && args[0] === 'has-session') { hasCalled = true; return ''; }
+    return '';
+  };
+  expect(() => ensureAdvisorSession(execFn)).not.toThrow();
+  expect(hasCalled).toBe(true);
+});
+
+test('ensureAdvisorSession: throws when new-session throws AND has-session throws', () => {
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'new-session') throw new Error('creation failed');
+    if (cmd === 'tmux' && args[0] === 'has-session') throw new Error('session not found');
+    return '';
+  };
+  expect(() => ensureAdvisorSession(execFn)).toThrow();
+});
+
+test('spawnHeadless multiplex solo: stray-window kill targets advisor:__advisor_scratch__ not advisor:0', async () => {
+  const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
+  process.env.ADVISOR_TMUX_MULTIPLEX = '1';
+
+  try {
+    const launchScript = path.join(tmpDir, 'launch-sw.sh');
+    const promptFile = path.join(tmpDir, 'prompt-sw.txt');
+    const logFile = path.join(tmpDir, 'claude-sw.log');
+    const transcriptFile = path.join(tmpDir, 'transcript-sw.jsonl');
+
+    fs.mkdirSync(path.join(tmpDir, 'channel'), { recursive: true });
+    fs.writeFileSync(launchScript, '#!/bin/bash\n');
+    fs.writeFileSync(promptFile, 'Scratch test');
+    fs.writeFileSync(transcriptFile, JSON.stringify({
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Scratch done!' }] },
+    }) + '\n');
+
+    const paneId = '%42';
+    const killWindowCalls = [];
+
+    const execFn = (cmd, args) => {
+      if (cmd === 'tmux' && args[0] === 'new-window') {
+        const shCmd = args[args.length - 1];
+        const m = shCmd.match(/CLAUDE_I_SENTINEL='([^']+)'/);
+        if (m) {
+          const sp = m[1];
+          fs.writeFileSync(sp + '.json', JSON.stringify({ transcript_path: transcriptFile }));
+          fs.writeFileSync(sp, '');
+        }
+        return `${paneId}\n`;
+      }
+      if (cmd === 'tmux' && args[0] === 'kill-window') {
+        killWindowCalls.push(args);
+        return '';
+      }
+      if (cmd === 'tmux' && args[0] === 'capture-pane') return 'content\n';
+      return '';
+    };
+
+    await spawnHeadless({
+      sid: 'scratch12-def678',
+      agent: 'planner',
+      launchScript,
+      promptFile,
+      logFile,
+      timeoutMs: 5000,
+      execFn,
+    });
+
+    const killedByIndex = killWindowCalls.some(a => a.includes('advisor:0'));
+    expect(killedByIndex).toBe(false);
+    const killedByName = killWindowCalls.some(a => a.includes('advisor:__advisor_scratch__'));
+    expect(killedByName).toBe(true);
+  } finally {
+    if (origMultiplex === undefined) delete process.env.ADVISOR_TMUX_MULTIPLEX;
+    else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
+  }
 });
 
 // ── spawnHeadless multiplex solo path ────────────────────────────────────────

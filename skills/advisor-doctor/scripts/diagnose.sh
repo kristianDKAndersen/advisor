@@ -68,9 +68,17 @@ echo ""
 echo "## Process State"
 TMUX_COUNT=0
 if command -v tmux >/dev/null 2>&1; then
-  TMUX_COUNT=$(tmux ls 2>/dev/null | grep -Fc "advisor-${SID}" || echo 0)
+  if [[ "${ADVISOR_TMUX_MULTIPLEX:-}" == "1" ]]; then
+    TMUX_COUNT=$(tmux list-windows -t advisor -F '#{window_name}' 2>/dev/null \
+      | grep -Fc "$SID" || echo 0)
+    echo "- advisor session windows matching sid: $TMUX_COUNT"
+  else
+    TMUX_COUNT=$(tmux ls 2>/dev/null | grep -Fc "advisor-${SID}" || echo 0)
+    echo "- tmux sessions matching pattern: $TMUX_COUNT"
+  fi
+else
+  echo "- tmux sessions matching pattern: $TMUX_COUNT"
 fi
-echo "- tmux sessions matching pattern: $TMUX_COUNT"
 
 PROC_COUNT=$(ps -eo pid,args 2>/dev/null | grep -F -- "$SID" | grep -v grep | wc -l | tr -d ' ' || echo 0)
 echo "- processes matching sid: $PROC_COUNT"
