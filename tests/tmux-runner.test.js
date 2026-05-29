@@ -348,6 +348,119 @@ test('reaperSweepOrphanSessions: kills session with no run dir and no live proce
   expect(killed).toContain(`advisor-${sid}`);
 });
 
+// ── reaperSweepOrphanSessions advisor-window sweep (new fixes) ───────────────
+
+test('reaper advisor-window sweep (a): unmatched/ensemble window skipped — no kill-window', () => {
+  const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
+  process.env.ADVISOR_TMUX_MULTIPLEX = '1';
+  try {
+    const runsDir = path.join(tmpDir, 'runs-sw-a');
+    fs.mkdirSync(runsDir, { recursive: true });
+    // No run dir entry that matches 'ensemble-3-20260529'
+
+    const killedWindows = [];
+    const execFn = (cmd, args) => {
+      if (cmd === 'tmux' && args[0] === 'ls') return '';
+      if (cmd === 'tmux' && args[0] === 'list-windows') return 'ensemble-3-20260529\n';
+      if (cmd === 'tmux' && args[0] === 'kill-window') {
+        killedWindows.push(args[args.indexOf('-t') + 1]);
+        return '';
+      }
+      if (cmd === 'pgrep') throw new Error('not found');
+      return '';
+    };
+
+    reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+    expect(killedWindows).toHaveLength(0);
+  } finally {
+    if (origMultiplex === undefined) delete process.env.ADVISOR_TMUX_MULTIPLEX;
+    else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
+  }
+});
+
+test('reaper advisor-window sweep (b): matched old window + no live proc → kill-window issued', () => {
+  const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
+  process.env.ADVISOR_TMUX_MULTIPLEX = '1';
+  try {
+    const runsDir = path.join(tmpDir, 'runs-sw-b');
+    const sid = 'aabbccdd-1234';
+    const runDir = path.join(runsDir, sid);
+    fs.mkdirSync(runDir, { recursive: true });
+    const sessionJsonPath = path.join(runDir, 'session.json');
+    fs.writeFileSync(sessionJsonPath, '{}');
+    const oldTime = new Date(Date.now() - 25 * 3600 * 1000);
+    fs.utimesSync(sessionJsonPath, oldTime, oldTime);
+
+    const killedWindows = [];
+    const execFn = (cmd, args) => {
+      if (cmd === 'tmux' && args[0] === 'ls') return '';
+      if (cmd === 'tmux' && args[0] === 'list-windows') return `coder-${sid}\n`;
+      if (cmd === 'tmux' && args[0] === 'kill-window') {
+        killedWindows.push(args[args.indexOf('-t') + 1]);
+        return '';
+      }
+      if (cmd === 'pgrep') throw new Error('not found');
+      return '';
+    };
+
+    reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+    expect(killedWindows).toContain(`advisor:coder-${sid}`);
+  } finally {
+    if (origMultiplex === undefined) delete process.env.ADVISOR_TMUX_MULTIPLEX;
+    else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
+  }
+});
+
+test('reaper advisor-window sweep (c): matched fresh window → no kill-window', () => {
+  const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
+  process.env.ADVISOR_TMUX_MULTIPLEX = '1';
+  try {
+    const runsDir = path.join(tmpDir, 'runs-sw-c');
+    const sid = 'fresh111-2345';
+    const runDir = path.join(runsDir, sid);
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, 'session.json'), '{}');
+
+    const killedWindows = [];
+    const execFn = (cmd, args) => {
+      if (cmd === 'tmux' && args[0] === 'ls') return '';
+      if (cmd === 'tmux' && args[0] === 'list-windows') return `coder-${sid}\n`;
+      if (cmd === 'tmux' && args[0] === 'kill-window') {
+        killedWindows.push(args[args.indexOf('-t') + 1]);
+        return '';
+      }
+      if (cmd === 'pgrep') throw new Error('not found');
+      return '';
+    };
+
+    reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+    expect(killedWindows).toHaveLength(0);
+  } finally {
+    if (origMultiplex === undefined) delete process.env.ADVISOR_TMUX_MULTIPLEX;
+    else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
+  }
+});
+
+test('ensureAdvisorSession (d): new-session args do NOT contain -A, DO contain -n __advisor_scratch__; race-tolerant', () => {
+  const calls = [];
+  ensureAdvisorSession((cmd, args) => calls.push([cmd, ...args]));
+  const newSession = calls.find(c => c[0] === 'tmux' && c[1] === 'new-session');
+  expect(newSession).toBeDefined();
+  expect(newSession).not.toContain('-A');
+  expect(newSession).toContain('-n');
+  expect(newSession).toContain('__advisor_scratch__');
+
+  // race-tolerant: new-session throws but has-session succeeds → no throw
+  let hasCalled = false;
+  const execFn2 = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'new-session') throw new Error('session already exists');
+    if (cmd === 'tmux' && args[0] === 'has-session') { hasCalled = true; return ''; }
+    return '';
+  };
+  expect(() => ensureAdvisorSession(execFn2)).not.toThrow();
+  expect(hasCalled).toBe(true);
+});
+
 // ── makeWindowName (multiplex) ────────────────────────────────────────────────
 
 test('makeWindowName: agent+sid returns agent-fullsid', () => {
@@ -368,10 +481,10 @@ test('makeWindowName: same-second sids produce distinct window names', () => {
 
 // ── ensureAdvisorSession (multiplex) ─────────────────────────────────────────
 
-test('ensureAdvisorSession: calls new-session -A -d -s advisor with correct args', () => {
+test('ensureAdvisorSession: calls new-session -d -s advisor (no -A) with correct args', () => {
   const calls = [];
   ensureAdvisorSession((cmd, args) => calls.push([cmd, ...args]));
-  expect(calls[0]).toEqual(['tmux', 'new-session', '-A', '-d', '-s', 'advisor', '-x', '220', '-y', '50', '-n', '__advisor_scratch__']);
+  expect(calls[0]).toEqual(['tmux', 'new-session', '-d', '-s', 'advisor', '-x', '220', '-y', '50', '-n', '__advisor_scratch__']);
 });
 
 test('ensureAdvisorSession: includes -n __advisor_scratch__ in new-session call', () => {
@@ -514,7 +627,7 @@ test('spawnHeadless multiplex solo: new-window + paneId targeting + kill-pane cl
 
     const newSession = calls.find(c => c[0] === 'tmux' && c[1] === 'new-session');
     expect(newSession).toBeDefined();
-    expect(newSession).toContain('-A');
+    expect(newSession).not.toContain('-A');
 
     const newWindow = calls.find(c => c[0] === 'tmux' && c[1] === 'new-window');
     expect(newWindow).toBeDefined();
