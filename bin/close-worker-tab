@@ -38,17 +38,33 @@ done
 # Look for any tmux session whose name starts with "advisor-<sid>" (covers
 # both the old "advisor-<sid>" format and the new "advisor-<sid>-<agent>" format).
 if command -v tmux >/dev/null 2>&1; then
-  WIN_ID=$(tmux list-windows -t advisor -F '#{window_id} #{window_name}' 2>/dev/null \
-    | grep " .*${sid}" | awk '{print $1}' | head -1)
-  if [[ -n "$WIN_ID" ]]; then
-    _tab_trace tmux-kill "advisor:${WIN_ID}"
-    tmux kill-window -t "advisor:${WIN_ID}" 2>/dev/null || true
-  else
-    # Fallback: old session-per-worker (flag-off path or pre-migration sessions)
-    tmux ls -F '#{session_name}' 2>/dev/null | grep "^advisor-${sid}" | while IFS= read -r _sess; do
-      _tab_trace tmux-kill "$_sess"
-      tmux kill-session -t "$_sess" 2>/dev/null || true
-    done
+  # In multiplex mode, first try to kill by the @advisor_sid pane option (covers
+  # tui-shared workers and any pane-tagged worker). The pane title is NOT used —
+  # the claude TUI overwrites it; @advisor_sid is app-immune. kill-pane cascade
+  # removes the window and session when the last pane in the tui window is gone.
+  _PANE_KILLED=0
+  if [[ "${ADVISOR_TMUX_MULTIPLEX:-}" == "1" ]]; then
+    PANE_ID=$(tmux list-panes -s -t advisor -F '#{pane_id} #{@advisor_sid}' 2>/dev/null \
+      | awk -v s="$sid" '$2 == s {print $1}' | head -1)
+    if [[ -n "$PANE_ID" ]]; then
+      _tab_trace tmux-kill-pane "$PANE_ID"
+      tmux kill-pane -t "$PANE_ID" 2>/dev/null || true
+      _PANE_KILLED=1
+    fi
+  fi
+  if [[ "$_PANE_KILLED" == "0" ]]; then
+    WIN_ID=$(tmux list-windows -t advisor -F '#{window_id} #{window_name}' 2>/dev/null \
+      | grep " .*${sid}" | awk '{print $1}' | head -1)
+    if [[ -n "$WIN_ID" ]]; then
+      _tab_trace tmux-kill "advisor:${WIN_ID}"
+      tmux kill-window -t "advisor:${WIN_ID}" 2>/dev/null || true
+    else
+      # Fallback: old session-per-worker (flag-off path or pre-migration sessions)
+      tmux ls -F '#{session_name}' 2>/dev/null | grep "^advisor-${sid}" | while IFS= read -r _sess; do
+        _tab_trace tmux-kill "$_sess"
+        tmux kill-session -t "$_sess" 2>/dev/null || true
+      done
+    fi
   fi
 fi
 
