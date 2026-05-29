@@ -37,7 +37,7 @@ try {
 
   const taskFile = join(runDir, 'task-list.json');
   const taskTmp = taskFile + '.tmp';
-  writeFileSync(taskTmp, JSON.stringify(tasks, null, 2));
+  writeFileSync(taskTmp, JSON.stringify({ tasks }, null, 2));
   renameSync(taskTmp, taskFile);
 
   console.log(JSON.stringify({ ok: true, run_dir: runDir }));
