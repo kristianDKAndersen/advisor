@@ -262,6 +262,42 @@ bin/summon --agent <name> \
 
 Pass the previous `outputDir` in the task so the new worker can read and update the existing deliverable.
 
+## Watching workers live (tmux multiplexing)
+
+Set `ADVISOR_TMUX_MULTIPLEX=1` (e.g. add `export ADVISOR_TMUX_MULTIPLEX=1` to `~/.zshrc`) to enable the hybrid single-session model. When unset (default), each worker runs in an isolated detached tmux session named `advisor-<sid>`.
+
+When enabled, all workers share one tmux session named `advisor`. Three layouts:
+
+| Invocation | Layout | Window or pane |
+|-----------|--------|---------------|
+| `bin/summon` (headless, no extra flags) | Solo window per worker | `<agent>-<sid>` window in `advisor` |
+| `bin/summon --ensemble N` | N tiled panes in one dedicated window | `ensemble-<N>-<YYYYMMDD>` window |
+| `bin/summon --tui` | Shared `tui` window; each task adds a tiled pane | `tui` window (multi-pane) |
+
+**`--ensemble N`** spawns N workers on the same brief, each in its own tiled pane inside one window. All N run independently on the identical task.
+
+**`--tui`** adds each worker as a new tiled pane in the shared `tui` window. On macOS, the first `--tui` call auto-opens a Terminal tab attached to `advisor:tui`; later `--tui` calls add panes to the same already-open window. On non-macOS (or when a client is already attached), summon prints the attach command instead:
+
+```bash
+tmux attach -t advisor \; select-window -t tui
+```
+
+**Key distinction:** `--ensemble` = N copies of one brief tiled together in a dedicated window; `--tui` = independent tasks from separate `bin/summon` calls tiled together in the shared `tui` window. Solo workers (neither flag) get their own named window — switch between them with window navigation commands.
+
+### Attach and navigate
+
+```bash
+tmux attach -t advisor                        # attach to the shared session
+tmux attach -t advisor \; select-window -t tui  # attach directly to the tui window
+Ctrl-b n                                      # next window
+Ctrl-b p                                      # previous window
+Ctrl-b w                                      # interactive window picker
+```
+
+### Cleanup
+
+Workers self-terminate on completion. `bin/close-worker-tab <sid>` (called automatically by synthesize) kills the worker's pane (located via the `@advisor_sid` pane tag) or window; the window collapses when its last pane exits. A reaper sweeps stale orphan windows and sessions (>24h, no live process) at module load, intentionally skipping `ensemble-*` and `tui` windows whose lifecycle is managed separately.
+
 ## Self-healing — lesson vault
 
 The advisor learns from failure across sessions via a Reflexion-style post-mortem channel. When a worker delivers `verdict=blocked` with `material=yes`, `lib/channel.js synthesize --verdict blocked` emits a `LESSON EXTRACTION REQUIRED` block. The `/extract-lesson` skill turns the failure into a negative-polarity lesson note (one heuristic, one trigger, one anti-pattern) and writes it to `~/.advisor/vault/lessons/`.
@@ -291,6 +327,8 @@ Vault due notes (including lessons due in the next 14 days) are also surfaced au
 Full guardrails and the complete orchestration protocol are in `CLAUDE.md`.
 
 ## Prerequisites
+
+**tmux** — required for headless worker spawning and all multiplexing layouts. Install via your package manager (e.g. `brew install tmux` on macOS).
 
 **macOS Terminal.app profile configuration** — required for `bin/close-tab` to work.
 
