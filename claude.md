@@ -293,6 +293,17 @@ bin/advisor-schedule \
 
 `/context-timeline` (skill at `.claude/skills/context-timeline/`) invokes `bin/advisor-timeline` for the current session from within a Claude Code session.
 
+### tmux multiplexing (`ADVISOR_TMUX_MULTIPLEX`)
+
+When `ADVISOR_TMUX_MULTIPLEX=1` is set (e.g. in `~/.zshrc`), all workers share one tmux session named `advisor` instead of the default one-detached-session-per-worker model (sessions named `advisor-<sid>`).
+
+Three layouts in multiplex mode:
+- **Solo headless** (no extra flags): each worker gets a named window `<agent>-<sid>` in the `advisor` session.
+- **`--ensemble N`**: N workers running the same brief share a window named `ensemble-<N>-<YYYYMMDD>`, tiled.
+- **`--tui`**: independent workers from separate `bin/summon` calls each add a pane to the shared `tui` window; on macOS, Terminal auto-opens attached to `advisor:tui` on the first `--tui` call only (subsequent calls add panes to the already-open window).
+
+The `--ensemble` and `tui` windows are skipped by the session reaper. Cleanup is automatic via `bin/close-worker-tab`. This setting does not change delegation logic, the summon/observe/synthesize workflow, or any guardrail.
+
 ## Guardrails
 
 - **Watchdog rule — never end a turn with "N workers in flight" as your only action.**
