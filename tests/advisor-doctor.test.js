@@ -55,7 +55,7 @@ beforeAll(() => {
   // Run the script once; cache for all tests
   result = spawnSync('bash', [SCRIPT_PATH, '--sid', sid], {
     encoding: 'utf8',
-    env: { ...process.env, ADVISOR_RUNS_ROOT: tmpDir },
+    env: { ...process.env, ADVISOR_RUNS_ROOT: tmpDir, ADVISOR_TMUX_MULTIPLEX: '' },
   });
 });
 

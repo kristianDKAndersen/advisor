@@ -62,6 +62,7 @@ exit 0
       ...process.env,
       PATH: newPath,
       ADVISOR_TMUX: '1',
+      ADVISOR_TMUX_MULTIPLEX: '', // isolate from host env: test non-multiplex path
       TMUX: '/tmp/tmux-1000/default,12345,0', // simulate being inside tmux
       PPID: String(process.pid), // point PPID at a real harmless PID
     },
@@ -112,6 +113,7 @@ exit 0
     env: {
       ...process.env,
       PATH: newPath,
+      ADVISOR_TMUX_MULTIPLEX: '', // isolate from host env: test non-multiplex path
       TMUX: '/tmp/tmux-1000/default,12345,0',
       PPID: String(process.pid),
     },
