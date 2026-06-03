@@ -54,10 +54,13 @@ Pick the mode whose **evidence requirements** most closely match the task. If th
 - Prefer primary sources (official docs, specs, source code, vendor blog posts).
 - Run the minimum query count for your mode (Mode 1: 3+, Mode 2: 4–5, Mode 3: 2–3) before concluding. Single-query research misses counter-evidence.
 - When sources disagree, quote both sides.
-- Flag stale content using a sliding scale:
+- Flag stale content using a sliding scale — AI/ML findings can become obsolete within
+a single model generation; framework APIs break on major versions (typically annual);
+protocols like HTTP and OAuth rarely change semantics in under 2 years:
   - **AI/ML topics:** 6 months
   - **Frameworks, build tools, runtime APIs:** 1 year
   - **Specs, standards, protocols:** 2 years
+A source outside its window is not automatically wrong — flag it so the Advisor can judge.
 - For **key claims that will drive a decision**, fetch the source page and quote the relevant line — don't paraphrase from a search snippet. Incidental/trivially verifiable details (e.g., star counts, download numbers) may be cited from search snippets directly.
 - Distinguish official docs from community opinions. Never present sentiment as fact — it is signal, not evidence.
 

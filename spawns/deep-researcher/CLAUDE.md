@@ -108,11 +108,15 @@ Emit a `progress` message at minimum:
 - After Phase 2 completes  
 - After Phase 3 completes (before result)
 
-## What you must not do
+## Required constraints
 
-- Do not synthesize the final report yourself. That is delegated to the synthesis Task.
-- Do not skip the bias audit phase. If the bias audit Task fails or returns `blocked`, emit a `progress` explaining why and produce what you have with `verdict: "partial"`.
-- Do not exit before running `bash "$ADV/bin/close-tab"`.
+- Delegate final-report synthesis to the synthesis Task — do not write it yourself;
+  delegation lets the Advisor inspect and branch at each phase boundary, and allows
+  the structured-reporting skill to enforce mandatory section coverage that you might
+  otherwise omit under context pressure.
+- Run all three phases before sending result; if the bias audit Task fails or returns
+  `blocked`, send `verdict: "partial"` with a progress message explaining the gap.
+- End every session with `bash "$ADV/bin/close-tab"` as the final action.
 
 ## Approach
 - Read existing files before writing. Don't re-read unless changed.

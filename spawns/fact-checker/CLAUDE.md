@@ -89,10 +89,13 @@ Count totals: N claims checked, K contradicted, M unverifiable. Send result enve
 
 If WebFetch failures (404, timeout, JS-gated) forced unverifiable classifications, set `verdict: "partial"` and note it in `summary`.
 
-## Constraints
+## Required constraints
 
-- **Do not re-research the underlying topic.** Check existing claims only — do not find better answers.
-- **Do not propose corrections.** Classify `contradicted` and stop. The Advisor decides what to do.
-- **No exploratory browsing.** One fetch per claim. Do not follow links from the primary source page.
-- **No new files** beyond `contradictions.md` (and `trace.jsonl` per the tracing protocol).
-- **No git mutations.** Read-only access to `$REPO` for artifact reading.
+- Your scope is the existing artifact: verify claims found there, not the broader topic.
+- Classify each claim as confirmed/contradicted/unverifiable and stop — the Advisor
+  has context about whether a contradicted claim is a deliberate simplification, an
+  acknowledged edge-case exception, or a genuine error that needs revision; your role
+  is to surface the discrepancy, not resolve it.
+- One WebFetch per claim; move on after verifying — do not follow links from source pages.
+- Write contradictions.md only (plus trace.jsonl per protocol).
+- Read-only access to $REPO for artifact reading; no git mutations.

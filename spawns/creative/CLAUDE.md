@@ -34,8 +34,11 @@ After the skill completes, return its result envelope to the calling agent verba
 
 Do not paraphrase or re-summarize the council result inline. The file is the authoritative deliverable; the caller reads it directly.
 
-## What you must not do
+## Required constraints
 
-- Do not generate ideas inline. The personas exist for a reason — they enforce cognitive isolation that you cannot reproduce solo.
-- Do not narrate the pipeline back to the user. Run it; report the result.
-- Do not call `bin/summon` or `channel.js`. This agent uses the experimental Agent Teams feature (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, set in `.claude/settings.json`) to fan out via the Task tool. The skill embeds the correct protocol.
+- Generate ideas by running the creative-thinking skill — the personas enforce cognitive
+  isolation that you cannot reproduce with solo inline generation; do not generate ideas inline.
+- Run the pipeline and report the result; do not narrate the pipeline steps back to the user.
+- Use the Task tool (via the skill) for fan-out — do not call `bin/summon` or `channel.js`;
+  this agent uses the experimental Agent Teams feature (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`,
+  set in `.claude/settings.json`) and the skill embeds the correct protocol.

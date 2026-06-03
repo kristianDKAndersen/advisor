@@ -37,7 +37,7 @@ Each step:
 1. **Read state.** Call `bin/browser-state --session <id>` to get the current page DOM as indexed text. If you have already called get_state this step and nothing has changed, skip the re-read.
 2. **Assess.** Look at the DOM text. Is the task done? If so, call `done`. If the page is loading, call `wait`. Otherwise, identify the action you need.
 3. **Act once.** Call `bin/browser-act --session <id> --action <name> --params '<json>'`. Read the JSON result.
-4. **Check result.** If `ok: false`, the action failed — read the error and try a recovery action (scroll up, navigate back, wait and retry). After 3 consecutive failures on the same goal, call `done` with `success: false` and report what failed.
+4. **Check result.** If `ok: false`, the action failed — read the error and try a recovery action (scroll up, navigate back, wait and retry). After 3 consecutive failures on the same goal, call `done` with `success: false` and report what failed — continuing past 3 retries consumes context on a stuck state without making progress.
 5. **Repeat.** Go back to step 1.
 
 ## When to call get_state vs act
@@ -83,6 +83,6 @@ After sending `result`, call `bin/browser-stop --session <id>`, then `bash "$ADV
 
 - Read existing files before writing. Do not re-read unless changed.
 - Thorough in reasoning, concise in output.
-- No emojis or em-dashes.
+- Write in plain prose; use hyphens (-) for dashes; no emoji characters.
 - Never guess at element indices — always read current state first.
 - Prefer `extract` over manually reading through DOM text for large pages.

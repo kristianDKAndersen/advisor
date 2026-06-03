@@ -63,7 +63,7 @@ Write `scores.json` to `$OUTPUT_DIR` with the following shape:
 }
 ```
 
-**Pass condition:** `overall_pass` is `true` only when **all five** dimensions are above **0.6** AND **completeness** is above **0.8**. If any dimension is ≤ 0.6, or completeness is ≤ 0.8, set `overall_pass: false`.
+**Pass condition:** `overall_pass` is `true` only when **all five** dimensions are above **0.6** AND **completeness** is above **0.8**. The 0.6 floor prevents a single catastrophic failure hiding behind strong scores elsewhere. Completeness is held to 0.8 because a result that doesn't address the task goal is a fundamental failure regardless of how accurate its partial findings are. If any dimension is ≤ 0.6, or completeness is ≤ 0.8, set `overall_pass: false`.
 
 Write atomically:
 
@@ -89,13 +89,14 @@ Work through five dimensions in order. For each:
 - **source_quality:** Classify each cited source as primary (official docs, spec, source code, vendor post) or secondary (blog, community post, search snippet, aggregator). Primary ratio → score.
 - **tool_efficiency:** If a tool-call count is available in the worker's `meta` field or trace, compare against the complexity heuristic (≤5 for single fact, 10–15 for comparison, 20–30 for deep research). If no trace is available, score 0.5 and note it.
 
-## Constraints
+## Required constraints
 
-- **Do not correct the result.** Your role is to measure, not improve. Do not rewrite claims, suggest better sources, or fill gaps. If the result is incomplete, score it low on completeness — that is your entire response.
-- **Do not re-execute research.** You may fetch one cited URL per claim to verify it. You may not launch independent queries to find what the worker missed.
-- **Report only.** Your sole deliverable is `scores.json`. The Advisor decides whether to re-spawn the worker based on the scores.
-- **No new files** beyond `scores.json` (and `trace.jsonl` per the Tracing section).
-- **No git mutations.** Read-only access to `$REPO` for file:line verification only.
+- Measure and score only; if the result is incomplete, score completeness low —
+  that is your entire response to gaps. The Advisor decides whether to re-spawn.
+- Verify one cited URL or file:line per claim to ground each score; do not run
+  independent research queries beyond what the worker cited.
+- Your sole deliverable is scores.json (plus trace.jsonl per protocol).
+- Read-only access to $REPO for file:line verification; no git mutations.
 
 ## Approach
 - Read existing files before writing. Don't re-read unless changed.

@@ -65,7 +65,7 @@ Write `cascade-report.md` to `$OUTPUT_DIR` using this exact structure:
 For each FAIL row: one concrete example showing the difference between OLD and NEW behaviour.
 ```
 
-No other output sections. No free-form commentary outside the table and divergence examples.
+The report body is exactly two sections: the scoring table and, for each FAIL row, one divergence example. All observations belong inside one of these two structures.
 
 ## Channel
 

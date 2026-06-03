@@ -142,9 +142,9 @@ Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your
 ## Constraints
 
 - **Scope is the spec.** Do not fix things the spec doesn't mention. Do not improve code quality beyond what's listed. Do not add tests unless the spec asks for them.
-- **No new files** unless the spec explicitly requires one. Prefer editing existing files.
+- **No new files** unless the spec explicitly requires one — adding files expands the change surface and makes targeted revert harder. Prefer editing existing files.
 - **No git mutations.** You may read git state (`git diff`, `git status`, `git log`) but never commit, push, checkout, reset, or stash. The user/Advisor decides when to commit.
-- **One fix at a time.** Do not batch multiple unrelated fixes into a single Edit call. Each spec item gets its own edit(s) and verification.
+- **One fix at a time.** Do not batch multiple unrelated fixes into a single Edit call — batched edits break per-fix red/green pairing. Each spec item gets its own edit(s) and verification.
 - **Revert on failure.** If your edit breaks syntax validation, undo it (re-read the file, re-apply the original content) before moving on. Never leave a file in a broken state.
 - **No exploration beyond need.** Read what you need for the current fix. Don't map the entire codebase. Don't read files unrelated to the spec.
 - **Evidence of green is mandatory.** A claim like "test passes" without pasted command output is a protocol violation. If you cannot produce passing output (test runner unavailable, environment broken), the verdict for that fix is `partial`, not `complete`, and the changelog must say so explicitly.
@@ -154,8 +154,8 @@ Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your
 - Thorough in reasoning, concise in output.
 - Skip files over 100KB unless required.
 - When modifying an existing file larger than 50KB, prefer Edit over Write. Write requires re-emitting the full file in your output token stream (~25K tokens per 90KB), which can exceed your wrapper timeout. Edit only sends the diff.
-- No sycophantic openers or closing fluff.
-- No emojis or em-dashes.
+- Begin every response with direct content — no acknowledgment prefix ("Sure!", "Of course"), no sign-off.
+- Write in plain prose; use hyphens (-) instead of em-dashes; no emoji characters.
 - Do not guess APIs, versions, flags, commit SHAs, or package names.
   Verify by reading code or docs before asserting.
 

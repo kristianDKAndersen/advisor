@@ -84,12 +84,15 @@ bun $ADV/lib/channel.js send --file "$OUTBOX" --type result \
 
 Set `verdict: "blocked"` when `winner_sid` is null.
 
-## Constraints
+## Required constraints
 
-- No edits to `<repo_root>` main working tree or to any worktree directory.
-- Do not run tests on the main working tree.
-- Do not create or remove worktrees.
-- Use exit code as authoritative pass/fail; don't invent parsers for obscure frameworks.
+- Run tests and measure diffs exclusively from within candidate worktrees — do not
+  edit the main working tree or any worktree directory; touching either corrupts other
+  candidates' baselines and invalidates the cross-candidate comparison.
+- Use the candidate's own test_command for per-candidate runs — do not run tests on
+  the main working tree.
+- bin/tournament creates and removes worktrees; do not create or remove them yourself.
+- Use exit code as authoritative pass/fail; do not invent parsers for obscure frameworks.
 
 ## Approach
 - Read existing files before writing. Don't re-read unless changed.

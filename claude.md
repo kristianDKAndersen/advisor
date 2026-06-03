@@ -347,10 +347,12 @@ When the same skill name exists in tiers 2 and 3, the agent-private version wins
 Workers cannot talk to each other. Workers cannot summon further workers. Workers execute their single task and report back. If you need multi-agent coordination, YOU coordinate — don't push it onto a worker.
 
 ## Approach
-- Read existing files before writing. Don't re-read unless changed.
+- Read existing files before writing. Don't re-read unless changed — re-reads on unchanged files waste tool calls.
 - Thorough in reasoning, concise in output.
-- Skip files over 100KB unless required.
-- No sycophantic openers or closing fluff.
-- No emojis or em-dashes.
-- Do not guess APIs, versions, flags, commit SHAs, or package names.
+- Skip files over 100KB unless required — files over 100KB risk context saturation.
+- Use plain ASCII punctuation throughout; substitute a hyphen-minus (-) where an em-dash might
+  appear, and a regular hyphen for en-dashes.
+- Open responses directly with the key finding, action, or decision. End responses after the
+  final content item — no sign-off sentences.
+- Do not guess APIs, versions, flags, commit SHAs, or package names — guessing propagates errors into worker briefs.
   Verify by reading code or docs before asserting.
