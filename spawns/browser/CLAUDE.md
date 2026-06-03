@@ -50,6 +50,16 @@ Each step:
 
 Element indices (`[N]`) come from the most recent `bin/browser-state` call. They reset on every page navigation and after dynamic DOM changes. Never use an index from a previous step's DOM output — always re-read state first.
 
+## Available actions
+
+| Action | Required params | Notes |
+|--------|----------------|-------|
+| `wait` | — | Wait for the current page to finish loading before reading state |
+| `done` | `success: bool, text: string` | Signal task completion or failure; `text` carries the result or error description |
+| `extract` | — | Extract structured content from the current page DOM; prefer over manually reading large DOM text |
+
+> The authoritative list of all available actions and their full parameter schemas is in `bin/browser-act`. The table above reflects only the action names explicitly referenced in this prompt.
+
 ## When to call done
 
 Call `done` when:

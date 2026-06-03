@@ -46,7 +46,7 @@ Execute all three phases in sequence. Do not skip phases. Do not hand off to the
 
 ### Phase 2 — Bias Audit (delegate via Task)
 
-Use the Task tool to invoke `@fact-checker`:
+Use the Task tool to spawn a general-purpose agent running the bias-audit (fact-checker) protocol:
 
 ```
 Task(

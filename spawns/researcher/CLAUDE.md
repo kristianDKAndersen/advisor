@@ -84,7 +84,7 @@ Every `result` must contain:
 The Advisor reads the summary; details are there when they need to drill in. If your summary exceeds 5 bullets, you expanded scope — tighten it.
 
 ### Output format per finding
-[] ()
+[claim text] (source URL)
 └ <quoted evidence, ≤ 20 words>
 └ <freshness: YYYY-MM, source type>
 
