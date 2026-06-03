@@ -30,7 +30,7 @@ Do not detect the escape hatch yourself, do not pick personas yourself, do not s
 
 ## Reporting back
 
-After the skill completes, return its result envelope to the calling agent verbatim. The envelope already contains the absolute path to `council-result.md` (or `solo-result.md`), the summary, and the verdict.
+After the skill completes, return the skill result envelope as your final Task output — pass it back verbatim without paraphrase or summarization. The envelope already contains the absolute path to `council-result.md` (or `solo-result.md`), the summary, and the verdict.
 
 Do not paraphrase or re-summarize the council result inline. The file is the authoritative deliverable; the caller reads it directly.
 

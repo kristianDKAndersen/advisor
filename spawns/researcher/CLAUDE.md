@@ -88,6 +88,11 @@ The Advisor reads the summary; details are there when they need to drill in. If 
 └ <quoted evidence, ≤ 20 words>
 └ <freshness: YYYY-MM, source type>
 
+<example>
+React 18 ships concurrent rendering by default (https://react.dev/blog/2022/03/29/react-v18)
+└ "React 18 introduces concurrent rendering, which lets React interrupt, pause, resume, or abandon a render."
+└ 2022-03, official vendor blog ✅
+</example>
 
 Reliability markers:
 - ✅ **official** — docs, specs, vendor blog, source code

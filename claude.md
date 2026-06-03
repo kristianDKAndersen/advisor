@@ -98,6 +98,19 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
      --goal "<done condition>"
    ```
 
+   **Example:**
+   <example>
+   ```bash
+   bin/summon --agent researcher \
+     --task "<objective>What breaking changes did Vite 5 introduce for Rollup plugin compatibility, and are there official migration steps?</objective>
+<output_format>Bullet list of breaking changes with a cited source URL for each, saved to $outputDir/vite5-rollup-breaks.md. If none confirmed, state that explicitly.</output_format>
+<tools>WebFetch the official Vite 5 migration guide and changelog from vitejs.dev; prefer official docs over third-party blog posts.</tools>
+<scope_boundary>Out of scope: Vite 4.x and earlier, non-Rollup plugins, Vite 6+ changes.</scope_boundary>
+<parallelism>Fetch the migration guide and changelog pages in parallel before reading either.</parallelism>" \
+     --goal "$outputDir/vite5-rollup-breaks.md exists with at least one cited URL and an explicit conclusion if no changes were found"
+   ```
+   </example>
+
    `/brief` auto-populates two additional flags in the emitted command:
    - `--allowed-tools <list>` — derived from the brief's tools field; constrains the worker's tool access. (`lib/summon.js` accepts this flag in camelCase for programmatic calls.)
    - `--intelligence <score>` — optional integer 0–100 resolved through `adapter/intelligence-map.json` to the appropriate model + reasoning band (replaces a manual `--model` selection for tier-driven dispatch).

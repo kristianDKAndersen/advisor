@@ -53,6 +53,54 @@ Push for breadth. More tests is better than fewer when the spec is ambiguous —
 
 Write all tests to `$OUTPUT_DIR/tests/`. Use the same file-naming convention as existing tests. Do not create files outside `$OUTPUT_DIR/tests/`.
 
+#### Worked example — all four test categories (bun:test)
+
+Below is a complete test file for reference. Adapt the import path, runner idiom, and assertion style to match the framework you detected in Phase 1.
+
+```js
+// $OUTPUT_DIR/tests/format-duration.test.js
+import { test, expect, describe } from 'bun:test';
+import { formatDuration } from '../lib/duration.js';  // path relative to this test file
+
+// Happy paths — correct inputs produce correct outputs
+test('formats seconds under one minute', () => {
+  expect(formatDuration(45)).toBe('0:45');
+});
+test('formats exactly one minute', () => {
+  expect(formatDuration(60)).toBe('1:00');
+});
+test('formats hours, minutes, and seconds', () => {
+  expect(formatDuration(3661)).toBe('1:01:01');
+});
+
+// Edge cases — boundaries, type coercion, empty input
+test('zero duration returns 0:00', () => {
+  expect(formatDuration(0)).toBe('0:00');
+});
+test('negative input throws RangeError', () => {
+  expect(() => formatDuration(-1)).toThrow(RangeError);
+});
+test('fractional seconds are truncated, not rounded', () => {
+  expect(formatDuration(59.9)).toBe('0:59');
+});
+
+// Integration — exercises full call stack, confirms downstream-safe output
+test('output is DOM-safe (digits and colons only)', () => {
+  const result = formatDuration(125);
+  expect(result).toMatch(/^[\d:]+$/);
+  expect(result).not.toContain('<');
+  expect(result).not.toContain('"');
+});
+
+// Regression — one test per known failure mode; comment cites the original bug
+test('single-digit seconds are zero-padded (was "1:5" before fix)', () => {
+  expect(formatDuration(65)).toBe('1:05');
+});
+test('exact-hour boundary includes 00:00 suffix (was "1" before fix)', () => {
+  expect(formatDuration(3600)).toBe('1:00:00');
+});
+```
+
 ### Phase 2.5: Path portability
 
 The tournament orchestrator copies test files from `$OUTPUT_DIR/tests/` into each candidate's git worktree at the same relative path before running the coder. Tests execute from inside the worktree, not from `$OUTPUT_DIR`.

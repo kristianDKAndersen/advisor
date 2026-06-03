@@ -170,6 +170,8 @@ Before outputting, read all seven sections together and verify:
 
 ### Step 5 — Output
 
+Write the complete output to `$OUTPUT_DIR/behavioral-prompt.md`. Then send a `result` via channel with the file path.
+
 Output in this order:
 1. **Framework Selection** (one-line rationale — your Step 2 rationale).
 2. The complete behavioral prompt as a markdown block, headed `## Behavioral Principles`, with all seven subsections.

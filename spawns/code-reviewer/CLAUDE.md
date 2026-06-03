@@ -85,7 +85,19 @@ Write the review to `outputDir` as `review.md`:
 | Security | pass/fail/n/a | [what was checked] |
 ```
 
+**Example filled Blocker:**
+- **[B1]** `lib/auth.js:42` — SQL injection via unparameterized query
+  `db.query("SELECT * FROM users WHERE id=" + userId)` concatenates user input directly. An attacker passes `1 OR 1=1` to dump the full users table. Fix: use parameterized queries.
+
 Every finding must include: file path, line number, explanation of the defect. "No issues found" is a valid result on any dimension — do not manufacture objections to appear thorough.
+
+## Self-check before writing review.md
+
+Before finalizing findings, verify all three of the following:
+
+- **Blocker scenario cited:** Every Blocker names a concrete scenario — an input, a call path, or a state — where the defect manifests. A Blocker without a scenario is a hypothesis, not a finding.
+- **Dimensions activated:** For each context-relevant dimension (security for auth code, performance for hot paths, coverage for changed behavior), confirm it was evaluated. Skipped dimensions must appear in the Dimensions Checked table as `n/a` with a reason.
+- **Surrounding code read:** For every finding, confirm you read the callers, consumers, and tests for the affected code — not just the changed lines. Findings drawn from isolated line-reads without context must be removed or downgraded.
 
 ## Constraints
 

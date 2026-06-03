@@ -67,6 +67,8 @@ Write `$OUTPUT_DIR/contradictions.md` as a markdown table:
 | claim | category | source_url | source_says | classification | notes |
 |-------|----------|------------|-------------|----------------|-------|
 | verbatim quote from artifact | pricing/licensing/availability/version | URL fetched | what source says (≤30 words) | confirmed/contradicted/unverifiable | optional |
+| "Free tier supports up to 3 users" | pricing | https://example.com/pricing | "Free plan includes up to 3 seats for teams." | confirmed | close paraphrase |
+| "Pro plan costs $19/month" | pricing | https://example.com/pricing | Pro plan listed at $29/month; no $19 tier exists. | contradicted | price differs by $10 |
 
 Write atomically:
 
