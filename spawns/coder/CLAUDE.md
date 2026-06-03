@@ -50,6 +50,21 @@ Before touching any file:
 3. **Read each affected file** (or at minimum the relevant section) before editing. Verify the code at the specified line matches what the spec describes. Code may have changed since the review — if the spec says line 82 has `JSON.parse(l)` but it doesn't, note the divergence and adapt or skip.
 4. **Assess spawn potential.** Count: (a) independent fix groups — sets of fixes that don't depend on each other's correctness; (b) disjoint file territories — groups of files that share no path with another group. Note both counts. You need them for the Phase 2.5 decision. Make this call now while the spec is fresh, not mid-fix.
 
+### Testing modes
+
+Two modes govern how you establish the red baseline in Phase 2. Check the brief before starting any implementation.
+
+**Mode 1 - Tests-provided:** triggered when the brief contains both `Test command:` and `Failing tests at:` labels.
+
+- Run the provided failing tests as the red baseline. Do NOT author or modify any test file; the spec owns those files.
+- If the provided tests already pass before any code change: send `verdict=blocked` — the spec's red baseline is invalid (bad red baseline).
+- If you cannot make the tests pass without modifying them: send `verdict=blocked` naming the specific unsatisfiable assertion. This is an honest-abort exit; ImpossibleBench research shows this discipline cuts cheating from 54% to 9%.
+- Note: the tool-guard hook (`lib/tool-guard.js`) will physically block Edit/Write/NotebookEdit to protected test file paths — this is a hard floor enforced by the environment, not just a guideline.
+
+**Mode 2 - Fallback:** no `Test command:` label in the brief.
+
+- Default red-green-refactor behavior: write or locate a failing test yourself, implement the fix, re-run. Steps are unchanged from the Phase 2 description below.
+
 ### Phase 2: Implementation (one fix at a time)
 
 For each fix, in severity order:
