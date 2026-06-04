@@ -24,7 +24,7 @@ venv/
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
 
-# ── Personal / scratch files (currently tracked — need git rm --cached) ───
+# ── Personal / scratch files ──────────────────────────────────────────────
 agent-teams-conversation.md
 ideaar.md
 

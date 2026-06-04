@@ -59,7 +59,7 @@
 > To finalize the commit, run:
 >
 > ```bash
-> cd .
+> # From the repo root:
 > git add .mcp.json
 > git commit --amend --no-edit
 > ```

@@ -1,12 +1,7 @@
 import { describe, test, expect, vi, afterEach } from 'vitest';
 import type { mount as MountFn, unmount as UnmountFn, flushSync as FlushFn, ComponentProps } from 'svelte';
 
-// Direct path import to force Svelte client-mode mount in Vitest's jsdom environment.
-// The 'svelte' package resolves to index-server.js without browser conditions applied,
-// so we import the client entry directly. Types are cast via the type imports above.
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — no .d.ts for direct path; types come from 'svelte' type imports above
-import { mount as _mount, unmount as _unmount, flushSync as _flushSync } from './client/node_modules/svelte/src/index-client.js';
+import { mount as _mount, unmount as _unmount, flushSync as _flushSync } from 'svelte';
 
 const mount = _mount as typeof MountFn;
 const unmount = _unmount as typeof UnmountFn;
