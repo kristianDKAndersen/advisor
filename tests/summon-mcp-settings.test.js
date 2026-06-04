@@ -1,8 +1,12 @@
 import { test, expect, afterAll } from 'bun:test';
+import { createRequire } from 'module';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+
+const _require = createRequire(import.meta.url);
+const { buildMcpDenylist } = _require('../lib/summon.js');
 
 // Tests for MCP modal suppression in generated launch.sh.
 // Strategy: --strict-mcp-config on the claude invocation means zero MCP servers
@@ -80,6 +84,41 @@ try {
   throw e;
 }
 
+// Provision with a valid .mcp.json in the agent dir so the workspace gets it.
+let sessionWithMcp;
+{
+  const mcpJsonPath = path.join(agentDir, '.mcp.json');
+  fs.writeFileSync(mcpJsonPath, JSON.stringify({
+    mcpServers: {
+      'fixture-server-a': { command: 'npx', args: [] },
+      'fixture-server-b': { command: 'node', args: [] }
+    }
+  }));
+  try {
+    sessionWithMcp = provision();
+  } catch (e) {
+    doCleanup();
+    throw e;
+  } finally {
+    fs.rmSync(mcpJsonPath, { force: true });
+  }
+}
+
+// Provision with a malformed (non-JSON) .mcp.json — must not crash.
+let sessionMalformed;
+{
+  const mcpJsonPath = path.join(agentDir, '.mcp.json');
+  fs.writeFileSync(mcpJsonPath, 'not valid json {{ ');
+  try {
+    sessionMalformed = provision();
+  } catch (e) {
+    doCleanup();
+    throw e;
+  } finally {
+    fs.rmSync(mcpJsonPath, { force: true });
+  }
+}
+
 test('summon exits 0 and generates a launch.sh', () => {
   expect(session).not.toBeNull();
   expect(typeof session.launchSh).toBe('string');
@@ -104,4 +143,37 @@ test('workspace settings.json does not contain enabledMcpjsonServers', () => {
 
 test('launch.sh does not contain enabledMcpjsonServers', () => {
   expect(session.launchSh).not.toContain('enabledMcpjsonServers');
+});
+
+// buildMcpDenylist unit tests
+test('buildMcpDenylist returns server names for valid .mcp.json', () => {
+  const result = buildMcpDenylist({ mcpServers: { context7: {}, sqlite: {} } });
+  expect(result).toEqual({ disabledMcpjsonServers: ['context7', 'sqlite'] });
+});
+
+test('buildMcpDenylist returns {} when mcpServers absent', () => {
+  expect(buildMcpDenylist({})).toEqual({});
+  expect(buildMcpDenylist(null)).toEqual({});
+  expect(buildMcpDenylist(undefined)).toEqual({});
+});
+
+test('buildMcpDenylist returns {} for malformed input', () => {
+  expect(buildMcpDenylist('not-an-object')).toEqual({});
+  expect(buildMcpDenylist({ mcpServers: 'bad' })).toEqual({});
+  expect(buildMcpDenylist({ mcpServers: [] })).toEqual({});
+});
+
+// Integration: fixture .mcp.json -> names land in disabledMcpjsonServers
+test('settings.json contains disabledMcpjsonServers from workspace .mcp.json', () => {
+  expect(sessionWithMcp.settings.disabledMcpjsonServers).toEqual(['fixture-server-a', 'fixture-server-b']);
+});
+
+// Integration: no .mcp.json -> key omitted
+test('settings.json omits disabledMcpjsonServers when no .mcp.json present', () => {
+  expect(Object.keys(session.settings)).not.toContain('disabledMcpjsonServers');
+});
+
+// Integration: malformed .mcp.json -> no crash, key omitted
+test('settings.json omits disabledMcpjsonServers for malformed .mcp.json', () => {
+  expect(Object.keys(sessionMalformed.settings)).not.toContain('disabledMcpjsonServers');
 });
