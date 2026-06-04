@@ -327,11 +327,16 @@ bin/advisor-schedule \
 When `ADVISOR_TMUX_MULTIPLEX=1` is set (e.g. in `~/.zshrc`), all workers share one tmux session named `advisor` instead of the default one-detached-session-per-worker model (sessions named `advisor-<sid>`).
 
 Three layouts in multiplex mode:
-- **Solo headless** (no extra flags): each worker gets a named window `<agent>-<sid>` in the `advisor` session.
+- **Solo headless** (no extra flags, or `ADVISOR_DEFAULT_TUI` unset): each worker gets a named window `<agent>-<sid>` in the `advisor` session.
 - **`--ensemble N`**: N workers running the same brief share a window named `ensemble-<N>-<YYYYMMDD>`, tiled.
 - **`--tui`**: independent workers from separate `bin/summon` calls each add a pane to the shared `tui` window; on macOS, Terminal auto-opens attached to `advisor:tui` on the first `--tui` call only (subsequent calls add panes to the already-open window).
 
 The `--ensemble` and `tui` windows are skipped by the session reaper. Cleanup is automatic via `bin/close-worker-tab`. This setting does not change delegation logic, the summon/observe/synthesize workflow, or any guardrail.
+
+**Env-gated launch defaults** (set in `~/.zshrc` adjacent to `ADVISOR_TMUX_MULTIPLEX`):
+- `ADVISOR_DEFAULT_TUI=1`: act as `--tui` for every non-ensemble `bin/summon` call. Ensemble fan-out (`--ensemble N`) is unaffected — it always runs headless.
+- `ADVISOR_NO_TIMELINE=1`: suppress the timeline auto-start and browser open in headless mode; equivalent to `--no-timeline`.
+- `--headless` flag: per-call override that forces the headless branch even when `ADVISOR_DEFAULT_TUI=1` is set. Unattended call sites (`bin/advisor-schedule`, `lib/parallel.js`) pass this automatically so scheduled and parallel runs never pop open Terminal windows.
 
 ## Guardrails
 

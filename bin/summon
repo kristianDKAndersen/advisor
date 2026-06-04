@@ -26,6 +26,7 @@ TIMEOUT_SEC="1500"
 REQUIRED_OUTPUT=""
 TUI=""
 NO_TIMELINE=""
+HEADLESS=""
 SUB_TEAM=""
 SUB_TEAM_MODEL=""
 
@@ -44,10 +45,11 @@ while [[ $# -gt 0 ]]; do
     --required-output) REQUIRED_OUTPUT="$2"; shift 2 ;;
     --tui)            TUI=1;               shift ;;
     --no-timeline)    NO_TIMELINE=1;       shift ;;
+    --headless)       HEADLESS=1;          shift ;;
     --sub-team)       SUB_TEAM=1;          shift ;;
     --sub-team-model) SUB_TEAM_MODEL="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--tui] [--no-timeline] [--sid <id>] [--model <model>] [--intelligence <0-100>] [--ensemble <n>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"] [--sub-team] [--sub-team-model sonnet|haiku|opus]"
+      echo "Usage: summon --agent <name> --task \"<brief>\" --goal \"<done>\" [--tui] [--no-timeline] [--headless] [--sid <id>] [--model <model>] [--intelligence <0-100>] [--ensemble <n>] [--allowed-tools \"T1,T2\"] [--max-tool-calls <n>] [--timeout-sec <s>] [--required-output \"field1,field2\"] [--sub-team] [--sub-team-model sonnet|haiku|opus]"
       exit 0
       ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -57,6 +59,32 @@ done
 if [[ -z "$AGENT" || -z "$TASK" || -z "$GOAL" ]]; then
   echo "Missing required flag. Run --help for usage." >&2
   exit 1
+fi
+
+# Apply env-gated defaults after explicit-flag parsing so flags always win.
+# ADVISOR_DEFAULT_TUI=1: act as --tui for solo (non-ensemble) calls only.
+# --headless and --ensemble both suppress the default.
+if [[ -z "$TUI" && -z "$HEADLESS" && -z "$ENSEMBLE" && "${ADVISOR_DEFAULT_TUI:-}" == "1" ]]; then
+  TUI=1
+fi
+# ADVISOR_NO_TIMELINE=1: equivalent to --no-timeline.
+if [[ "${ADVISOR_NO_TIMELINE:-}" == "1" ]]; then
+  NO_TIMELINE=1
+fi
+
+# ADVISOR_DRY_RUN=1: print branch/timeline selection and exit without provisioning.
+if [[ "${ADVISOR_DRY_RUN:-}" == "1" ]]; then
+  if [[ -n "$TUI" ]]; then
+    echo "branch:tui"
+  else
+    echo "branch:headless"
+  fi
+  if [[ -n "$NO_TIMELINE" ]]; then
+    echo "timeline:suppressed"
+  else
+    echo "timeline:enabled"
+  fi
+  exit 0
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -1,7 +1,7 @@
 // tests/advisor-schedule-flags.test.js
 // RED tests for bin/advisor-schedule new flags: --agent, --goal, --when (patterns 6.3+6.4)
 // All tests are expected to FAIL until the implementation is complete.
-// Tests use DRY_RUN=1 env: when set, advisor-schedule must print the generated
+// Tests use ADVISOR_DRY_RUN=1 env: when set, advisor-schedule must print the generated
 // command to stdout and exit 0 without spawning tmux.
 
 import { test, expect, beforeAll, afterAll } from 'bun:test';
@@ -22,12 +22,12 @@ afterAll(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-// Helper: run advisor-schedule with DRY_RUN=1
+// Helper: run advisor-schedule with ADVISOR_DRY_RUN=1
 function runDryRun(args, env = {}) {
   return spawnSync('bash', [BIN_ADVISOR_SCHEDULE, ...args], {
     encoding: 'utf8',
     cwd: tmpDir,
-    env: { ...process.env, DRY_RUN: '1', ADVISOR_SCHEDULED_LOOP: '', ...env },
+    env: { ...process.env, ADVISOR_DRY_RUN: '1', ADVISOR_SCHEDULED_LOOP: '', ...env },
   });
 }
 
@@ -49,7 +49,7 @@ test('--help output contains --agent, --goal, and --when flags', () => {
 // U-FLAG-2: --agent flag is passed through to the generated summon command.
 // When --agent researcher is given, the generated command must contain '--agent researcher',
 // not the hardcoded 'coder'.
-// FAILS now: --agent flag is not recognized (exits 1 with "Unknown flag"); DRY_RUN not supported.
+// FAILS now: --agent flag is not recognized (exits 1 with "Unknown flag"); ADVISOR_DRY_RUN not supported.
 test('--agent researcher produces generated command containing --agent researcher', () => {
   const result = runDryRun([
     '--sid', 'test-sid',
@@ -63,7 +63,7 @@ test('--agent researcher produces generated command containing --agent researche
 });
 
 // U-FLAG-3: when --goal is omitted, the generated command's --goal value equals the --task text.
-// FAILS now: DRY_RUN=1 is not supported; script attempts tmux and exits non-zero.
+// FAILS now: ADVISOR_DRY_RUN=1 is not supported; script attempts tmux and exits non-zero.
 test('--goal defaults to --task value when --goal flag is omitted', () => {
   const taskText = 'my default goal task';
   const result = runDryRun([
@@ -78,7 +78,7 @@ test('--goal defaults to --task value when --goal flag is omitted', () => {
 
 // U-FLAG-4: --when 'false' wraps the summon call in a conditional so the loop body
 // includes a bash -c invocation of the condition expression before calling summon.
-// FAILS now: --when flag is not recognized (exits 1 with "Unknown flag"); DRY_RUN not supported.
+// FAILS now: --when flag is not recognized (exits 1 with "Unknown flag"); ADVISOR_DRY_RUN not supported.
 test('--when expression wraps summon in a conditional (bash -c or inline condition)', () => {
   const result = runDryRun([
     '--sid', 'test-sid',
@@ -101,7 +101,7 @@ test('--when expression wraps summon in a conditional (bash -c or inline conditi
 
 // U-FLAG-5: backward compat — invocation with only --sid/--interval/--task (no new flags)
 // still produces a summon command with '--agent coder' (the default).
-// FAILS now: DRY_RUN=1 is not supported; script attempts tmux and exits non-zero.
+// FAILS now: ADVISOR_DRY_RUN=1 is not supported; script attempts tmux and exits non-zero.
 test('backward compat: omitting --agent defaults to coder in generated command', () => {
   const result = runDryRun([
     '--sid', 'test-sid',

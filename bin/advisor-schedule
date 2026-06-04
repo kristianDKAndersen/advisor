@@ -90,7 +90,7 @@ SAFE_TASK="${TASK_TEXT//\'/\'\\\'\'}"
 SAFE_GOAL="${GOAL//\'/\'\\\'\'}"
 SAFE_WHEN="${WHEN//\'/\'\\\'\'}"
 
-SUMMON_CMD="'${SCRIPT_DIR}/summon' --task '${SAFE_TASK}' --agent ${AGENT} --goal '${SAFE_GOAL}'"
+SUMMON_CMD="'${SCRIPT_DIR}/summon' --headless --no-timeline --task '${SAFE_TASK}' --agent ${AGENT} --goal '${SAFE_GOAL}'"
 
 # Wrap summon in a condition guard when --when is provided.
 if [[ -n "$WHEN" ]]; then
@@ -103,8 +103,8 @@ else
   LOOP_BODY="while true; do ${SUMMON_CMD} || true; sleep ${SLEEP_SECS}; done"
 fi
 
-# DRY_RUN: print the generated loop body and exit without spawning tmux.
-if [[ "${DRY_RUN:-}" == "1" ]]; then
+# ADVISOR_DRY_RUN: print the generated loop body and exit without spawning tmux.
+if [[ "${ADVISOR_DRY_RUN:-}" == "1" ]]; then
   echo "$LOOP_BODY"
   exit 0
 fi
