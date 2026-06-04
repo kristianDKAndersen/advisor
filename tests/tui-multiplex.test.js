@@ -77,25 +77,21 @@ test('reaper: tui-prefixed window is also skipped', () => {
 
 // ── ensureTuiPane: window absent → new-window path ──────────────────────────
 
-test('ensureTuiPane: window absent -> new-window, pane tagged, layout tiled', () => {
+test('ensureTuiPane: window absent -> placeholder via new-window, worker via split-window, both tagged', () => {
   const lockDir = path.join(tmpDir, 'tui-window.lock');
   const calls = [];
   let paneCounter = 0;
 
   const execFn = (cmd, args) => {
     calls.push([cmd, ...args]);
-    const joined = args.join(' ');
-    // ensureAdvisorSession: new-session -> ok
     if (cmd === 'tmux' && args[0] === 'new-session') return '';
-    // list-windows: return empty (no tui window)
     if (cmd === 'tmux' && args[0] === 'list-windows') return '';
-    // new-window: return a pane id
+    // new-window returns placeholder pane id
     if (cmd === 'tmux' && args[0] === 'new-window') return `%${++paneCounter}\n`;
-    // kill scratch window: ok
+    // split-window returns worker pane id
+    if (cmd === 'tmux' && args[0] === 'split-window') return `%${++paneCounter}\n`;
     if (cmd === 'tmux' && args[0] === 'kill-window') return '';
-    // select-pane: ok
-    if (cmd === 'tmux' && args[0] === 'select-pane') return '';
-    // select-layout: ok
+    if (cmd === 'tmux' && args[0] === 'set-option') return '';
     if (cmd === 'tmux' && args[0] === 'select-layout') return '';
     return '';
   };
@@ -103,24 +99,105 @@ test('ensureTuiPane: window absent -> new-window, pane tagged, layout tiled', ()
   const sid = 'test-sid-001';
   const paneId = ensureTuiPane(sid, { execFn, lockDir });
 
-  // Must have called new-window (not split-window)
   const cmds = calls.map((c) => c[1]);
+  // Both new-window (placeholder) and split-window (worker) must be called.
   expect(cmds).toContain('new-window');
-  expect(cmds).not.toContain('split-window');
+  expect(cmds).toContain('split-window');
 
-  // Must have tagged the pane with the sid via the @advisor_sid pane option
-  // (NOT the title — claude overwrites the pane title).
+  // Placeholder pane must be tagged with @advisor_placeholder=1.
+  const placeholderTag = calls.find((c) =>
+    c[1] === 'set-option' && c.includes('@advisor_placeholder'));
+  expect(placeholderTag).toBeDefined();
+  expect(placeholderTag).toContain('-p');
+  expect(placeholderTag).toContain('1');
+
+  // Worker pane must be tagged with @advisor_sid (not the placeholder).
   const tagCall = calls.find((c) => c[1] === 'set-option' && c.includes('@advisor_sid'));
   expect(tagCall).toBeDefined();
   expect(tagCall).toContain('-p');
   expect(tagCall).toContain(sid);
 
-  // Must have tiled
+  // Placeholder and worker pane ids must differ.
+  const placeholderPaneId = placeholderTag[placeholderTag.indexOf('-t') + 1];
+  const workerPaneId = tagCall[tagCall.indexOf('-t') + 1];
+  expect(placeholderPaneId).not.toBe(workerPaneId);
+
+  // Layout tiled.
   const layoutCall = calls.find((c) => c[1] === 'select-layout');
   expect(layoutCall).toBeDefined();
   expect(layoutCall).toContain('tiled');
 
-  // Returned pane id must be non-empty
+  // Returned pane id (from split-window) must be non-empty.
+  expect(typeof paneId).toBe('string');
+  expect(paneId.length).toBeGreaterThan(0);
+});
+
+// ── ensureTuiPane: placeholder created once with @advisor_placeholder=1 ─────
+
+test('ensureTuiPane: first window creation tags placeholder with @advisor_placeholder=1', () => {
+  const lockDir = path.join(tmpDir, 'tui-placeholder.lock');
+  const calls = [];
+  let paneCounter = 0;
+
+  const execFn = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === 'tmux' && args[0] === 'new-session') return '';
+    if (cmd === 'tmux' && args[0] === 'list-windows') return ''; // no tui window
+    if (cmd === 'tmux' && args[0] === 'new-window') return `%${++paneCounter}\n`;
+    if (cmd === 'tmux' && args[0] === 'split-window') return `%${++paneCounter}\n`;
+    if (cmd === 'tmux') return '';
+    return '';
+  };
+
+  ensureTuiPane('placeholder-sid', { execFn, lockDir });
+
+  // Exactly one @advisor_placeholder set-option call.
+  const phCalls = calls.filter((c) =>
+    c[1] === 'set-option' && c.includes('@advisor_placeholder'));
+  expect(phCalls).toHaveLength(1);
+  const pc = phCalls[0];
+  expect(pc).toContain('-p');
+  expect(pc).toContain('1');
+
+  // @advisor_placeholder and @advisor_sid set on DIFFERENT panes.
+  const sidCalls = calls.filter((c) =>
+    c[1] === 'set-option' && c.includes('@advisor_sid'));
+  expect(sidCalls).toHaveLength(1);
+  const phPaneId = pc[pc.indexOf('-t') + 1];
+  const workerPaneId = sidCalls[0][sidCalls[0].indexOf('-t') + 1];
+  expect(phPaneId).not.toBe(workerPaneId);
+});
+
+// ── ensureTuiPane: existing window with placeholder is reused ────────────────
+
+test('ensureTuiPane: existing tui window with placeholder reused via split-window, not new-window', () => {
+  const lockDir = path.join(tmpDir, 'tui-reuse.lock');
+  const calls = [];
+  let paneCounter = 20;
+
+  const execFn = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === 'tmux' && args[0] === 'new-session') return '';
+    // tui window already exists (placeholder kept it alive after previous worker left)
+    if (cmd === 'tmux' && args[0] === 'list-windows') return 'tui\n';
+    if (cmd === 'tmux' && args[0] === 'split-window') return `%${++paneCounter}\n`;
+    if (cmd === 'tmux') return '';
+    return '';
+  };
+
+  const paneId = ensureTuiPane('reuse-sid', { execFn, lockDir });
+
+  const cmds = calls.map((c) => c[1]);
+  // Window already exists — must split, never create a new window.
+  expect(cmds).toContain('split-window');
+  expect(cmds).not.toContain('new-window');
+  expect(cmds).not.toContain('kill-window');
+
+  // Worker pane tagged with @advisor_sid.
+  const tagCall = calls.find((c) => c[1] === 'set-option' && c.includes('@advisor_sid'));
+  expect(tagCall).toBeDefined();
+  expect(tagCall).toContain('reuse-sid');
+
   expect(typeof paneId).toBe('string');
   expect(paneId.length).toBeGreaterThan(0);
 });
