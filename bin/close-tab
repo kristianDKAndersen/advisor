@@ -40,7 +40,8 @@ if [[ "$_is_tmux" == "1" ]]; then
   fi
   if [[ -n "${TMUX:-}" ]]; then
     if [[ "${ADVISOR_TMUX_MULTIPLEX:-}" == "1" ]]; then
-      _pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)
+      _pane="${TMUX_PANE:-}"
+      [[ -z "$_pane" ]] && _pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)
       [[ -n "$_pane" ]] && tmux kill-pane -t "$_pane" 2>/dev/null || true
     else
       _sess=$(tmux display-message -p '#S' 2>/dev/null || true)

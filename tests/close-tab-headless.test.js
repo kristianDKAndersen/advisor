@@ -242,6 +242,80 @@ exit 0
   expect(calls).not.toMatch(/kill-session/);
 });
 
+// ── TMUX_PANE env resolution (multiplex branch) ───────────────────────────────
+
+test('close-tab: ADVISOR_TMUX_MULTIPLEX=1 with TMUX_PANE set uses env pane, not display-message pane_id', () => {
+  const log = path.join(tmpDir, 'pane-set.log');
+  const tmuxBin = path.join(tmpDir, 'bin', 'tmux');
+  fs.mkdirSync(path.join(tmpDir, 'bin'), { recursive: true });
+  fs.writeFileSync(
+    tmuxBin,
+    `#!/usr/bin/env bash
+args="$*"
+echo "tmux $args" >> ${JSON.stringify(log)}
+if [[ "$1" == "display-message" ]]; then
+  if [[ "$*" == *"#S"* ]]; then echo "advisor"; exit 0; fi
+  if [[ "$*" == *"#{pane_id}"* ]]; then echo "%99"; exit 0; fi
+fi
+exit 0
+`
+  );
+  fs.chmodSync(tmuxBin, 0o755);
+
+  const newPath = `${path.join(tmpDir, 'bin')}:${process.env.PATH}`;
+  spawnSync('bash', [CLOSE_TAB], {
+    env: {
+      ...process.env,
+      PATH: newPath,
+      ADVISOR_TMUX: '1',
+      ADVISOR_TMUX_MULTIPLEX: '1',
+      TMUX: '/tmp/tmux-1000/default,12345,0',
+      TMUX_PANE: '%7',
+      PPID: String(process.pid),
+    },
+  });
+
+  const calls = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+  expect(calls).toMatch(/kill-pane -t %7/);
+  expect(calls).not.toMatch(/kill-pane -t %99/);
+});
+
+test('close-tab: ADVISOR_TMUX_MULTIPLEX=1 with TMUX_PANE unset falls back to display-message for pane_id', () => {
+  const log = path.join(tmpDir, 'pane-fallback.log');
+  const tmuxBin = path.join(tmpDir, 'bin', 'tmux');
+  fs.mkdirSync(path.join(tmpDir, 'bin'), { recursive: true });
+  fs.writeFileSync(
+    tmuxBin,
+    `#!/usr/bin/env bash
+args="$*"
+echo "tmux $args" >> ${JSON.stringify(log)}
+if [[ "$1" == "display-message" ]]; then
+  if [[ "$*" == *"#S"* ]]; then echo "advisor"; exit 0; fi
+  if [[ "$*" == *"#{pane_id}"* ]]; then echo "%42"; exit 0; fi
+fi
+exit 0
+`
+  );
+  fs.chmodSync(tmuxBin, 0o755);
+
+  const newPath = `${path.join(tmpDir, 'bin')}:${process.env.PATH}`;
+  const envWithoutTmuxPane = { ...process.env };
+  delete envWithoutTmuxPane.TMUX_PANE;
+  spawnSync('bash', [CLOSE_TAB], {
+    env: {
+      ...envWithoutTmuxPane,
+      PATH: newPath,
+      ADVISOR_TMUX: '1',
+      ADVISOR_TMUX_MULTIPLEX: '1',
+      TMUX: '/tmp/tmux-1000/default,12345,0',
+      PPID: String(process.pid),
+    },
+  });
+
+  const calls = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+  expect(calls).toMatch(/kill-pane -t %42/);
+});
+
 test('close-tab: ADVISOR_TMUX_MULTIPLEX=1 + TMUX + session name "advisor-foo" does NOT take tmux branch', () => {
   const log = path.join(tmpDir, 'multiplex-nomatch.log');
   const tmuxBin = path.join(tmpDir, 'bin', 'tmux');
