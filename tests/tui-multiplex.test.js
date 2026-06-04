@@ -130,6 +130,14 @@ test('ensureTuiPane: window absent -> placeholder via new-window, worker via spl
   // Returned pane id (from split-window) must be non-empty.
   expect(typeof paneId).toBe('string');
   expect(paneId.length).toBeGreaterThan(0);
+
+  // Placeholder command must use a portable infinite loop (not 'sleep infinity' which
+  // fails on macOS BSD sleep).
+  const newWindowCall = calls.find((c) => c[1] === 'new-window');
+  expect(newWindowCall).toBeDefined();
+  const placeholderCmd = newWindowCall.join(' ');
+  expect(placeholderCmd).toContain('while :; do sleep 86400; done');
+  expect(placeholderCmd).not.toContain('sleep infinity');
 });
 
 // ── ensureTuiPane: placeholder created once with @advisor_placeholder=1 ─────
