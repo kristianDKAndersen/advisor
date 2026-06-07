@@ -1,18 +1,29 @@
-import { test, expect, afterEach } from 'bun:test';
+import { test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import { spawnSync } from 'child_process';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
 
 const CHANNEL_JS = path.resolve(import.meta.dir, '../lib/channel.js');
-const ADVISOR_RUNS = path.join(os.homedir(), '.advisor', 'runs');
 const TEST_TIMEOUT = 30000;
 
+let tmpVault;
+let tmpRuns;
 const createdSids = [];
+
+beforeAll(() => {
+  tmpVault = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-decomp-'));
+  tmpRuns = fs.mkdtempSync(path.join(os.tmpdir(), 'runs-decomp-'));
+});
+
+afterAll(() => {
+  fs.rmSync(tmpVault, { recursive: true, force: true });
+  fs.rmSync(tmpRuns, { recursive: true, force: true });
+});
 
 afterEach(() => {
   for (const sid of createdSids.splice(0)) {
-    const dir = path.join(ADVISOR_RUNS, sid);
+    const dir = path.join(tmpRuns, sid);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -28,12 +39,16 @@ function runSynthesize(sid, extraArgs = []) {
      '--material', 'yes',
      '--next', 'proceed',
      ...extraArgs],
-    { encoding: 'utf8', timeout: 25000 }
+    {
+      encoding: 'utf8',
+      timeout: 25000,
+      env: { ...process.env, ADVISOR_VAULT: tmpVault, ADVISOR_RUNS_ROOT: tmpRuns, ADVISOR_SKIP_TAB_CLOSE: '1' },
+    }
   );
 }
 
 function readSessionState(sid) {
-  const p = path.join(ADVISOR_RUNS, sid, 'session.json');
+  const p = path.join(tmpRuns, sid, 'session.json');
   return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
 
@@ -64,7 +79,7 @@ test('synthesize when all existing entries are already synthesized pushes a new 
   createdSids.push(sid);
 
   // Pre-seed session state with one already-synthesized entry.
-  const runDir = path.join(ADVISOR_RUNS, sid);
+  const runDir = path.join(tmpRuns, sid);
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(
     path.join(runDir, 'session.json'),

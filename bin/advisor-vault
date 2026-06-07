@@ -9,6 +9,7 @@ import { searchNotes, backlinks, listDue, listUnresolved, vaultRoot, rebuildInde
 
 const args = process.argv.slice(2);
 const cmd = args[0];
+const helpMode = args.includes('-h') || args.includes('--help');
 
 function getFlag(flag, fallback) {
   const idx = args.indexOf(flag);
@@ -16,6 +17,7 @@ function getFlag(flag, fallback) {
 }
 
 if (cmd === 'search') {
+  if (helpMode) { console.log('Usage: advisor-vault search --text <query> [--limit N]'); process.exit(0); }
   const text = getFlag('--text', args[1]);
   const limit = parseInt(getFlag('--limit', '10'), 10);
   if (!text) { console.error('Usage: advisor-vault search --text <query> [--limit N]'); process.exit(1); }
@@ -26,13 +28,16 @@ if (cmd === 'search') {
     console.log(`  ${r.snippet}`);
   }
 } else if (cmd === 'backlinks') {
+  if (helpMode) { console.log('Usage: advisor-vault backlinks --note <name>'); process.exit(0); }
   const note = getFlag('--note', args[1]);
   if (!note) { console.error('Usage: advisor-vault backlinks --note <name>'); process.exit(1); }
   const bl = backlinks(note);
   console.log(bl.length ? bl.join('\n') : '(no backlinks)');
 } else if (cmd === 'path') {
+  if (helpMode) { console.log('Usage: advisor-vault path'); process.exit(0); }
   console.log(vaultRoot());
 } else if (cmd === 'due') {
+  if (helpMode) { console.log('Usage: advisor-vault due [--within N] [--window N]'); process.exit(0); }
   const today = new Date().toISOString().slice(0, 10);
   const withinStr = getFlag('--within', null);
   const window = withinStr ? parseInt(withinStr, 10) : parseInt(getFlag('--window', '14'), 10);
@@ -43,12 +48,14 @@ if (cmd === 'search') {
     console.log(`${r.due_date}  ${r.path} — ${preview}`);
   }
 } else if (cmd === 'unresolved') {
+  if (helpMode) { console.log('Usage: advisor-vault unresolved'); process.exit(0); }
   const rows = listUnresolved();
   if (!rows.length) { console.log('(no unresolved links)'); process.exit(0); }
   for (const r of rows) {
     console.log(`${r.source} -> ${r.target}`);
   }
 } else if (cmd === 'rebuild') {
+  if (helpMode) { console.log('Usage: advisor-vault rebuild [--embed] [--embed-threshold N] [--embed-top-k N]'); process.exit(0); }
   const doEmbed = args.includes('--embed');
   const embedThreshold = parseFloat(getFlag('--embed-threshold', '0.97'));
   const embedTopK = parseInt(getFlag('--embed-top-k', '5'), 10);
@@ -65,6 +72,7 @@ if (cmd === 'search') {
   }
   console.log(msg);
 } else if (cmd === 'embed') {
+  if (helpMode) { console.log('Usage: advisor-vault embed [--limit N] [--threshold N] [--embed-top-k N] [--force] [--dry-run]'); process.exit(0); }
   const limit = parseInt(getFlag('--limit', '0'), 10);
   const threshold = parseFloat(getFlag('--threshold', '0.97'));
   const topK = parseInt(getFlag('--embed-top-k', '5'), 10);
@@ -82,6 +90,7 @@ if (cmd === 'search') {
     console.log(`Embedded: ${result.embedded}  Skipped-hash: ${result.skipped_hash}  Semantic links added: ${result.semantic_links_added}  Skipped-existing: ${result.semantic_links_skipped_existing}`);
   }
 } else if (cmd === 'delete') {
+  if (helpMode) { console.log('Usage: advisor-vault delete --note <relpath> [--dry-run]'); process.exit(0); }
   const note = getFlag('--note', null);
   if (!note) { console.error('Usage: advisor-vault delete --note <relpath> [--dry-run]'); process.exit(1); }
   const dryRun = args.includes('--dry-run');
@@ -99,6 +108,7 @@ if (cmd === 'search') {
     console.log(deleted ? `Deleted: ${note}` : `Not found: ${note}`);
   }
 } else if (cmd === 'hubs') {
+  if (helpMode) { console.log('Usage: advisor-vault hubs [--limit N]'); process.exit(0); }
   const limit = parseInt(getFlag('--limit', '20'), 10);
   const rows = listHubs(limit);
   if (!rows.length) { console.log('(no hubs)'); process.exit(0); }
@@ -106,6 +116,7 @@ if (cmd === 'search') {
     console.log(`${r.target}  deg=${r.deg}`);
   }
 } else if (cmd === 'gaps') {
+  if (helpMode) { console.log('Usage: advisor-vault gaps [--limit N]'); process.exit(0); }
   const limit = parseInt(getFlag('--limit', '20'), 10);
   const rows = listGaps(limit);
   if (!rows.length) { console.log('(no gaps)'); process.exit(0); }
@@ -114,6 +125,7 @@ if (cmd === 'search') {
     console.log(`${r.sid}  ${r.path} — ${preview}`);
   }
 } else if (cmd === 'backfill-verdicts') {
+  if (helpMode) { console.log('Usage: advisor-vault backfill-verdicts [--dry-run]'); process.exit(0); }
   const dryRun = args.includes('--dry-run');
   const { total, backfilled, skippedLegacy, skippedMissing, report } = backfillVerdicts(dryRun);
   console.log(`Candidates: ${total}  Backfilled: ${backfilled}  Skipped-legacy: ${skippedLegacy}  Skipped-missing: ${skippedMissing}${dryRun ? '  [dry-run]' : ''}`);
@@ -123,11 +135,13 @@ if (cmd === 'search') {
     }
   }
 } else if (cmd === 'retro-link') {
+  if (helpMode) { console.log('Usage: advisor-vault retro-link [--dry-run] [--limit N]'); process.exit(0); }
   const dryRun = args.includes('--dry-run');
   const limit = parseInt(getFlag('--limit', '0'), 10);
   const { candidates, rewritten, skippedNoSids, skippedHasSection } = retroLink({ dryRun, limit });
   console.log(`Candidates: ${candidates}  Rewritten: ${rewritten}  Skipped-no-sids: ${skippedNoSids}  Skipped-has-section: ${skippedHasSection}${dryRun ? '  [dry-run]' : ''}`);
 } else if (cmd === 'communities') {
+  if (helpMode) { console.log('Usage: advisor-vault communities [--recompute] [--limit N]'); process.exit(0); }
   const recompute = args.includes('--recompute');
   const limit = parseInt(getFlag('--limit', '20'), 10);
   if (recompute) {
@@ -146,6 +160,7 @@ if (cmd === 'search') {
     }
   }
 } else if (cmd === 'prune-fixtures') {
+  if (helpMode) { console.log('Usage: advisor-vault prune-fixtures [--dry-run] [--min-body-length N]'); process.exit(0); }
   const dryRun = args.includes('--dry-run');
   const minBodyLength = parseInt(getFlag('--min-body-length', '20'), 10);
   const { count, pruned } = pruneFixtures({ dryRun, minBodyLength });

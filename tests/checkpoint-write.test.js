@@ -1,46 +1,63 @@
-import { test, expect, afterAll } from 'bun:test';
+import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
 // U19: synthesize CLI must write a checkpoint file at
-// ~/.advisor/runs/<sid>/checkpoints/phase1-<ts>.json
-// Currently it does NOT — these tests are intentionally RED.
+// <ADVISOR_RUNS_ROOT>/<sid>/checkpoints/phase1-<ts>.json
 
 const LIB_CHANNEL = path.resolve(import.meta.dir, '../lib/channel.js');
 const testSid = 'test-checkpoint-' + Date.now();
-const HOME = os.homedir();
-const runDir = path.join(HOME, '.advisor', 'runs', testSid);
-const checkpointsDir = path.join(runDir, 'checkpoints');
 
-const result = spawnSync(
-  'bun',
-  [
-    LIB_CHANNEL, 'synthesize',
-    '--sid', testSid,
-    '--seq', '1',
-    '--established', 'e',
-    '--gap', 'g',
-    '--material', 'no',
-    '--next', 'n',
-    '--key-quotes', 'q',
-  ],
-  { encoding: 'utf8', env: { ...process.env, HOME } }
-);
+let tmpVault;
+let tmpRuns;
+let runDir;
+let checkpointsDir;
+let result;
+let checkpointData;
 
-// Try to locate and parse the checkpoint file written by synthesize.
-// Will be null until U20 implements the write.
-let checkpointData = null;
-try {
-  const files = fs.readdirSync(checkpointsDir).filter(f => /^phase1-\d+\.json$/.test(f));
-  if (files.length > 0) {
-    checkpointData = JSON.parse(fs.readFileSync(path.join(checkpointsDir, files[0]), 'utf8'));
-  }
-} catch (_) {}
+beforeAll(() => {
+  tmpVault = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-ckpt-'));
+  tmpRuns = fs.mkdtempSync(path.join(os.tmpdir(), 'runs-ckpt-'));
+  runDir = path.join(tmpRuns, testSid);
+  checkpointsDir = path.join(runDir, 'checkpoints');
+
+  result = spawnSync(
+    'bun',
+    [
+      LIB_CHANNEL, 'synthesize',
+      '--sid', testSid,
+      '--seq', '1',
+      '--established', 'e',
+      '--gap', 'g',
+      '--material', 'no',
+      '--next', 'n',
+      '--key-quotes', 'q',
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ADVISOR_VAULT: tmpVault,
+        ADVISOR_RUNS_ROOT: tmpRuns,
+        ADVISOR_SKIP_TAB_CLOSE: '1',
+      },
+    }
+  );
+
+  checkpointData = null;
+  try {
+    const files = fs.readdirSync(checkpointsDir).filter(f => /^phase1-\d+\.json$/.test(f));
+    if (files.length > 0) {
+      checkpointData = JSON.parse(fs.readFileSync(path.join(checkpointsDir, files[0]), 'utf8'));
+    }
+  } catch (_) {}
+});
 
 afterAll(() => {
-  try { fs.rmSync(runDir, { recursive: true, force: true }); } catch (_) {}
+  fs.rmSync(tmpVault, { recursive: true, force: true });
+  fs.rmSync(tmpRuns, { recursive: true, force: true });
 });
 
 test('synthesize exits 0', () => {

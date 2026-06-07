@@ -5,19 +5,19 @@ import fs from 'fs';
 import path from 'path';
 
 const CHANNEL_JS = path.resolve(import.meta.dir, '../lib/channel.js');
-const ADVISOR_RUNS = path.join(os.homedir(), '.advisor', 'runs');
 const TEST_TIMEOUT = 30000;
 
-// Create a unique sid for each test to avoid collision with synthesis.log entries
-let tmpRunDir;
+let tmpVault;
+let tmpRuns;
 
 beforeAll(() => {
-  fs.mkdirSync(path.join(ADVISOR_RUNS), { recursive: true });
+  tmpVault = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-verdict-'));
+  tmpRuns = fs.mkdtempSync(path.join(os.tmpdir(), 'runs-verdict-'));
 });
 
 afterAll(() => {
-  // Clean up temp synthesis.log files created during tests
-  if (tmpRunDir) fs.rmSync(tmpRunDir, { recursive: true, force: true });
+  fs.rmSync(tmpVault, { recursive: true, force: true });
+  fs.rmSync(tmpRuns, { recursive: true, force: true });
 });
 
 function runSynthesize(args, sid) {
@@ -28,7 +28,16 @@ function runSynthesize(args, sid) {
      '--established', 'test', '--gap', 'none', '--material', 'yes',
      '--next', 'proceed-to-step-8',
      ...args],
-    { encoding: 'utf8', timeout: 25000 }
+    {
+      encoding: 'utf8',
+      timeout: 25000,
+      env: {
+        ...process.env,
+        ADVISOR_VAULT: tmpVault,
+        ADVISOR_RUNS_ROOT: tmpRuns,
+        ADVISOR_SKIP_TAB_CLOSE: '1',
+      },
+    }
   );
 }
 

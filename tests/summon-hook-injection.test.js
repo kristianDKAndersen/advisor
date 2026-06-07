@@ -14,6 +14,8 @@ const ADVISOR_ROOT = path.resolve(import.meta.dir, '..');
 let provisionedWorkspace = null;
 let provisionedSid = null;
 
+const tmpRuns = fs.mkdtempSync(path.join(os.tmpdir(), 'summon-hook-injection-'));
+
 // Provision a real (non-coder) workspace by calling lib/summon.js directly.
 // We use agent=researcher which only copies a small directory — no git worktree.
 const sid = `test-hook-injection-${Date.now()}`;
@@ -28,7 +30,7 @@ const result = spawnSync(
   ],
   {
     encoding: 'utf8',
-    env: { ...process.env, HOME: os.homedir() },
+    env: { ...process.env, ADVISOR_RUNS_ROOT: tmpRuns },
   }
 );
 
@@ -41,11 +43,7 @@ if (result.status === 0 && result.stdout.trim()) {
 }
 
 afterAll(() => {
-  // Clean up the provisioned run directory.
-  if (provisionedSid) {
-    const runDir = path.join(os.homedir(), '.advisor', 'runs', provisionedSid);
-    try { fs.rmSync(runDir, { recursive: true, force: true }); } catch (_) {}
-  }
+  fs.rmSync(tmpRuns, { recursive: true, force: true });
 });
 
 test('provisionOne exits 0 and returns workspace path', () => {
