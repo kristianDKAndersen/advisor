@@ -116,3 +116,20 @@ test('processHandoff with context {prev_summary:foo} passes prev_summary substri
   const taskValue = call.args[taskIdx + 1];
   expect(taskValue).toContain('foo');
 });
+
+// ── Test 6: fallback SID must match vault SID_RE when summon fails ────────────
+// RED: current fallback is Date.now()+'-'+agent → "1781041288123-planner" which
+// does NOT match vault SID_RE /(?:17[0-9]{8}|[0-9]{10})-[0-9a-f]{6}/.
+test('processHandoff fallback SID when summon fails uses mintSessionId format matching vault SID_RE', async () => {
+  const { processHandoff } = await import(LIB_HANDOFF_RECEIVER);
+  const senderOutbox = path.join(tmpDir, 'sender-outbox-test6.jsonl');
+  const handoffBody = { receiver_agent: 'planner', task: 'plan X', goal: 'plan done', context: null };
+
+  function throwingExecFileSync() { throw new Error('summon failed'); }
+
+  const result = await processHandoff(handoffBody, senderOutbox, { execFileSync: throwingExecFileSync });
+
+  // Vault SID_RE: /\b(?:17[0-9]{8}|[0-9]{10})-[0-9a-f]{6}\b/
+  const SID_RE = /^(?:17[0-9]{8}|[0-9]{10})-[0-9a-f]{6}$/;
+  expect(SID_RE.test(result.sid)).toBe(true);
+});
