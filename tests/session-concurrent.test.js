@@ -80,6 +80,35 @@ test('concurrent patchers via withSessionLock do not lose updates', async () => 
   }
 }, 30000);
 
+// C3: stale orphaned session-lock must be cleared so acquisition succeeds quickly.
+test('stale orphaned session-lock is cleared and acquisition succeeds', async () => {
+  const tmpRunsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sess-stale-'));
+  try {
+    const sid = 'stale-lock-test';
+    const sessDir = path.join(tmpRunsRoot, sid);
+    const lockDir = path.join(sessDir, '.session.lock');
+
+    // Simulate an orphaned lock dir left by a hard-killed process (15 s old).
+    fs.mkdirSync(lockDir, { recursive: true });
+    const staleTime = new Date(Date.now() - 15000);
+    fs.utimesSync(lockDir, staleTime, staleTime);
+
+    const t0 = Date.now();
+    const worker = spawnWorker(sid, 0, { ADVISOR_RUNS_ROOT: tmpRunsRoot });
+    const code = await worker.exited;
+    const elapsed = Date.now() - t0;
+
+    expect(code).toBe(0); // must succeed, not timeout
+    expect(elapsed).toBeLessThan(2000); // well under the 5 s deadline
+
+    // State must have been written — lock was cleared and fn executed.
+    const statePath = path.join(tmpRunsRoot, sid, 'session.json');
+    expect(fs.existsSync(statePath)).toBe(true);
+  } finally {
+    fs.rmSync(tmpRunsRoot, { recursive: true, force: true });
+  }
+}, 10000);
+
 // C2: second caller must block until the first releases the lock.
 // Each worker carries a 100 ms artificial delay via ADVISOR_TEST_UPDATE_DELAY_MS
 // (captured at session.js load time inside each child process). With N_BLOCK

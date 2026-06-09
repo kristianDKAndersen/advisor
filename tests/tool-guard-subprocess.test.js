@@ -61,6 +61,31 @@ test('checkDuplicate via subprocess: different args do not cross-count', () => {
   expect(r3.stdout).toContain('tool-guard: loop detected');
 });
 
+test('stale orphaned tool-counts-lock is cleared and count increments correctly', () => {
+  const sid = `stale-tg-${Date.now()}`;
+  const lockDir = path.join(tmpRuns, sid, '.tool-counts.lock');
+
+  // Simulate an orphaned lock dir left by a hard-killed process (15 s old).
+  fs.mkdirSync(lockDir, { recursive: true });
+  const staleTime = new Date(Date.now() - 15000);
+  fs.utimesSync(lockDir, staleTime, staleTime);
+
+  const t0 = Date.now();
+  const r = invoke('Bash', { command: 'echo stale-test' }, sid);
+  const elapsed = Date.now() - t0;
+
+  expect(r.status).toBe(0); // must succeed
+  expect(elapsed).toBeLessThan(2000); // well under the 5 s deadline
+
+  // Count must have been written — stale lock was cleared and increment ran.
+  const countsPath = path.join(tmpRuns, sid, 'tool-counts.json');
+  expect(fs.existsSync(countsPath)).toBe(true);
+  const counts = JSON.parse(fs.readFileSync(countsPath, 'utf8'));
+  const values = Object.values(counts);
+  expect(values.length).toBeGreaterThan(0);
+  expect(values[0]).toBe(1);
+});
+
 test('checkDuplicate via subprocess: absent ADVISOR_SID exits 0 (fail-open)', () => {
   for (let i = 0; i < 5; i++) {
     const r = spawnSync('node', [TOOL_GUARD], {
