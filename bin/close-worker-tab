@@ -26,13 +26,9 @@ fi
 if [[ ! -d "$runDir" ]]; then _tab_trace no-match -; exit 0; fi
 
 # Defense in depth: kill any lingering claude processes whose argv contains sid.
-ps -ax -o pid=,comm=,args= 2>/dev/null | while IFS= read -r line; do
-  comm_field=$(awk '{print $2}' <<<"$line")
-  pid_field=$(awk '{print $1}' <<<"$line")
-  if [[ "$comm_field" == "claude" ]] && grep -qF "$sid" <<<"$line"; then
-    kill -KILL "$pid_field" 2>/dev/null || true
-  fi
-done
+ps -ax -o pid=,comm=,args= 2>/dev/null \
+  | awk -v sid="$sid" '$2=="claude" && index($0, sid) {print $1}' \
+  | xargs -r kill -KILL 2>/dev/null || true
 
 # ── Headless tmux path ────────────────────────────────────────────────────────
 # Look for any tmux session whose name starts with "advisor-<sid>" (covers
@@ -54,7 +50,7 @@ if command -v tmux >/dev/null 2>&1; then
   fi
   if [[ "$_PANE_KILLED" == "0" ]]; then
     WIN_ID=$(tmux list-windows -t advisor -F '#{window_id} #{window_name}' 2>/dev/null \
-      | grep " .*${sid}" | awk '{print $1}' | head -1)
+      | grep -F " ${sid}" | awk '{print $1}' | head -1)
     if [[ -n "$WIN_ID" ]]; then
       _tab_trace tmux-kill "advisor:${WIN_ID}"
       tmux kill-window -t "advisor:${WIN_ID}" 2>/dev/null || true
@@ -129,7 +125,8 @@ _cleanup_worktree() {
   [[ -d "$workspaceDir" ]] || return 0
   _tab_trace worktree-remove "$workspaceDir"
   if git -C "$advisorRoot" worktree remove --force "$workspaceDir" 2>/dev/null; then
-    git -C "$advisorRoot" branch -D "ws/${sid}" 2>/dev/null || true
+    git -C "$advisorRoot" branch -D "ws/${sid}" 2>/dev/null || \
+      echo "WARN: close-worker-tab: could not delete branch ws/${sid} (orphaned?)" >&2
   fi
 }
 _cleanup_worktree

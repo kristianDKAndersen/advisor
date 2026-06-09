@@ -826,3 +826,18 @@ test('spawnHeadless legacy (ADVISOR_TMUX_MULTIPLEX unset): uses tmuxName-based n
     else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
   }
 });
+
+// ── W5: sealOutbox reason string on multiplex happy path ─────────────────────
+
+test('W5: lib/tmux-runner.js multiplex happy path uses no-op-success reason', () => {
+  const src = fs.readFileSync(path.resolve(import.meta.dir, '../lib/tmux-runner.js'), 'utf8');
+  // Pre-fix: source does not contain 'no-op-success' → this expect fails
+  expect(src).toContain("sealOutbox('no-op-success')");
+});
+
+test('W5: lib/tmux-runner.js has Happy path comment in multiplex section', () => {
+  const src = fs.readFileSync(path.resolve(import.meta.dir, '../lib/tmux-runner.js'), 'utf8');
+  // Pre-fix: comment only exists once (legacy path); post-fix it appears twice
+  const occurrences = (src.match(/Happy path: worker wrote its own result/g) || []).length;
+  expect(occurrences).toBeGreaterThanOrEqual(2);
+});

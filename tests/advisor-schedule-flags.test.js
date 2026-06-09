@@ -111,3 +111,17 @@ test('backward compat: omitting --agent defaults to coder in generated command',
   expect(result.status).toBe(0);
   expect(result.stdout).toContain('--agent coder');
 });
+
+// [N2] Multi-word agent names must be single-quoted in the assembled SUMMON_CMD.
+// Without SAFE_AGENT escaping, --agent "multi word agent" word-splits in the
+// assembled bash -c string and the output will NOT contain '--agent \'multi word agent\''.
+test('[N2] multi-word agent name is single-quoted in generated summon command', () => {
+  const result = runDryRun([
+    '--sid', 'test-sid',
+    '--interval', '1m',
+    '--task', 't',
+    '--agent', 'multi word agent',
+  ]);
+  expect(result.status).toBe(0);
+  expect(result.stdout).toContain("--agent 'multi word agent'");
+});

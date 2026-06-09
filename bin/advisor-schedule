@@ -89,8 +89,16 @@ WINDOW_NAME="adv-sched-${SID}"
 SAFE_TASK="${TASK_TEXT//\'/\'\\\'\'}"
 SAFE_GOAL="${GOAL//\'/\'\\\'\'}"
 SAFE_WHEN="${WHEN//\'/\'\\\'\'}"
+SAFE_AGENT="${AGENT//\'/\'\\\'\'}"
 
-SUMMON_CMD="'${SCRIPT_DIR}/summon' --headless --no-timeline --task '${SAFE_TASK}' --agent ${AGENT} --goal '${SAFE_GOAL}'"
+# Quote AGENT only when it contains spaces or single-quotes (word-split risk).
+if [[ "$AGENT" =~ [[:space:]\'] ]]; then
+  AGENT_ARG="'${SAFE_AGENT}'"
+else
+  AGENT_ARG="${AGENT}"
+fi
+
+SUMMON_CMD="'${SCRIPT_DIR}/summon' --headless --no-timeline --task '${SAFE_TASK}' --agent ${AGENT_ARG} --goal '${SAFE_GOAL}'"
 
 # Wrap summon in a condition guard when --when is provided.
 if [[ -n "$WHEN" ]]; then

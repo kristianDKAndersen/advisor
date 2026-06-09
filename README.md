@@ -128,6 +128,8 @@ skills/
 | `fact-checker` | Spot-checks external-tool pricing, licensing, version, and availability claims against authoritative sources; auto-invoked after synthesis when result body contains dollar amounts, 'free/paid', license names, or version-to-feature assertions |
 | `spec` | Drafts implementation specs from a goal — produces an executable spec the `coder` agent can implement; used as the upstream stage of `/tournament` |
 | `tournament-evaluator` | Scores and ranks competing coder implementations against a shared test suite; used by the `/tournament` skill |
+| `migration` | Migrates a source codebase to a target architecture; reads `source_repo` and an `arch_def` (prose, YAML, Confluence export, or Miro export) and produces migration changes in the target tree |
+| `vault-curator` | Curates vault notes by deduplication — walks notes matching `scope_glob`, flags or merges pairs whose similarity exceeds `similarity_threshold`, and produces a curation report |
 
 ## Creative Council Mode
 
@@ -166,7 +168,7 @@ Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a s
 
 | Skill | Purpose |
 |-------|---------|
-| `/brief` | Validates 5 required fields (objective, output, tools, scope, parallelism) then emits a `bin/summon` command; auto-populates `--allowed-tools` from the brief's tools field and accepts `--intelligence` to resolve model via `adapter/intelligence-map.json` |
+| `/brief` | Validates 5 required fields (objective, output, tools, scope, parallelism) then emits a `bin/summon` command with the task string assembled from all 5 fields; does not set `--allowed-tools` or `--intelligence` (those flags are only available via `bin/brief` directly) |
 | `/synth` | Validates 4 required fields (sid, seq, established, gap) then invokes `channel.js synthesize` |
 | `/extract-lesson` | Post-mortem analyst — turns a `verdict=blocked, material=yes` synthesis into a negative-polarity lesson note in the vault; auto-triggered on the 2nd evaluator failure for the same task shape |
 | `/worker-protocol` | Loads inbox-polling rules, tracing cadence, and self-terminate behavior into a worker session |
@@ -183,8 +185,6 @@ The `docs/` directory contains reference materials for advanced features:
 | `docs/tournament-contract.md` | Tournament protocol specification — defines the contract between spec agent, coder workers, and tournament-evaluator |
 | `docs/tournament-delta.md` | Tournament protocol changelog and delta from prior versions |
 | `docs/specs/` | Additional specification documents |
-| `docs/gunk` | TODO: review and remove if stale |
-| `docs/l-prompt.md` | TODO: review and remove if stale |
 
 ## Channel protocol
 
@@ -240,13 +240,17 @@ Read with `readSessionState(sid)` · Update with `updateSessionState(sid, patchF
 
 ## Hooks
 
-Three lifecycle hooks are registered in `.claude/settings.json`:
+Seven hook commands are registered across five lifecycle events in `.claude/settings.json`:
 
-| Hook | Event | What it does |
-|------|-------|--------------|
-| `SessionStart` | Session start | Surfaces a 'vault due (next 14d)' banner (all note types, not just reminders) and the last context-handover file via `spawnSync`. |
-| `PreCompact` | Before auto-compaction | `git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"` — preserves session state across context resets. Note GH#13572: does not fire on manual `/compact`; the Stop hook covers that path. |
-| `Stop` | After each Claude response | Reads `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, sums all four token fields, and appends a record to `~/.advisor/state/token-usage.jsonl` for cross-session cost tracking. |
+| Hook command | Event | Matcher | What it does |
+|---|---|---|---|
+| `session-start.js` | `SessionStart` | — | Surfaces a 'vault due (next 14d)' banner (all note types, not just reminders) and the last context-handover file via `spawnSync`. |
+| `workspace-guard.js` | `PreToolUse` | `Edit\|Write` | Rejects edits that would write outside the session's designated workspace; prevents accidental clobbering of other sessions' output. |
+| inline `session.json` updater | `PostToolUse` | `Bash` | Detects `channel.js synthesize` calls by inspecting `CLAUDE_TOOL_INPUT`; extracts `--next` directive and patches `next_action` in `session.json` atomically. |
+| `test-on-edit.js` | `PostToolUse` | `Edit` | Runs the project test suite after any file edit; surfaces test failures inline so the worker sees red/green in the same turn as the edit. |
+| `stop-telemetry.js` | `Stop` | — | Reads `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, sums all four token fields, and appends a record to `~/.advisor/state/token-usage.jsonl` for cross-session cost tracking. |
+| `stop-handover.js` | `Stop` | — | Writes the context-handover file for recovery after compression; surfaced by `session-start.js` on the next session start. |
+| `git add -A && git commit …` | `PreCompact` | — | `git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"` — preserves session state across context resets. Note GH#13572: does not fire on manual `/compact`; the Stop hook covers that path. |
 
 **Worker PostToolUse hooks (opt-in):** Three hooks in `lib/hooks/` (`worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) are installed in all 16 `spawns/*/.claude/settings.json` files, gated by `ADVISOR_WORKER_HOOKS` (default 0). When enabled, they automate the trace/recv/close-tab boilerplate; when disabled, workers rely on the `/worker-protocol` skill for manual handling. See the active-experiment bullet in `CLAUDE.md` for rollout status.
 

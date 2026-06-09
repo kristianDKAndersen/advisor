@@ -67,3 +67,14 @@ test('AFTER FIX: worker-auto-close does NOT contain kill -TERM walk (AT-7.3 GREE
   // Must still delegate to close-tab
   expect(scriptContent).toContain('bin/close-tab');
 });
+
+// [N3] Structural: echo "$INPUT" subshell pipe for large stdin must be removed.
+// Pre-fix the script has INPUT=$(cat) and echo "$INPUT" | node -e ..., which truncates
+// large payloads in some shells. Post-fix, node reads stdin directly via fd 0.
+test('[N3] worker-auto-close.sh does not use echo "$INPUT" pipe; node reads stdin directly', () => {
+  const scriptContent = fs.readFileSync(WORKER_AUTO_CLOSE_SH, 'utf8');
+  expect(scriptContent).not.toContain('INPUT=$(cat)');
+  expect(scriptContent).not.toContain('echo "$INPUT"');
+  // Node must still read stdin directly
+  expect(scriptContent).toContain("readFileSync(0,'utf8')");
+});

@@ -5,6 +5,7 @@
     { "low": 0,  "high": 39,  "model": "claude-haiku-4-5-20251001", "reasoning": "low" },
     { "low": 40, "high": 74,  "model": "claude-sonnet-4-6",          "reasoning": "medium" },
     { "low": 75, "high": 89,  "model": "claude-sonnet-4-6",          "reasoning": "high" },
-    { "low": 90, "high": 100, "model": "claude-opus-4-7",            "reasoning": "high" }
+    { "low": 90, "high": 94,  "model": "claude-opus-4-7",            "reasoning": "high"   },
+    { "low": 95, "high": 100, "model": "claude-fable-5",             "reasoning": "higher" }
   ]
 }

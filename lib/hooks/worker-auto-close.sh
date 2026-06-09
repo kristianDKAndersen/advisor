@@ -7,9 +7,7 @@ set -euo pipefail
 [[ "${ADVISOR_WORKER_HOOKS:-}" == "0" ]] && exit 0
 [[ -z "${ADV:-}" ]] && exit 0
 
-INPUT=$(cat)
-
-MATCHES=$(echo "$INPUT" | node -e "
+MATCHES=$(node -e "
   const data = JSON.parse(require('fs').readFileSync(0,'utf8'));
   const cmd = (data.tool_input && data.tool_input.command) || '';
   // Must be a channel.js send with --type result to the outbox (not a different file)

@@ -26,6 +26,7 @@ worker environments).
 |------|---------|-------------|
 | `--material` | `no` | Whether supporting material is attached (`yes`/`no`) |
 | `--next` | `proceed-to-step-8` | Next action directive for the Advisor |
+| `--key-quotes` | `''` | 1–2 verbatim quotes from source material worth preserving; empty string if none |
 
 ## Validation
 
@@ -33,7 +34,7 @@ Check all 4 required fields FIRST. If any is missing, print:
 
 ```
 ERROR: missing required field: --<field>
-Usage: /synth --sid "..." --seq "..." --established "..." --gap "..." [--material "no"] [--next "proceed-to-step-8"]
+Usage: /synth --sid "..." --seq "..." --established "..." --gap "..." [--material "no"] [--next "proceed-to-step-8"] [--key-quotes ""]
 ```
 
 Do NOT invoke `node ... synthesize` when any required field is missing.
@@ -46,7 +47,8 @@ bun "$ADV/lib/channel.js" synthesize \
   --established "<established>" \
   --gap "<gap>" \
   --material "<material>" \
-  --next "<next>"
+  --next "<next>" \
+  --key-quotes "<key_quotes>"
 ```
 
 ## Usage example

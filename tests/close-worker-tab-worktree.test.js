@@ -91,6 +91,28 @@ test('close-worker-tab skips worktree cleanup when ADVISOR_SKIP_WORKTREE_CLEANUP
   expect(listBranches()).toContain(branchName);
 });
 
+test('[N5] close-worker-tab warns on stderr when branch delete fails', { timeout: TEST_TIMEOUT }, () => {
+  // Pre-conditions: worktree present, branch present.
+  expect(fs.existsSync(workspaceDir)).toBe(true);
+  expect(listBranches()).toContain(branchName);
+
+  // Delete the branch ref directly (bypasses "checked out in worktree" guard)
+  // so git worktree remove --force succeeds but git branch -D fails with "not found".
+  execFileSync('git', ['-C', ADVISOR_ROOT, 'update-ref', '-d', `refs/heads/${branchName}`], { stdio: 'ignore' });
+  expect(listBranches()).toBe('');
+
+  const result = spawnSync(CLOSE_WORKER_TAB, [sid], {
+    env: { ...process.env, HOME: tmpHome },
+    encoding: 'utf8'
+  });
+
+  // Script must not abort (non-aborting behavior preserved).
+  expect(result.status).toBe(0);
+
+  // After the fix, stderr should contain a WARN about the failed branch delete.
+  expect(result.stderr).toMatch(/WARN/);
+});
+
 test('close-worker-tab is a no-op when no worktree is registered for the sid', { timeout: TEST_TIMEOUT }, () => {
   // Pre-emptively clean the worktree so the script has nothing to remove.
   execFileSync('git', ['-C', ADVISOR_ROOT, 'worktree', 'remove', '--force', workspaceDir]);

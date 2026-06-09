@@ -26,8 +26,8 @@ if [[ ! -f "$STATE_FILE" ]]; then
 fi
 
 # Read PIDs
-DAEMON_PID="$(python3 -c "import json; d=json.load(open('$STATE_FILE')); print(d.get('daemon_pid',''))" 2>/dev/null || true)"
-CHROME_PID="$(python3 -c "import json; d=json.load(open('$STATE_FILE')); print(d.get('chrome_pid',''))" 2>/dev/null || true)"
+DAEMON_PID="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('daemon_pid',''))" "$STATE_FILE" 2>/dev/null || true)"
+CHROME_PID="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('chrome_pid',''))" "$STATE_FILE" 2>/dev/null || true)"
 
 # Ask daemon to shut down cleanly
 if [[ -S "$SOCK" ]]; then
