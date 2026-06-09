@@ -207,3 +207,15 @@ test('new-file: lib/graphify-setup.sh contains command -v guard', () => {
   const content = fs.readFileSync(p, 'utf8');
   expect(content).toMatch(/command -v graphify/);
 });
+
+// ---------------------------------------------------------------------------
+// effort-depth: effort:high mandates deep-reads of top hotspot files
+// ---------------------------------------------------------------------------
+
+test('effort-depth: effort:high mandates reading top highest-churn files in full', () => {
+  expect(claudeMd).toMatch(/read the top.*highest.churn.*full|highest.churn.*files.*in full|effort.*high.*read.*top.*churn/i);
+});
+
+test('effort-depth: graph sweep complements deep reads — does not replace them', () => {
+  expect(claudeMd).toMatch(/graph.*complements.*deep reads|does not replace.*them|complements.*not replace/i);
+});

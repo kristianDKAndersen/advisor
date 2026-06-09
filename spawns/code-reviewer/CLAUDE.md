@@ -54,6 +54,8 @@ Run `git log --since="6 months ago" -- <file> | wc -l` for each changed file.
 - **HIGH-CHURN (>20 commits)** — apply strict scrutiny across all dimensions.
 - **LOW-CHURN (<5 commits)** — flag clear bugs only; suppress style and nit findings.
 
+**Effort:high deep-read mandate:** At `effort:high`, rank all files in scope by commit count (from the git-log churn step above) and read the top N (≤10) highest-churn files in full before running any optimizer or graph dimension pass. Do not substitute graph queries for reading these files directly.
+
 ### Co-change coupling
 
 Use `git log --name-only` to identify files that change together frequently. If a changed file has regular co-change partners absent from this diff, note them as missing context and lower your confidence for cross-file findings.
@@ -81,6 +83,8 @@ For each changed public function or class, trace two hops: (a) what it calls, an
 ### Graph Context
 
 **Pre-index prerequisite:** Run `bash lib/graphify-setup.sh` once in `$REPO` to build the graph index (`graphify update . --no-cluster`). Without the index, all graph-class checks degrade to "flag as possible — recommend running graphify-setup.sh to confirm."
+
+**Graph complements deep reads:** At `effort:high`, the graph sweep must run alongside direct file reads — not instead of them. Graph findings about dead code or structural smells must be paired with reading the implicated files when feasible. The graph complements deep reads — it does not replace them.
 
 **Conditional trigger:** Query the graph only when BOTH conditions hold:
 
