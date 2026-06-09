@@ -70,3 +70,33 @@ test('queryEpisodes with empty file returns []', () => {
   expect(Array.isArray(result)).toBe(true);
   expect(result.length).toBe(0);
 });
+
+test('episodesPath: does not throw when HOME is unset', () => {
+  const savedHome = process.env.HOME;
+  const savedUserProfile = process.env.USERPROFILE;
+  const tmpFallback = fs.mkdtempSync(path.join(os.tmpdir(), 'ep-w2-'));
+  delete process.env.HOME;
+  process.env.USERPROFILE = tmpFallback;
+  try {
+    expect(() => episodes.writeEpisode({
+      sid: 'test-no-home', task_hash: 'fallback-hash', ts: 999, established: '', gap: '', key_quotes: ''
+    })).not.toThrow();
+  } finally {
+    if (savedHome !== undefined) process.env.HOME = savedHome;
+    else delete process.env.HOME;
+    if (savedUserProfile !== undefined) process.env.USERPROFILE = savedUserProfile;
+    else delete process.env.USERPROFILE;
+    fs.rmSync(tmpFallback, { recursive: true, force: true });
+  }
+});
+
+test('queryEpisodes: returns most-recent episodes when limit < total count', () => {
+  const ep = path.join(tmpHome, '.advisor', 'memory', 'episodes.jsonl');
+  fs.writeFileSync(ep, '');
+  episodes.writeEpisode({ sid: 's1', task_hash: 'hash-sort', ts: 1, established: '', gap: '', key_quotes: '' });
+  episodes.writeEpisode({ sid: 's2', task_hash: 'hash-sort', ts: 2, established: '', gap: '', key_quotes: '' });
+  episodes.writeEpisode({ sid: 's3', task_hash: 'hash-sort', ts: 3, established: '', gap: '', key_quotes: '' });
+  const result = episodes.queryEpisodes('hash-sort', 1);
+  expect(result.length).toBe(1);
+  expect(result[0].ts).toBe(3);
+});

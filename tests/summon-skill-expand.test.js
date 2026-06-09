@@ -88,3 +88,9 @@ test('plain skill dir remains a symlink when SKILL.md has no shell expressions',
   const plainLink = path.join(meta.workspace, '.claude', 'skills', 'plain-skill');
   expect(fs.lstatSync(plainLink).isSymbolicLink()).toBe(true);
 });
+
+test('summon.js does not define its own expandContent function (delegates to skill-expand.js)', () => {
+  const src = fs.readFileSync(new URL('../lib/summon.js', import.meta.url).pathname, 'utf8');
+  expect(src).not.toMatch(/function expandContent\(/);
+  expect(src).toContain("require('./skill-expand')");
+});

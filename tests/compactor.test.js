@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs';
 import { test, expect } from 'bun:test';
 
 // U3: lib/compactor.js does not exist yet.
@@ -54,4 +55,12 @@ test('summarizeInStages preserves stage boundaries', async () => {
   ];
   const summaries = await summarizeInStages(stages);
   expect(summaries.length).toBe(stages.length);
+});
+
+test('main(): does not call summarizeInStages after compactMessages (no double-summarize)', () => {
+  const src = readFileSync(new URL('../lib/compactor.js', import.meta.url).pathname, 'utf8');
+  const mainStart = src.indexOf('async function main(');
+  const afterMain = src.indexOf('\nif (require.main', mainStart);
+  const mainBody = src.slice(mainStart, afterMain);
+  expect(mainBody).not.toMatch(/summarizeInStages\(\[compacted\]/);
 });

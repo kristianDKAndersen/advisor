@@ -258,3 +258,12 @@ test('advisor-vault hubs CLI exits 0 and lists hub nodes', () => {
   // hub-center should appear (3 inbound links from earlier test)
   expect(result.stdout).toContain('hub-center');
 });
+
+test('listDue: uses parameterized DISMISSED_STATUSES (not string-interpolated into SQL)', () => {
+  const src = fs.readFileSync(new URL('../lib/vault.js', import.meta.url).pathname, 'utf8');
+  const start = src.indexOf('function listDue(');
+  const end = src.indexOf('\nfunction ', start + 1);
+  const body = src.slice(start, end);
+  expect(body).not.toContain('_DISMISSED_SQL');
+  expect(body).toContain('DISMISSED_STATUSES.map');
+});
