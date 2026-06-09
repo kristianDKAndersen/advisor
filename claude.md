@@ -233,7 +233,7 @@ written to disk.
 
 Note: the PreCompact hook is now installed in `.claude/settings.json` — it auto-commits a checkpoint (`git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"`) before auto-compaction fires, so the handover write above is already persisted. Caveat GH#13572: PreCompact does not fire on manual `/compact`; in that case, complete the handover write manually before issuing `/compact`, or rely on the Stop hook which fires after every response.
 
-**Active experiment (hook rollout, until 2026-06-01):** planner + researcher at `ADVISOR_WORKER_HOOKS=1`, others at 0. When enabled, three PostToolUse hooks (`lib/hooks/worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) automate the trace/recv/close-tab boilerplate that workers otherwise handle manually via the `/worker-protocol` skill. Hooks are an opt-in mechanism; the 14 remaining agents stay at 0 (manual) until the experiment concludes. Eval checklist and rollback: `~/.advisor/vault/lessons/manual-20260522-worker-hooks-rollout-advisor-1.md`.
+**Worker PostToolUse hooks (experiment paused — deadline elapsed 2026-06-01):** planner + researcher remain at `ADVISOR_WORKER_HOOKS=1`; the other 14 agents stay at 0 (manual via `/worker-protocol`). The experiment window closed without a formal promotion decision. To resume evaluation or promote, update this note and the relevant `spawns/*/.claude/settings.json` files. Rollback reference: `~/.advisor/vault/lessons/manual-20260522-worker-hooks-rollout-advisor-1.md`.
 
 ## Recovery after compression
 
