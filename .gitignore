@@ -33,3 +33,6 @@ test/*.txt
 
 # ── Local docs scratch area ────────────────────────────────────────────────
 /docs
+
+# ── graphify generated code-knowledge graph (regenerated via graphify update) ─
+graphify-out/
