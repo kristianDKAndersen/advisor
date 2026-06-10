@@ -850,6 +850,16 @@ test('W5: lib/tmux-runner.js has Happy path comment in multiplex section', () =>
 
 const ADVISOR_ROOT_TR = path.resolve(import.meta.dir, '..');
 
+// Create a run dir whose session.json is >24h old — the only state the reaper
+// treats as stale (an absent session.json is spared, not reaped).
+function mkStaleRun(runsDir, sid) {
+  fs.mkdirSync(path.join(runsDir, sid), { recursive: true });
+  const sj = path.join(runsDir, sid, 'session.json');
+  fs.writeFileSync(sj, '{}');
+  const old = new Date(Date.now() - 25 * 3600 * 1000);
+  fs.utimesSync(sj, old, old);
+}
+
 test('[D5] reapStaleWorktrees captures real worktree output then issues remove + branch -D', () => {
   // Build a throwaway git repo + worktree entirely under tmpDir.
   const repo = path.join(tmpDir, 'repo');
@@ -869,7 +879,7 @@ test('[D5] reapStaleWorktrees captures real worktree output then issues remove +
   fs.writeFileSync(path.join(wt, 'result.txt'), 'durable output\n');
 
   const runsDir = path.join(tmpDir, 'runs');
-  fs.mkdirSync(path.join(runsDir, sid), { recursive: true }); // no session.json → stale
+  mkStaleRun(runsDir, sid); // session.json >24h old → stale
 
   const calls = [];
   const execFn = (cmd, args) => {
@@ -969,7 +979,7 @@ function wtListPorcelain(sids) {
 test('[CAP-a] reapStaleWorktrees honours opts.limit — only `limit` eligible worktrees acted on', () => {
   const runsDir = path.join(tmpDir, 'runs-cap-a');
   const sids = ['cap-a-1', 'cap-a-2', 'cap-a-3', 'cap-a-4', 'cap-a-5'];
-  for (const sid of sids) fs.mkdirSync(path.join(runsDir, sid), { recursive: true }); // no session.json → stale
+  for (const sid of sids) mkStaleRun(runsDir, sid); // session.json >24h old → stale
   const listOut = wtListPorcelain(sids);
 
   let removeCount = 0;
@@ -992,7 +1002,7 @@ test('[CAP-a] reapStaleWorktrees honours opts.limit — only `limit` eligible wo
 test('[CAP-b] reapStaleWorktrees with no limit drains the whole backlog (uncapped)', () => {
   const runsDir = path.join(tmpDir, 'runs-cap-b');
   const sids = ['cap-b-1', 'cap-b-2', 'cap-b-3', 'cap-b-4', 'cap-b-5'];
-  for (const sid of sids) fs.mkdirSync(path.join(runsDir, sid), { recursive: true });
+  for (const sid of sids) mkStaleRun(runsDir, sid);
   const listOut = wtListPorcelain(sids);
 
   let removeCount = 0;
@@ -1020,4 +1030,53 @@ test('[CAP-c] runLoadReapers passes the MAX_REAP_PER_LOAD cap into reapStaleWork
 
   expect(captured).not.toBeNull();
   expect(captured.limit).toBe(25);
+});
+
+// ── reaper race regression (fresh worktree mid-provision) ─────────────────────
+// SAFETY: temp runsDir + injected execFn/captureFn so no real worktree is touched.
+
+test('reapStaleWorktrees: fresh worktree with no session.json is skipped (not reaped)', () => {
+  const now = Date.now();
+  // Real sids carry a unix-seconds provisioning timestamp prefix; this one is
+  // brand new and its session.json has not been written yet (mid-provision).
+  const sid = `${Math.floor(now / 1000)}-cf6431`;
+  const runsDir = path.join(tmpDir, 'runs-fresh-race');
+  fs.mkdirSync(path.join(runsDir, sid), { recursive: true }); // run dir exists, no session.json
+
+  const calls = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'git' && args.includes('worktree') && args.includes('list')) {
+      return `worktree /tmp/wt-${sid}\nHEAD 0000\nbranch refs/heads/ws/${sid}\n\n`;
+    }
+    if (cmd === 'git' && (args.includes('remove') || args.includes('-D'))) { calls.push(args.join(' ')); return ''; }
+    if (cmd === 'pgrep') throw new Error('not found'); // no live process — the guards alone must spare it
+    return '';
+  };
+  let captureCount = 0;
+  reapStaleWorktrees({ runsDir, execFn, now, repoRoot: ADVISOR_ROOT_TR, captureFn: () => { captureCount++; return true; } });
+
+  expect(calls).toHaveLength(0);
+  expect(captureCount).toBe(0);
+});
+
+test('reapStaleWorktrees: grace floor spares a <1h-old sid even with a stale session.json', () => {
+  const now = Date.now();
+  const sid = `${Math.floor(now / 1000) - 600}-abcd12`; // provisioned 10 min ago
+  const runsDir = path.join(tmpDir, 'runs-grace');
+  mkStaleRun(runsDir, sid); // session.json >24h old — reaped without the grace floor
+
+  const calls = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'git' && args.includes('worktree') && args.includes('list')) {
+      return `worktree /tmp/wt-${sid}\nHEAD 0000\nbranch refs/heads/ws/${sid}\n\n`;
+    }
+    if (cmd === 'git' && (args.includes('remove') || args.includes('-D'))) { calls.push(args.join(' ')); return ''; }
+    if (cmd === 'pgrep') throw new Error('not found');
+    return '';
+  };
+  let captureCount = 0;
+  reapStaleWorktrees({ runsDir, execFn, now, repoRoot: ADVISOR_ROOT_TR, captureFn: () => { captureCount++; return true; } });
+
+  expect(calls).toHaveLength(0);
+  expect(captureCount).toBe(0);
 });
