@@ -13,6 +13,8 @@ set -u
 
 # shellcheck source=../lib/tab-trace.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/tab-trace.sh"
+# shellcheck source=./_worktree-capture.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_worktree-capture.sh"
 
 sid="${1:-}"
 if [[ -z "$sid" ]]; then _tab_trace no-match -; exit 0; fi
@@ -119,10 +121,24 @@ EOF
 # headaches that a grep-based pre-check would hit.
 _cleanup_worktree() {
   [[ "${ADVISOR_SKIP_WORKTREE_CLEANUP:-}" == "1" ]] && return 0
-  local advisorRoot workspaceDir
+  local advisorRoot workspaceDir outputDir
   advisorRoot="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   workspaceDir="$runDir/workspace"
+  outputDir="$runDir/output"
   [[ -d "$workspaceDir" ]] || return 0
+
+  # Capture-before-remove (Approach A): durably snapshot the worktree's
+  # changed + untracked files into $OUTPUT_DIR before destroying the worktree.
+  # Fail-closed — if capture fails, skip removal so work is never lost, unless
+  # the operator sets ADVISOR_FORCE_REMOVE_UNCAPTURED=1.
+  if ! _capture_worktree "$workspaceDir" "$outputDir" "$sid"; then
+    if [[ "${ADVISOR_FORCE_REMOVE_UNCAPTURED:-}" != "1" ]]; then
+      echo "WARN: close-worker-tab: worktree capture FAILED for ${sid}; skipping removal to preserve work (set ADVISOR_FORCE_REMOVE_UNCAPTURED=1 to override)" >&2
+      return 0
+    fi
+    echo "WARN: close-worker-tab: capture failed for ${sid} but ADVISOR_FORCE_REMOVE_UNCAPTURED=1 — removing anyway" >&2
+  fi
+
   _tab_trace worktree-remove "$workspaceDir"
   if git -C "$advisorRoot" worktree remove --force "$workspaceDir" 2>/dev/null; then
     git -C "$advisorRoot" branch -D "ws/${sid}" 2>/dev/null || \

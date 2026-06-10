@@ -2,7 +2,8 @@ import { test, expect, beforeEach, afterEach } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ensureStopHook, parseTranscript, makeTmuxName, makeWindowName, ensureAdvisorSession, pollCapturePane, reaperSweepOrphanSessions, spawnHeadless } from '../lib/tmux-runner.js';
+import { ensureStopHook, parseTranscript, makeTmuxName, makeWindowName, ensureAdvisorSession, pollCapturePane, reaperSweepOrphanSessions, reapStaleWorktrees, runLoadReapers, spawnHeadless } from '../lib/tmux-runner.js';
+import { execFileSync } from 'child_process';
 
 const STOP_HOOK_COMMAND =
   'if [ -n "$CLAUDE_I_SENTINEL" ]; then cat > "$CLAUDE_I_SENTINEL.json"; touch "$CLAUDE_I_SENTINEL"; fi';
@@ -840,4 +841,183 @@ test('W5: lib/tmux-runner.js has Happy path comment in multiplex section', () =>
   // Pre-fix: comment only exists once (legacy path); post-fix it appears twice
   const occurrences = (src.match(/Happy path: worker wrote its own result/g) || []).length;
   expect(occurrences).toBeGreaterThanOrEqual(2);
+});
+
+// ── reapStaleWorktrees (Approach A orphan reaper) ────────────────────────────
+// Plan §4 D5, R9, R10. SAFETY: every call passes a temp runsDir and injects
+// execFn for git worktree list / remove / branch -D / pgrep so the real repo is
+// never swept. The destructive remove/branch-D only route through the spy.
+
+const ADVISOR_ROOT_TR = path.resolve(import.meta.dir, '..');
+
+test('[D5] reapStaleWorktrees captures real worktree output then issues remove + branch -D', () => {
+  // Build a throwaway git repo + worktree entirely under tmpDir.
+  const repo = path.join(tmpDir, 'repo');
+  fs.mkdirSync(repo, { recursive: true });
+  const g = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'ignore' });
+  execFileSync('git', ['init', '-q', repo], { stdio: 'ignore' });
+  g('config', 'user.email', 't@t');
+  g('config', 'user.name', 't');
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'init');
+
+  const sid = 'orphan00-cafe';
+  const wt = path.join(tmpDir, 'wt');
+  execFileSync('git', ['-C', repo, 'worktree', 'add', '-b', `ws/${sid}`, wt], { stdio: 'ignore' });
+  // Untracked coder output to be captured.
+  fs.writeFileSync(path.join(wt, 'result.txt'), 'durable output\n');
+
+  const runsDir = path.join(tmpDir, 'runs');
+  fs.mkdirSync(path.join(runsDir, sid), { recursive: true }); // no session.json → stale
+
+  const calls = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'git' && args.includes('worktree') && args.includes('list')) {
+      return `worktree ${wt}\nHEAD 0000\nbranch refs/heads/ws/${sid}\n\n`;
+    }
+    if (cmd === 'git' && args.includes('remove')) { calls.push(['remove', wt]); return ''; }
+    if (cmd === 'git' && args.includes('-D')) { calls.push(['branch-D', `ws/${sid}`]); return ''; }
+    if (cmd === 'pgrep') throw new Error('not found'); // no live process
+    return '';
+  };
+
+  // repoRoot points at the REAL advisor root so the default captureFn can find
+  // bin/_worktree-capture.sh; git is fully stubbed via execFn so no real git runs.
+  reapStaleWorktrees({ runsDir, execFn, now: Date.now(), repoRoot: ADVISOR_ROOT_TR });
+
+  // Capture really happened against the temp worktree.
+  const captured = path.join(runsDir, sid, 'output', 'worktree-capture', 'files', 'result.txt');
+  expect(fs.existsSync(captured)).toBe(true);
+  expect(fs.readFileSync(captured, 'utf8')).toBe('durable output\n');
+  // Removal + branch delete were issued (through the spy, not for real).
+  expect(calls.some(c => c[0] === 'remove')).toBe(true);
+  expect(calls.some(c => c[0] === 'branch-D')).toBe(true);
+
+  // Local cleanup of the throwaway worktree registry.
+  try { execFileSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt], { stdio: 'ignore' }); } catch (_) {}
+});
+
+test('[R10] reapStaleWorktrees spares a fresh session and a live-process worktree (no capture, no remove)', () => {
+  const sid = 'fresh000-beef';
+  const runsDir = path.join(tmpDir, 'runs-r10');
+  const runDir = path.join(runsDir, sid);
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'session.json'), '{}'); // fresh → not stale
+
+  let captureCount = 0;
+  const calls = [];
+  const baseExec = (cmd, args, pgrepLive) => {
+    if (cmd === 'git' && args.includes('worktree') && args.includes('list')) {
+      return `worktree /tmp/nope\nHEAD 0000\nbranch refs/heads/ws/${sid}\n\n`;
+    }
+    if (cmd === 'git' && (args.includes('remove') || args.includes('-D'))) { calls.push(args.join(' ')); return ''; }
+    if (cmd === 'pgrep') { if (pgrepLive) return '4242\n'; throw new Error('not found'); }
+    return '';
+  };
+  const captureFn = () => { captureCount++; return true; };
+
+  // (a) fresh session.json → spared before live-process check is even reached.
+  reapStaleWorktrees({ runsDir, execFn: (c, a) => baseExec(c, a, false), now: Date.now(), repoRoot: ADVISOR_ROOT_TR, captureFn });
+  expect(calls).toHaveLength(0);
+  expect(captureCount).toBe(0);
+
+  // (b) stale (no session.json) but a live process → spared.
+  const sid2 = 'stale000-live';
+  const runsDir2 = path.join(tmpDir, 'runs-r10b');
+  fs.mkdirSync(path.join(runsDir2, sid2), { recursive: true });
+  const calls2 = [];
+  const execFn2 = (cmd, args) => {
+    if (cmd === 'git' && args.includes('worktree') && args.includes('list')) {
+      return `worktree /tmp/nope2\nHEAD 0000\nbranch refs/heads/ws/${sid2}\n\n`;
+    }
+    if (cmd === 'git' && (args.includes('remove') || args.includes('-D'))) { calls2.push(args.join(' ')); return ''; }
+    if (cmd === 'pgrep') return '4242\n'; // live
+    return '';
+  };
+  let cap2 = 0;
+  reapStaleWorktrees({ runsDir: runsDir2, execFn: execFn2, now: Date.now(), repoRoot: ADVISOR_ROOT_TR, captureFn: () => { cap2++; return true; } });
+  expect(calls2).toHaveLength(0);
+  expect(cap2).toBe(0);
+});
+
+test('[R9] runLoadReapers honours ADVISOR_NO_REAPER opt-out at module-load', () => {
+  const spy = [];
+  const stubs = {
+    reaperSweepOrphanSessions: () => spy.push('sweep'),
+    reapStaleWorktrees: () => spy.push('reap'),
+  };
+
+  // Opt-out: neither reaper runs.
+  runLoadReapers({ ADVISOR_NO_REAPER: '1' }, stubs);
+  expect(spy).toHaveLength(0);
+
+  // Default (opt-in): both the tmux sweep and the worktree reaper run.
+  runLoadReapers({ ADVISOR_NO_REAPER: '0' }, stubs);
+  expect(spy).toContain('sweep');
+  expect(spy).toContain('reap');
+});
+
+// ── reapStaleWorktrees per-load cap (opts.limit + MAX_REAP_PER_LOAD) ──────────
+// SAFETY: temp runsDir + injected execFn/captureFn so no real worktree is touched.
+
+// Build a porcelain `git worktree list` blob for the given ws/<sid> branches.
+function wtListPorcelain(sids) {
+  return sids.map((sid) => `worktree /tmp/wt-${sid}\nHEAD 0000\nbranch refs/heads/ws/${sid}\n\n`).join('');
+}
+
+test('[CAP-a] reapStaleWorktrees honours opts.limit — only `limit` eligible worktrees acted on', () => {
+  const runsDir = path.join(tmpDir, 'runs-cap-a');
+  const sids = ['cap-a-1', 'cap-a-2', 'cap-a-3', 'cap-a-4', 'cap-a-5'];
+  for (const sid of sids) fs.mkdirSync(path.join(runsDir, sid), { recursive: true }); // no session.json → stale
+  const listOut = wtListPorcelain(sids);
+
+  let removeCount = 0;
+  const execFn = (cmd, args) => {
+    if (cmd === 'git' && args.includes('worktree') && args.includes('list')) return listOut;
+    if (cmd === 'git' && args.includes('remove')) { removeCount++; return ''; }
+    if (cmd === 'git' && args.includes('-D')) return '';
+    if (cmd === 'pgrep') throw new Error('not found'); // no live process
+    return '';
+  };
+  let captureCount = 0;
+  const captureFn = () => { captureCount++; return true; };
+
+  reapStaleWorktrees({ runsDir, execFn, now: Date.now(), repoRoot: ADVISOR_ROOT_TR, captureFn, limit: 2 });
+
+  expect(removeCount).toBe(2); // only the `worktree remove` calls, not branch -D
+  expect(captureCount).toBe(2);
+});
+
+test('[CAP-b] reapStaleWorktrees with no limit drains the whole backlog (uncapped)', () => {
+  const runsDir = path.join(tmpDir, 'runs-cap-b');
+  const sids = ['cap-b-1', 'cap-b-2', 'cap-b-3', 'cap-b-4', 'cap-b-5'];
+  for (const sid of sids) fs.mkdirSync(path.join(runsDir, sid), { recursive: true });
+  const listOut = wtListPorcelain(sids);
+
+  let removeCount = 0;
+  const execFn = (cmd, args) => {
+    if (cmd === 'git' && args.includes('worktree') && args.includes('list')) return listOut;
+    if (cmd === 'git' && args.includes('remove')) { removeCount++; return ''; }
+    if (cmd === 'git' && args.includes('-D')) return '';
+    if (cmd === 'pgrep') throw new Error('not found');
+    return '';
+  };
+
+  reapStaleWorktrees({ runsDir, execFn, now: Date.now(), repoRoot: ADVISOR_ROOT_TR, captureFn: () => true });
+
+  expect(removeCount).toBe(5); // all eligible removed — explicit uncapped drain
+});
+
+test('[CAP-c] runLoadReapers passes the MAX_REAP_PER_LOAD cap into reapStaleWorktrees', () => {
+  let captured = null;
+  const stubs = {
+    reaperSweepOrphanSessions: () => {},
+    reapStaleWorktrees: (opts = {}) => { captured = opts; },
+  };
+
+  runLoadReapers({ ADVISOR_NO_REAPER: '0' }, stubs);
+
+  expect(captured).not.toBeNull();
+  expect(captured.limit).toBe(25);
 });
