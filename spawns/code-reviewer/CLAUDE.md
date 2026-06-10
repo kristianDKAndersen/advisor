@@ -86,6 +86,13 @@ For each changed public function or class, trace two hops: (a) what it calls, an
 
 **Graph complements deep reads:** At `effort:high`, the graph sweep must run alongside direct file reads — not instead of them. Graph findings about dead code or structural smells must be paired with reading the implicated files when feasible. The graph complements deep reads — it does not replace them.
 
+**Dead-code / dead-export cross-check gate (mandatory):** Before emitting ANY dead-code, dead-export, or 'unused' verdict — whether graph-derived or not — you MUST run a non-graph confirmation:
+1. `grep -r "$(basename <file>)" <repo>` — grep the symbol's or file's basename across the entire repo.
+2. Grep for dynamic-import patterns: literal `import(`, `React.lazy`, `component: () =>`, variable `require()`, and the router config file(s).
+3. If any reachable usage is found, the file or symbol is NOT dead — downgrade the verdict to "possible, graph-only — needs verification" and never present it as actionable.
+
+**Confidence cap:** `graphify affected <symbol>` returning "No affected nodes found" is at most **Med** confidence overall, and at most **Low** confidence in any JS/TS/Vue/React repo with lazy-loaded routes — dynamic `import()` edges are invisible to graphify and can make live files appear dead.
+
 **Conditional trigger:** Query the graph only when BOTH conditions hold:
 
 1. `graphify-out/graph.json` exists in the repo root.
@@ -95,7 +102,7 @@ When both conditions hold, prefer these targeted commands over freeform NL `grap
 
 | Graph-class dimension | Preferred command |
 |---|---|
-| Reverse blast-radius / dead-export check | `graphify affected <symbol>` |
+| Reverse blast-radius / dead-export check | `graphify affected <symbol>` — must be paired with the dead-code cross-check gate before emitting any dead verdict |
 | N+1 or cross-layer dependency path | `graphify path <moduleA> <moduleB>` |
 | Typed edge map for a node | `graphify explain <symbol>` |
 | Direct neighbor inspection | `graphify get_neighbors <node>` |
@@ -169,7 +176,7 @@ Require `graphify-out/graph.json`. When graph is absent: mark `[no-graph: fallba
 | # | Dimension | Detection signals |
 |---|-----------|-------------------|
 | 6 | **N+1 Query** `[graph-assisted]` | ORM relation access inside loop; absence of `.include()`/`prefetch_related()`/`joinedload()` before loop |
-| 7 | **Dead Exports** `[graph-assisted]` | Exported symbol with no reaching import path; Ruff F841; `import/no-unused-modules` unusedExports; `ts-prune` |
+| 7 | **Dead Exports** `[graph-assisted]` | Exported symbol with no reaching import path; Ruff F841; `import/no-unused-modules` unusedExports; `ts-prune` — **apply dead-code cross-check gate before any verdict; `graphify affected` = "No affected nodes found" is at most Low confidence in JS/TS/Vue/React repos with lazy routes; downgrade to "possible, graph-only — needs verification" unless non-graph grep confirms no usages** |
 | 8 | **Architectural Smells** `[graph-assisted]` | Cyclic deps via SCC; God object (class > 300 LOC or > 20 public methods); layering violation (import path vs declared layer map) |
 | 9 | **Cross-file Duplication** `[graph-assisted]` | Identical 10+ line blocks across service methods; same validation logic in multiple layers |
 | 10 | **Feature Envy** `[graph-assisted]` | Method primarily reads/writes fields of a foreign class; chain of 3+ dot-access getters on foreign object (Law of Demeter) |

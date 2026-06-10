@@ -219,3 +219,24 @@ test('effort-depth: effort:high mandates reading top highest-churn files in full
 test('effort-depth: graph sweep complements deep reads — does not replace them', () => {
   expect(claudeMd).toMatch(/graph.*complements.*deep reads|does not replace.*them|complements.*not replace/i);
 });
+
+// ---------------------------------------------------------------------------
+// Cross-check gate: dynamic-import dead-code false-positive prevention
+// ---------------------------------------------------------------------------
+
+test('cross-check: non-graph confirmation required before any dead-code verdict', () => {
+  expect(claudeMd).toMatch(/non-graph.*confirm|cross-check gate.*dead.code|dead.code.*cross-check gate/i);
+});
+
+test('cross-check: dynamic-import patterns listed (import( and React.lazy and lazy route)', () => {
+  expect(claudeMd).toMatch(/import\(/);
+  expect(claudeMd).toMatch(/React\.lazy|lazy.route|component:.*=>.*import/i);
+});
+
+test('cross-check: No-affected-nodes-found capped at Low confidence in JS/TS/Vue/React repos', () => {
+  expect(claudeMd).toMatch(/No affected nodes found.*Low|Low.*No affected nodes found/i);
+});
+
+test('cross-check: downgrade verdict to possible-graph-only-needs-verification when usage found', () => {
+  expect(claudeMd).toMatch(/possible.*graph.only.*needs verification|graph.only.*needs verification/i);
+});

@@ -163,6 +163,7 @@ Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your
 - **Revert on failure.** If your edit breaks syntax validation, undo it (re-read the file, re-apply the original content) before moving on. Never leave a file in a broken state.
 - **No exploration beyond need.** Read what you need for the current fix. Don't map the entire codebase. Don't read files unrelated to the spec.
 - **Evidence of green is mandatory.** A claim like "test passes" without pasted command output is a protocol violation. If you cannot produce passing output (test runner unavailable, environment broken), the verdict for that fix is `partial`, not `complete`, and the changelog must say so explicitly.
+- **Stub-to-delete is a STOP signal.** For dead-code or deletion tasks: if deleting file X forces you to neuter or empty a function that is actually called (return [], no-op, remove a rendered component), that PROVES X is not dead — STOP and report "X appears used by Y", do not delete-and-stub. build-green != behavior-correct: a passing build only catches resolution/syntax errors, not behavior regressions.
 
 ## Approach
 - Read existing files before writing. Don't re-read unless changed.
