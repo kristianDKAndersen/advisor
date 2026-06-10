@@ -23,25 +23,45 @@ process.stdout.write(
 );
 
 const runsRoot = process.env.ADVISOR_RUNS_ROOT || path.join(os.homedir(), '.advisor', 'runs');
-if (fs.existsSync(runsRoot)) {
-  const runs = fs.readdirSync(runsRoot)
-    .map(d => ({ sid: d, mtime: fs.statSync(path.join(runsRoot, d)).mtimeMs }))
-    .filter(r => Date.now() - r.mtime < 86_400_000)
-    .sort((a, b) => b.mtime - a.mtime);
-  if (runs.length > 0) {
-    const sessionFile = path.join(runsRoot, runs[0].sid, 'session.json');
-    if (fs.existsSync(sessionFile)) {
-      try {
-        const s = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-        const pending = (s.decomposition || []).filter(d => d.status !== 'complete').length;
-        process.stdout.write(
-          `[advisor] last session: ${runs[0].sid} | tier: ${s.tier || 'unknown'} | ` +
-          `next: ${s.next_action || 'none'} | pending workers: ${pending}\n`
-        );
-      } catch (_) {}
-    }
+
+// last session: newest run dir with a valid session.json, skipping plans/_archive
+// and dirs lacking one (graceful no-op on failure). See lib/maintenance.js (A).
+try {
+  const maintenance = require(path.join(ROOT, 'lib', 'maintenance.js'));
+  const picked = maintenance.pickLastSession(runsRoot);
+  if (picked) {
+    const s = picked.session;
+    const pending = (s.decomposition || []).filter(d => d.status !== 'complete').length;
+    process.stdout.write(
+      `[advisor] last session: ${picked.sid} | tier: ${s.tier || 'unknown'} | ` +
+      `next: ${s.next_action || 'none'} | pending workers: ${pending}\n`
+    );
   }
-}
+} catch (_) {}
+
+// surface the newest UNRESOLVED handover, if any (graceful no-op). See maintenance (B).
+try {
+  const maintenance = require(path.join(ROOT, 'lib', 'maintenance.js'));
+  const open = maintenance.newestUnresolvedHandover(runsRoot);
+  if (open) process.stdout.write(`[advisor] OPEN handover: ${open}\n`);
+} catch (_) {}
+
+// auto-archive resolved handovers older than 24h (graceful no-op). See maintenance (C).
+try {
+  const maintenance = require(path.join(ROOT, 'lib', 'maintenance.js'));
+  const n = maintenance.archiveResolvedHandovers(runsRoot);
+  if (n > 0) process.stdout.write(`[advisor] archived ${n} resolved handover(s)\n`);
+} catch (_) {}
+
+// auto-archive vault reminders >30d past due (status flip + index update; graceful
+// no-op). vault.js loads bun:sqlite, which throws under node — so run it under bun,
+// mirroring the vault-due block below. See maintenance (D).
+try {
+  const { spawnSync } = require('child_process');
+  const expr = `require(${JSON.stringify(path.join(ROOT, 'lib', 'maintenance.js'))})` +
+    `.archiveStaleReminders(require(${JSON.stringify(path.join(ROOT, 'lib', 'vault.js'))}))`;
+  spawnSync('bun', ['-e', expr], { encoding: 'utf8', timeout: 5000 });
+} catch (_) {}
 
 // Surface vault notes due within the next 14 days (graceful no-op on failure)
 try {
