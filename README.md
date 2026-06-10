@@ -334,6 +334,15 @@ Coder workspaces are real git worktrees (branch `ws/<sid>`), so uncommitted code
 - **Reaper race protection.** `reapStaleWorktrees` (`lib/tmux-runner.js`) captures-then-removes leaked `ws/<sid>` worktrees at module load, capped at 25 per sweep so a leaked backlog can never stall import. Mid-provision worktrees are spared: a worktree with no `session.json` is skipped (provisioning may still be in flight), as is any worktree younger than ~1h (grace floor derived from the sid's unix-timestamp prefix). `bin/summon` exports `ADVISOR_NO_REAPER=1` during provisioning so module loads triggered by summon itself never reap; the test harness sets the same flag via `tests/setup-no-reaper.js` (wired in `bunfig.toml`).
 - **Stale-lock recovery and atomic writes.** The session and seq locks in `lib/channel.js` reclaim locks left behind by hard-killed processes, and `lib/compactor.js` rewrites transcripts via write-temp-then-rename, so a crash mid-operation can neither wedge the channel nor corrupt a transcript.
 
+## Advisor model (per worker)
+
+Each worker can consult a stronger reviewer through the native advisor tool. That tool's model is set by the `advisorModel` setting in `.claude/settings.json` (global default: `opus`) — `claude` has no `--advisor` CLI flag. `bin/summon` tunes the policy per worker by writing the worker's launch environment:
+
+- **Fable workers** (resolved model in the `[95,100]` intelligence band — `claude-fable-5`): get `export CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`, which hard-disables the advisor for that worker. A Fable main model can only pair with a Fable advisor — the API rejects an opus/sonnet advisor for a Fable request (`cannot be used as an advisor`) — and running a Fable advisor on every Fable worker is expensive overkill.
+- **Every other worker**: no per-worker export — inherits the global `advisorModel` (`opus`), the working default.
+
+Implemented in `lib/summon.js`; pinned by `tests/summon-advisor-disable.test.js`.
+
 ## Self-healing — lesson vault
 
 The advisor learns from failure across sessions via a Reflexion-style post-mortem channel. When a worker delivers `verdict=blocked` with `material=yes`, `lib/channel.js synthesize --verdict blocked` emits a `LESSON EXTRACTION REQUIRED` block. The `/extract-lesson` skill turns the failure into a negative-polarity lesson note (one heuristic, one trigger, one anti-pattern) and writes it to `~/.advisor/vault/lessons/`.

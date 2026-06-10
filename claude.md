@@ -326,6 +326,8 @@ bin/advisor-schedule \
 
 `/context-timeline` (skill at `.claude/skills/context-timeline/`) invokes `bin/advisor-timeline` for the current session from within a Claude Code session.
 
+**Per-worker advisor model:** `bin/summon` hard-disables the advisor tool for Fable workers (`CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`) and lets every other worker inherit the global `advisorModel` (`opus`) — there is no `--advisor` CLI flag; see README "Advisor model (per worker)" and `lib/summon.js`.
+
 ### tmux multiplexing (`ADVISOR_TMUX_MULTIPLEX`)
 
 When `ADVISOR_TMUX_MULTIPLEX=1` is set (e.g. in `~/.zshrc`), all workers share one tmux session named `advisor` instead of the default one-detached-session-per-worker model (sessions named `advisor-<sid>`).
