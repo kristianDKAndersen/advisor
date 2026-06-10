@@ -90,6 +90,13 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Reaper guard: every node invocation below imports lib/tmux-runner.js, whose
+# module-load reaper could capture+remove the worktree this very summon is
+# provisioning (session.json is not written yet mid-launch). Provisioning is
+# the wrong time to reap — disable it for summon's child processes. Explicit
+# maintenance (calling reapStaleWorktrees() directly) still drains backlogs.
+export ADVISOR_NO_REAPER=1
+
 # Provision workspace + channel + bootstrap prompt.
 NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
 [[ -n "$SID"            ]] && NODE_ARGS+=(--sid           "$SID")
