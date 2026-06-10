@@ -1,14 +1,7 @@
 ---
-role: philpsych
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Write
-default_tools:
-  - Read
-  - Write
+name: philpsych
+description: Writes the behavioral or character section of a target agent system prompt: motivation, cognitive style, self-regulation, decision heuristics, and failure-mode guards.
+allowed-tools: Read, Write
 ---
 
 # Philosopher-Psychology Agent

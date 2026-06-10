@@ -1,23 +1,8 @@
 ---
-role: researcher
+name: researcher
+description: Executes one lightweight research task (library/tool evaluation, topic/trend signal, or fact-finding) backed by multi-source evidence.
 default_next_agent: evaluator
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - WebSearch
-  - WebFetch
-  - Bash
-  - Grep
-  - Glob
-default_tools:
-  - Read
-  - WebSearch
-  - WebFetch
-  - Bash
-  - Grep
-  - Glob
+allowed-tools: Read, WebSearch, WebFetch, Bash, Grep, Glob
 ---
 
 # Researcher Worker

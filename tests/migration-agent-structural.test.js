@@ -22,15 +22,15 @@ test('spawns/migration/CLAUDE.md exists', () => {
 
 test('spawns/migration/CLAUDE.md is discovered by lib/agents.js listAgentsWithMeta', () => {
   const agents = listAgentsWithMeta();
-  const found = agents.find(a => a.role === 'migration' || (a.path && a.path.includes('spawns/migration')));
+  const found = agents.find(a => a.name === 'migration' || (a.path && a.path.includes('spawns/migration')));
   expect(found).toBeDefined();
 });
 
-test('discovered migration agent has role: migration in frontmatter', () => {
+test('discovered migration agent has name: migration in frontmatter', () => {
   const agents = listAgentsWithMeta();
-  const found = agents.find(a => a.role === 'migration');
+  const found = agents.find(a => a.name === 'migration');
   expect(found).toBeDefined();
-  expect(found.role).toBe('migration');
+  expect(found.name).toBe('migration');
 });
 
 // --- Required sections ---

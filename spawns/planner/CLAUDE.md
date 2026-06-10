@@ -1,20 +1,7 @@
 ---
-role: planner
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Bash
-  - Grep
-  - Glob
-  - Write
-default_tools:
-  - Read
-  - Bash
-  - Grep
-  - Glob
-  - Write
+name: planner
+description: Decomposes one task into an ordered, wave-based execution plan with subtask boundaries, dependencies, and machine-verifiable done criteria.
+allowed-tools: Read, Bash, Grep, Glob, Write
 ---
 
 # Planner Worker

@@ -1,25 +1,7 @@
 ---
-role: deep-researcher
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - WebSearch
-  - WebFetch
-  - Bash
-  - Grep
-  - Glob
-  - Write
-default_tools:
-  - Read
-  - WebSearch
-  - WebFetch
-  - Bash
-  - Grep
-  - Glob
-  - Write
-  - Task
+name: deep-researcher
+description: Runs a complete three-phase, bias-audited research investigation for publication-grade or contested topics with primary-source coverage.
+allowed-tools: Read, WebSearch, WebFetch, Bash, Grep, Glob, Write, Task
 ---
 
 # Deep Research Worker

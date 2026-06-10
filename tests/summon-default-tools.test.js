@@ -57,10 +57,7 @@ try {
     path.join(agentWithDir, 'CLAUDE.md'),
     [
       '---',
-      'default_tools:',
-      '  - Read',
-      '  - Bash',
-      '  - Grep',
+      'allowed-tools: Read,Bash,Grep',
       '---',
       '',
       '# Test agent with default_tools',

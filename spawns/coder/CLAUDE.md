@@ -1,22 +1,7 @@
 ---
-role: coder
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Edit
-  - Write
-  - Bash
-  - Grep
-  - Glob
-default_tools:
-  - Read
-  - Edit
-  - Write
-  - Bash
-  - Grep
-  - Glob
+name: coder
+description: Implements fixes from a structured spec using red-green-refactor, editing real repo files and reporting a verified changelog.
+allowed-tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 
 # Coder Worker

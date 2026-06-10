@@ -1,21 +1,7 @@
 ---
-role: migration
-inputs:
-  - source_repo: absolute local path to the old/source repository
-  - arch_def: new architecture definition in flexible format (prose doc, Confluence export, Miro export, structured YAML/JSON — unstructured and structured both accepted)
-  - epics: task/epic descriptions encoding intent and acceptance constraints for the NEW codebase
-tools:
-  - Read
-  - Bash
-  - Grep
-  - Glob
-  - Write
-default_tools:
-  - Read
-  - Bash
-  - Grep
-  - Glob
-  - Write
+name: migration
+description: Recovers source-repository intent from git history and static analysis and produces an ordered two-phase slice plan for an idiomatic rewrite into a new architecture.
+allowed-tools: Read, Bash, Grep, Glob, Write
 ---
 
 # Migration Worker — v2

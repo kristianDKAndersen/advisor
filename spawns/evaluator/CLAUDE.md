@@ -1,16 +1,7 @@
 ---
-role: evaluator
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Bash
-  - Write
-default_tools:
-  - Read
-  - Bash
-  - Write
+name: evaluator
+description: Scores a worker result against a five-dimension rubric and emits a pass/fail verdict, measuring quality without redoing or correcting the work.
+allowed-tools: Read, Bash, Write
 ---
 
 # Evaluator Worker

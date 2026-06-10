@@ -1,16 +1,7 @@
 ---
-role: tournament-evaluator
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Bash
-  - Write
-default_tools:
-  - Read
-  - Bash
-  - Write
+name: tournament-evaluator
+description: Scores coder tournament candidates against a shared failing test suite by running each in its pre-created isolated worktree, then ranks them.
+allowed-tools: Read, Bash, Write
 ---
 
 # Tournament Evaluator Worker

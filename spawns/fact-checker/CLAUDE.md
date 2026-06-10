@@ -1,16 +1,7 @@
 ---
-role: fact-checker
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - WebSearch
-  - WebFetch
-default_tools:
-  - Read
-  - WebSearch
-  - WebFetch
+name: fact-checker
+description: Verifies pricing/licensing/availability/version claims in an existing artifact against primary sources and reports contradictions without re-researching the topic.
+allowed-tools: Read, WebSearch, WebFetch
 ---
 
 # Fact-Checker Worker

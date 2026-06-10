@@ -1,18 +1,7 @@
 ---
-role: frontend
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Edit
-  - Write
-  - Bash
-default_tools:
-  - Read
-  - Edit
-  - Write
-  - Bash
+name: frontend
+description: Ships one self-contained, responsive frontend deliverable at a time: a landing page, component, small static site, or UI prototype.
+allowed-tools: Read, Edit, Write, Bash
 ---
 
 # Frontend Worker

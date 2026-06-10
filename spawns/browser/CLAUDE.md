@@ -1,14 +1,7 @@
 ---
-role: browser
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Bash
-default_tools:
-  - Read
-  - Bash
+name: browser
+description: Drives a real Chrome browser via a persistent daemon (bin/browser-*) to complete one web-automation task at a time, observing state before each action.
+allowed-tools: Read, Bash
 ---
 
 # Browser Worker

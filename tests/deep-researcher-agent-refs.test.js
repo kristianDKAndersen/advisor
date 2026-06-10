@@ -32,12 +32,10 @@ test('spawns/deep-researcher/CLAUDE.md contains no agent_type="planner"', () => 
   expect(matches).toBeNull();
 });
 
-test('spawns/deep-researcher/CLAUDE.md default_tools includes Task', () => {
-  const defaultToolsMatch = content.match(/default_tools:\s*\n([\s\S]*?)(?=\n---|\n[^\s])/);
-  expect(defaultToolsMatch).toBeTruthy();
-  if (defaultToolsMatch) {
-    const toolsSection = defaultToolsMatch[1];
-    const hasTask = /^\s*-\s+Task\s*$/m.test(toolsSection);
-    expect(hasTask).toBe(true);
+test('spawns/deep-researcher/CLAUDE.md allowed-tools includes Task', () => {
+  const m = content.match(/^allowed-tools:\s*(.+)$/m);
+  expect(m).toBeTruthy();
+  if (m) {
+    expect(m[1]).toContain('Task');
   }
 });

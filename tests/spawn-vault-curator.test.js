@@ -24,28 +24,27 @@ test('spawns/vault-curator/CLAUDE.md has non-empty body', () => {
   expect(content).toMatch(/^---/);
 });
 
-// (b) frontmatter contains: role, inputs, tools, default_tools
-test('spawns/vault-curator frontmatter has role', () => {
+// (b) frontmatter contains: name, description, allowed-tools
+test('spawns/vault-curator frontmatter has name', () => {
   const fm = agents.parseFrontmatter(claudeMdPath);
-  expect(fm.role).toBe('vault-curator');
+  expect(fm.name).toBe('vault-curator');
 });
 
-test('spawns/vault-curator frontmatter has inputs array', () => {
+test('spawns/vault-curator frontmatter has description string', () => {
   const fm = agents.parseFrontmatter(claudeMdPath);
-  expect(Array.isArray(fm.inputs)).toBe(true);
-  expect(fm.inputs.length).toBeGreaterThan(0);
+  expect(typeof fm.description).toBe('string');
+  expect(fm.description.length).toBeGreaterThan(0);
 });
 
-test('spawns/vault-curator frontmatter has tools array', () => {
+test('spawns/vault-curator frontmatter has allowed-tools string', () => {
   const fm = agents.parseFrontmatter(claudeMdPath);
-  expect(Array.isArray(fm.tools)).toBe(true);
-  expect(fm.tools.length).toBeGreaterThan(0);
+  expect(typeof fm['allowed-tools']).toBe('string');
+  expect(fm['allowed-tools'].length).toBeGreaterThan(0);
 });
 
-test('spawns/vault-curator frontmatter has default_tools array', () => {
+test('spawns/vault-curator allowed-tools contains Read', () => {
   const fm = agents.parseFrontmatter(claudeMdPath);
-  expect(Array.isArray(fm.default_tools)).toBe(true);
-  expect(fm.default_tools.length).toBeGreaterThan(0);
+  expect(fm['allowed-tools']).toContain('Read');
 });
 
 // (c) lib/agents.js listAgentsWithMeta() includes name='vault-curator'
@@ -53,7 +52,7 @@ test('listAgentsWithMeta includes vault-curator', () => {
   const list = agents.listAgentsWithMeta();
   const entry = list.find(a => a.name === 'vault-curator');
   expect(entry).toBeDefined();
-  expect(entry.role).toBe('vault-curator');
+  expect(entry.name).toBe('vault-curator');
 });
 
 // (d) settings.json has permissions.allow array and does NOT include Write or Edit

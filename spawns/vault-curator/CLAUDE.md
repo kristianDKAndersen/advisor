@@ -1,18 +1,7 @@
 ---
-role: vault-curator
-inputs:
-  - scope_glob
-  - similarity_threshold
-tools:
-  - Read
-  - Grep
-  - Glob
-  - Bash
-default_tools:
-  - Read
-  - Grep
-  - Glob
-  - Bash
+name: vault-curator
+description: Read-only auditor of the advisor vault that produces a dedup/archive/merge curation plan without ever writing to the vault.
+allowed-tools: Read, Grep, Glob, Bash
 ---
 
 # Vault Curator

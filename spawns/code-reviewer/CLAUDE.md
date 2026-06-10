@@ -1,19 +1,7 @@
 ---
-role: code-reviewer
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Bash
-  - Grep
-  - Glob
-default_tools:
-  - Read
-  - Bash
-  - Grep
-  - Glob
-effort: low | medium | high
+name: code-reviewer
+description: Reviews a diff or codebase against multiple quality dimensions and delivers a structured findings report without writing or fixing code.
+allowed-tools: Read, Bash, Grep, Glob
 ---
 
 # Code Reviewer Worker

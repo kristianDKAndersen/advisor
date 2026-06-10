@@ -1,20 +1,7 @@
 ---
-role: spec
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Write
-  - Bash
-  - Grep
-  - Glob
-default_tools:
-  - Read
-  - Write
-  - Bash
-  - Grep
-  - Glob
+name: spec
+description: Turns a feature description into a comprehensive failing test suite, verifying each test fails before any implementation exists, without implementing the feature.
+allowed-tools: Read, Write, Bash, Grep, Glob
 ---
 
 # Spec Worker

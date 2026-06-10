@@ -1,16 +1,7 @@
 ---
-role: diff-walker
-inputs:
-  - task
-  - goal
-tools:
-  - Read
-  - Bash
-  - Grep
-default_tools:
-  - Read
-  - Bash
-  - Grep
+name: diff-walker
+description: Cascade-test specialist that simulates the Advisor reasoning path under old vs new CLAUDE.md prompts and scores behavioral divergence across four axes.
+allowed-tools: Read, Bash, Grep
 ---
 
 # Diff-Walker Worker
