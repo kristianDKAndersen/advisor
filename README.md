@@ -50,10 +50,13 @@ bin/
   tournament          # parallel TDD tournament orchestrator (--spec, --strategies, --keep-losers, --dry-run)
 lib/
   channel.js          # append-only JSONL channel: send / recv / tail / synthesize; acquireSeqLock (mkdir spinlock for seq IDs); Tail class (byte-offset incremental reader)
-  compactor.js        # PreCompact hook entry — git-commits the pre-compaction checkpoint
+  compactor.js        # transcript compaction: repairToolUseResultPairing + 4-phase compactMessages pipeline (prune tool_results → boundary trim → summarize → sanitize); PreCompact hook entry point — rewrites the transcript in place via atomic tmp+rename
+  episodes.js         # episodic memory: writeEpisode / queryEpisodes over ~/.advisor/memory/episodes.jsonl, keyed by task_hash
+  graphify-setup.sh   # one-time graphify pre-index helper — builds the code graph (graphify update . --no-cluster) and installs graphify's auto-rebuild hook
   session.js          # session plumbing: IDs, workspaces, session.json, output-dir logic
   summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh; --intelligence flag (resolves tier→model via adapter/intelligence-map.json); --ensemble N (parallel workers + batch envelope); --allowed-tools (camelCase internally); --sub-team injects the delegator/teammate skill
   tmux-runner.js      # detached background-loop runner used by bin/advisor-schedule
+  tool-guard.js       # PreToolUse hook: blocks writes to spec-authored protected test paths (ADVISOR_PROTECTED_TESTS) + live circuit breaker — halts a worker on the 3rd identical tool call
   vault.js            # native vault writer + FTS5 search (synthesis notes, session notes, lessons)
   hooks/              # PostToolUse worker hooks (worker-trace.js, worker-inbox-poll.sh, worker-auto-close.sh) — opt-in via ADVISOR_WORKER_HOOKS
 adapter/
@@ -96,11 +99,14 @@ skills/
   bootstrap-prompt.txt  # prompt passed to the worker's claude invocation
   launch.sh             # shell entry point opened by osascript
   tty.txt               # worker's tty path (used by close-worker-tab)
+  tool-counts.json      # per-session duplicate tool-call counts (tool-guard circuit breaker)
 ~/.advisor/vault/
   synthesis/<sid>-<seq>.md  # one note per synthesize call (auto-written)
   sessions/<sid>.md         # one note per session (auto-written by lib/session.js)
   lessons/<sid>-<agent>-<seq>.md  # negative-polarity lesson notes (written by /extract-lesson)
   .cache/index.sqlite       # FTS5 BM25 index over all notes
+~/.advisor/memory/
+  episodes.jsonl            # episodic memory — one record per synthesize call (queried by bin/summon)
 ```
 
 ## Quick start
@@ -252,7 +258,18 @@ Seven hook commands are registered across five lifecycle events in `.claude/sett
 | `stop-handover.js` | `Stop` | — | Writes the context-handover file for recovery after compression; surfaced by `session-start.js` on the next session start. |
 | `git add -A && git commit …` | `PreCompact` | — | `git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"` — preserves session state across context resets. Note GH#13572: does not fire on manual `/compact`; the Stop hook covers that path. |
 
+**Transcript compaction (`lib/compactor.js`):** a standalone PreCompact hook entry point. Invoked directly, it reads `{transcript_path}` from stdin, repairs orphaned `tool_use`/`tool_result` pairing (`repairToolUseResultPairing`), runs the 4-phase `compactMessages` pipeline — prune tool_results → trim to a user-turn boundary within the token budget → summarize → sanitize — and rewrites the transcript in place via atomic tmp+rename. The PreCompact hook registered in `.claude/settings.json` is the git checkpoint above; `compactor.js` is also importable (`compactMessages`, `repairToolUseResultPairing`, `summarizeInStages`) for programmatic compaction.
+
 **Worker PostToolUse hooks (opt-in):** Three hooks in `lib/hooks/` (`worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) are installed in all 16 `spawns/*/.claude/settings.json` files, gated by `ADVISOR_WORKER_HOOKS` (default 0). When enabled, they automate the trace/recv/close-tab boilerplate; when disabled, workers rely on the `/worker-protocol` skill for manual handling. See the active-experiment bullet in `CLAUDE.md` for rollout status.
+
+## Tool guard — protected tests and loop circuit breaker
+
+`lib/tool-guard.js` is a PreToolUse hook (exit 2 = block) with two jobs:
+
+- **Protected test paths.** When a brief ships spec-authored tests, `lib/summon.js` exports `ADVISOR_PROTECTED_TESTS` (a JSON path list) into the worker env. The hook blocks `Edit`/`Write`/`NotebookEdit` to any listed path, and heuristically blocks Bash commands that write to one (`>`/`>>` redirects, `tee`, `sed -i`, `cp`/`mv` destinations, `dd of=`, `perl -i`, scripted `vim`/`ed`, inline `python -c`). The Bash detection raises the bar against test tampering — it is not a hermetic seal. A worker that cannot make protected tests pass must send `verdict=blocked` naming the unsatisfiable assertion, not modify the tests.
+- **Live circuit breaker.** Every tool call is canonically hashed (SHA-256 over the tool name plus key-sorted arguments). Counts persist across hook subprocess invocations in `~/.advisor/runs/<sid>/tool-counts.json`, guarded by a POSIX-atomic mkdir lock with stale-lock recovery (locks older than 10s are reclaimed). On the 3rd identical call, the hook halts the worker with a loop-detected message — catching workers stuck retrying the same failing action verbatim.
+
+Both gates fail open: no `ADVISOR_SID` disables dedup, no `ADVISOR_PROTECTED_TESTS` disables the path gate, and any lock error or timeout lets the call through rather than wedging the worker.
 
 ## Iteration and spawn-fresh model
 
@@ -320,6 +337,12 @@ The vault is backed by an FTS5 SQLite index at `~/.advisor/vault/.cache/index.sq
 
 Vault due notes (including lessons due in the next 14 days) are also surfaced automatically by the SessionStart hook at the start of each session. Use `bin/advisor-vault due [--within <days>]` to query due notes at any time.
 
+## Episodic memory
+
+Alongside the lesson vault, the advisor keeps a cross-session episodic log at `~/.advisor/memory/episodes.jsonl` (`lib/episodes.js`). Every `channel.js synthesize` call appends one episode — `{sid, task_hash, ts, established, gap, key_quotes}` — where `task_hash` is the SHA-256 of the session goal (first 200 chars).
+
+When `bin/summon` composes a worker's bootstrap prompt, it hashes the new goal the same way and queries the log for up to 3 matching episodes. Matches are appended to the prompt as a `## Past episodes` section, so a worker assigned a previously seen task shape starts from what earlier sessions established — and which gaps they left — instead of rediscovering it.
+
 ## Guardrails summary
 
 - **Brief specificity.** Before summoning, confirm two workers can't end up researching the same thing.
@@ -333,6 +356,8 @@ Full guardrails and the complete orchestration protocol are in `CLAUDE.md`.
 ## Prerequisites
 
 **tmux** — required for headless worker spawning and all multiplexing layouts. Install via your package manager (e.g. `brew install tmux` on macOS).
+
+**graphify (optional)** — powers the graph-class checks in the `code-reviewer` and `migration` agents. Install with `npm install -g @graphify/cli`, then run `bash lib/graphify-setup.sh` once per repo: it builds a keyless code-only index (`graphify update . --no-cluster`, output at `graphify-out/graph.json` + `GRAPH_REPORT.md`) and installs graphify's auto-rebuild hook (`graphify hook install`) so the index stays current. The script exits cleanly when graphify is not installed; without an index, the code-reviewer's graph checks degrade to "flag as possible — recommend running graphify-setup.sh to confirm" rather than failing.
 
 **macOS Terminal.app profile configuration** — required for `bin/close-tab` to work.
 
