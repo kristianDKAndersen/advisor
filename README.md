@@ -31,6 +31,7 @@ Workers run in isolated, ephemeral workspaces. Durable output lands in `$OUTPUT_
 
 ```
 bin/
+  _worktree-capture.sh  # capture-before-remove helper — snapshots a coder worktree's changed+untracked files into $OUTPUT_DIR before removal (sourced, internal)
   advisor-list        # list all sessions under ~/.advisor/runs/ (--json, --repo, --agent)
   advisor-observe     # tail a session's outbox; emits JSON per message; exits on result/error/timeout (--after, --max-wait, --poll)
   advisor-schedule    # launch autonomous loops detached in a tmux window (--sid, --interval, --task, --once)
@@ -49,18 +50,18 @@ bin/
   summon-parallel     # fan out multiple briefs to parallel worker sessions (--briefs <path.json>)
   tournament          # parallel TDD tournament orchestrator (--spec, --strategies, --keep-losers, --dry-run)
 lib/
-  channel.js          # append-only JSONL channel: send / recv / tail / synthesize; acquireSeqLock (mkdir spinlock for seq IDs); Tail class (byte-offset incremental reader)
+  channel.js          # append-only JSONL channel: send / recv / tail / synthesize; acquireSeqLock + withSessionLock (mkdir spinlocks with stale-lock recovery for hard-killed processes); Tail class (byte-offset incremental reader)
   compactor.js        # transcript compaction: repairToolUseResultPairing + 4-phase compactMessages pipeline (prune tool_results → boundary trim → summarize → sanitize); PreCompact hook entry point — rewrites the transcript in place via atomic tmp+rename
   episodes.js         # episodic memory: writeEpisode / queryEpisodes over ~/.advisor/memory/episodes.jsonl, keyed by task_hash
   graphify-setup.sh   # one-time graphify pre-index helper — builds the code graph (graphify update . --no-cluster) and installs graphify's auto-rebuild hook
   session.js          # session plumbing: IDs, workspaces, session.json, output-dir logic
   summon.js           # Bun core: provisions workspace, composes bootstrap prompt, writes launch.sh; --intelligence flag (resolves tier→model via adapter/intelligence-map.json); --ensemble N (parallel workers + batch envelope); --allowed-tools (camelCase internally); --sub-team injects the delegator/teammate skill
-  tmux-runner.js      # detached background-loop runner used by bin/advisor-schedule
+  tmux-runner.js      # detached background-loop runner used by bin/advisor-schedule; module-load reapers (orphan tmux sessions + stale coder worktrees; opt out with ADVISOR_NO_REAPER=1)
   tool-guard.js       # PreToolUse hook: blocks writes to spec-authored protected test paths (ADVISOR_PROTECTED_TESTS) + live circuit breaker — halts a worker on the 3rd identical tool call
   vault.js            # native vault writer + FTS5 search (synthesis notes, session notes, lessons)
   hooks/              # PostToolUse worker hooks (worker-trace.js, worker-inbox-poll.sh, worker-auto-close.sh) — opt-in via ADVISOR_WORKER_HOOKS
 adapter/
-  intelligence-map.json  # 4-band tier→model+reasoning manifest used by --intelligence flag
+  intelligence-map.json  # 7-band tier→model+reasoning manifest used by --intelligence flag (haiku-4-5 → sonnet-4-6 → opus-4-8 → fable-5 at [95,100])
 spawns/
   browser/            # (each contains CLAUDE.md that defines the worker's role)
   code-reviewer/
@@ -71,17 +72,21 @@ spawns/
   evaluator/
   fact-checker/
   frontend/
+  migration/
   philpsych/
   planner/
   researcher/
   spec/
   tournament-evaluator/
+  vault-curator/
 skills/
+  advisor-doctor/     # /advisor-doctor — one-shot diagnosis of a stalled advisor session
   brief/              # /brief — validates fields and emits bin/summon command (--allowed-tools)
   extract-lesson/     # /extract-lesson — post-mortem analyst; writes negative-polarity lesson notes
   sub-teams/          # /sub-teams — orchestrates a delegator + N teammates via the Task tool
   synth/              # /synth — validates fields and runs channel.js synthesize
   tournament/         # /tournament — parallel TDD tournament orchestrator
+  vault-due/          # /vault-due — act on the SessionStart vault-due banner (done / snooze / archive)
   worker-protocol/    # /worker-protocol — inbox polling, tracing, self-terminate rules
 .claude/
   settings.json       # Advisor harness config (permissions, hooks, env vars)
@@ -181,6 +186,8 @@ Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a s
 | `/creative-thinking` | **Agent-scoped** (creative agent only) — orchestrates mapper → 3 of 5 cognitive-persona subagents in parallel → synthesizer via the Task tool; returns `council-result.md`; auto-routes to Solo Mode for trivially scoped prompts |
 | `/sub-teams` | Runs a sub-team inside a single worker — delegator agent spawns N teammates via the Task tool; opt in with `bin/summon --sub-team` and (optionally) `--sub-team-model <sonnet\|haiku\|opus>` |
 | `/tournament` | Runs a parallel TDD tournament — summons N coder workers each with a different strategy, evaluates all against a shared test suite via `tournament-evaluator`, and applies the winning implementation; uses `bin/tournament` |
+| `/advisor-doctor` | One-shot diagnosis of a stalled advisor session — inspects `session.json`, the recent outbox tail, tmux panes, processes, and sentinel files |
+| `/vault-due` | Acts on the SessionStart vault-due banner — subcommands `done <note>`, `snooze <note> <days>`, `archive <note>` |
 
 ## Reference docs
 
@@ -317,7 +324,15 @@ Ctrl-b w                                      # interactive window picker
 
 ### Cleanup
 
-Workers self-terminate on completion. `bin/close-worker-tab <sid>` (called automatically by synthesize) kills the worker's pane (located via the `@advisor_sid` pane tag) or window; the window collapses when its last pane exits. A reaper sweeps stale orphan windows and sessions (>24h, no live process) at module load, intentionally skipping `ensemble-*` and `tui` windows whose lifecycle is managed separately.
+Workers self-terminate on completion. `bin/close-worker-tab <sid>` (called automatically by synthesize) kills the worker's pane (located via the `@advisor_sid` pane tag) or window; the window collapses when its last pane exits. A reaper sweeps stale orphan windows and sessions (>24h, no live process) at module load, intentionally skipping `ensemble-*` and `tui` windows whose lifecycle is managed separately. A second module-load reaper captures-then-removes leaked coder worktrees (see Worktree durability below); both reapers are disabled by `ADVISOR_NO_REAPER=1`.
+
+## Worktree durability
+
+Coder workspaces are real git worktrees (branch `ws/<sid>`), so uncommitted coder output must survive teardown. Three guarantees:
+
+- **Capture-before-remove.** Before any coder worktree is force-removed, `bin/_worktree-capture.sh` snapshots its changed + untracked files into `$OUTPUT_DIR/worktree-capture/`. Fail-closed: if capture fails, a `CAPTURE_FAILED` marker is written and removal is skipped — un-captured work is never destroyed (operator escape hatch: `ADVISOR_FORCE_REMOVE_UNCAPTURED=1`). Used by both `bin/close-worker-tab` (synthesize-driven teardown) and the orphan reaper. Non-worktree (copyDir) workspaces are a graceful no-op.
+- **Reaper race protection.** `reapStaleWorktrees` (`lib/tmux-runner.js`) captures-then-removes leaked `ws/<sid>` worktrees at module load, capped at 25 per sweep so a leaked backlog can never stall import. Mid-provision worktrees are spared: a worktree with no `session.json` is skipped (provisioning may still be in flight), as is any worktree younger than ~1h (grace floor derived from the sid's unix-timestamp prefix). `bin/summon` exports `ADVISOR_NO_REAPER=1` during provisioning so module loads triggered by summon itself never reap; the test harness sets the same flag via `tests/setup-no-reaper.js` (wired in `bunfig.toml`).
+- **Stale-lock recovery and atomic writes.** The session and seq locks in `lib/channel.js` reclaim locks left behind by hard-killed processes, and `lib/compactor.js` rewrites transcripts via write-temp-then-rename, so a crash mid-operation can neither wedge the channel nor corrupt a transcript.
 
 ## Self-healing — lesson vault
 
