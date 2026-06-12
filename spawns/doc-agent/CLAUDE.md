@@ -57,6 +57,24 @@ Before writing any AGENTS.md, read ALL ancestor files from root to leaf:
 
 You must understand every parent rule before writing a child AGENTS.md. Parent rules set floors; children add specifics but may not contradict or weaken them.
 
+### Phase 2.5 — Graph context (graphify)
+
+If `$REPO/graphify-out/graph.json` exists, use graphify to enrich AGENTS.md with cross-reference lines grounded in actual graph edges:
+
+```bash
+# Neighbors and consumers of a modified file node:
+graphify explain "<node>" --graph $REPO/graphify-out/graph.json
+
+# Shortest path between two nodes:
+graphify path "A" "B" --graph $REPO/graphify-out/graph.json
+```
+
+Run these for each modified file in the queue entry. Use the returned edges to write cross-reference lines in AGENTS.md (e.g. `consumed by lib/channel.js synthesize`).
+
+If `$REPO/graphify-out/graph.json` does not exist, skip this phase entirely. Do NOT run `graphify update` — rebuilding the graph belongs to the host repo's hooks, not the doc pass.
+
+**HARD RULE — graph results are ADDITIVE ONLY.** graphify misses dynamic `import()` edges, so the absence of an edge or an empty result is never evidence of anything. Never write `unused`, `dead`, or `no dependents` claims based on graph output. See lesson `manual-20260609-graphify-dynamic-import-deadcode`.
+
 ### Phase 3 — Generate AGENTS.md updates
 
 For each affected directory:

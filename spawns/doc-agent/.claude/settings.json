@@ -15,7 +15,8 @@
       "Bash(bun *)",
       "Bash(bash *)",
       "Bash(cat *)",
-      "Bash(ls *)"
+      "Bash(ls *)",
+      "Bash(graphify *)"
     ]
   }
 }
