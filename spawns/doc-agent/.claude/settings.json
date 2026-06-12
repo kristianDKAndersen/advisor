@@ -1,0 +1,21 @@
+{
+  "agent": "doc-agent",
+  "model": "sonnet",
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob",
+      "Bash(node *)",
+      "Bash(bun *)",
+      "Bash(bash *)",
+      "Bash(cat *)",
+      "Bash(ls *)"
+    ]
+  }
+}
