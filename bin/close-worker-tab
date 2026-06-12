@@ -27,6 +27,11 @@ if [[ ! -d "$runDir" ]]; then
 fi
 if [[ ! -d "$runDir" ]]; then _tab_trace no-match -; exit 0; fi
 
+# Release this worker's pooled workspace-slot lease (R1 prefix stability,
+# lib/session.js). Best-effort and idempotent — a crashed worker's lease is
+# also reclaimed by the stale-TTL in leaseSlot.
+node "$(dirname "${BASH_SOURCE[0]}")/../lib/session.js" release-slot "$sid" >/dev/null 2>&1 || true
+
 # Defense in depth: kill any lingering claude processes whose argv contains sid.
 ps -ax -o pid=,comm=,args= 2>/dev/null \
   | awk -v sid="$sid" '$2=="claude" && index($0, sid) {print $1}' \

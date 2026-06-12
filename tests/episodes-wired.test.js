@@ -55,7 +55,7 @@ test('channel synthesize: writeEpisode called when result body has established f
   expect(typeof episode.ts).toBe('number');
 }, 30000);
 
-test('queryEpisodes result injected into bootstrap prompt when episodes exist', async () => {
+test('queryEpisodes result injected into inbox task body when episodes exist', async () => {
   const goal = 'Implement the test suite for advisor core-lib.';
   const taskHash = createHash('sha256').update(goal.slice(0, 200)).digest('hex');
 
@@ -76,24 +76,16 @@ test('queryEpisodes result injected into bootstrap prompt when episodes exist', 
   process.env.HOME = tmpHome;
 
   try {
-    const { composeBootstrapPrompt } = await import('../lib/summon.js');
-    const prompt = composeBootstrapPrompt({
+    const { composeTaskBody } = await import('../lib/summon.js');
+    const body = composeTaskBody({
       sid: `ep-inject-${Date.now()}`,
-      agentName: 'coder',
-      workspace: '/tmp/ws',
-      channelDir: '/tmp/chan',
-      outputDir: '/tmp/out',
-      advisorRoot: '/tmp/adv',
-      repo: '/tmp/repo',
-      outputReason: 'default',
+      task: 'implement the thing',
       goal,
       discoveryHint: false,
-      subTeam: false,
-      subTeamModel: 'sonnet',
     });
 
-    expect(prompt).toContain('## Past episodes');
-    expect(prompt).toContain('Red-green cycle worked smoothly.');
+    expect(body).toContain('## Past episodes');
+    expect(body).toContain('Red-green cycle worked smoothly.');
   } finally {
     process.env.HOME = origHome;
   }

@@ -55,17 +55,11 @@ test('B: bootstrap prompt excludes [DISCOVERY_SCAFFOLDING] when preflight fails 
 
 // ── C: Bootstrap prompt includes scaffolding when discoveryHint forced ───
 
-test('C: composeBootstrapPrompt with discoveryHint:true includes [DISCOVERY_SCAFFOLDING]', () => {
-  const { composeBootstrapPrompt } = require('../lib/summon.js');
-  const out = composeBootstrapPrompt({
+test('C: composeTaskBody with discoveryHint:true includes [DISCOVERY_SCAFFOLDING]', () => {
+  const { composeTaskBody } = require('../lib/summon.js');
+  const out = composeTaskBody({
     sid: `smoke-c-${TS}`,
-    agentName: 'coder',
-    workspace:   os.tmpdir(),
-    channelDir:  os.tmpdir(),
-    outputDir:   os.tmpdir(),
-    advisorRoot: ADVISOR_ROOT,
-    repo:        os.tmpdir(),
-    outputReason: 'test',
+    task: 'test task',
     goal: 'test goal',
     discoveryHint: true,
   });
