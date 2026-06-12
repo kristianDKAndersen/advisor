@@ -22,14 +22,7 @@ You are a focused **documentation worker**, summoned by the Advisor to batch-pro
 Before doing any work, check whether the queue has unprocessed entries:
 
 ```bash
-node -e "
-const fs = require('fs');
-const p = require('os').homedir() + '/.advisor/doc-queue.jsonl';
-if (!fs.existsSync(p)) { console.log('EMPTY'); process.exit(0); }
-const lines = fs.readFileSync(p,'utf8').trim().split('\n').filter(Boolean);
-const pending = lines.map(l=>JSON.parse(l)).filter(e=>!e.processed);
-console.log(pending.length > 0 ? 'HAS_WORK' : 'EMPTY');
-"
+node -e "const q=require('$ADV/lib/doc-queue.js');const p=q.dequeueUnprocessed();console.log(p.length>0?'HAS_WORK':'EMPTY');"
 ```
 
 If the result is `EMPTY`, send a `result` message with `summary: "queue empty"` and `verdict: "complete"`. Do not manufacture work.
@@ -38,7 +31,11 @@ If the result is `EMPTY`, send a `result` message with `summary: "queue empty"` 
 
 ### Phase 1 — Load and triage the queue
 
-Read `~/.advisor/doc-queue.jsonl` (each line is a JSON object). Filter to entries where `processed` is absent or false.
+Load unprocessed entries using `dequeueUnprocessed` from the doc-queue module:
+
+```bash
+node -e "const q=require('$ADV/lib/doc-queue.js');console.log(JSON.stringify(q.dequeueUnprocessed()));"
+```
 
 Each entry contains:
 - `sid` — session ID that produced the synthesis
@@ -73,22 +70,14 @@ For each affected directory:
 
 ### Phase 4 — Mark entries processed
 
-After all AGENTS.md files are written, mark processed queue entries by updating `~/.advisor/doc-queue.jsonl`:
+After all AGENTS.md files are written, mark processed queue entries using `markProcessed` from the doc-queue module. Construct the keys array from the `{sid, seq}` pairs of every entry you processed in Phase 3, then run:
 
 ```bash
-node -e "
-const fs = require('fs');
-const p = require('os').homedir() + '/.advisor/doc-queue.jsonl';
-const processedKeys = new Set(/* JSON.stringify array of {sid,seq} pairs */);
-const lines = fs.readFileSync(p,'utf8').trim().split('\n').filter(Boolean);
-const updated = lines.map(l => {
-  const e = JSON.parse(l);
-  if (processedKeys.has(e.sid + ':' + e.seq)) e.processed = true;
-  return JSON.stringify(e);
-}).join('\n') + '\n';
-fs.writeFileSync(p, updated);
-"
+PROCESSED_KEYS='[{"sid":"<sid1>","seq":<seq1>},{"sid":"<sid2>","seq":<seq2>}]' \
+  node -e "require('$ADV/lib/doc-queue.js').markProcessed(JSON.parse(process.env.PROCESSED_KEYS));"
 ```
+
+Substitute the actual sid and seq values. The module uses a spinlock around its read-modify-write, so a concurrent enqueue from channel.js synthesize cannot be lost.
 
 ### Phase 5 — Report result
 
