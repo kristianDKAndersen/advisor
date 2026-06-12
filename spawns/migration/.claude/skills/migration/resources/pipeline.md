@@ -1,5 +1,19 @@
 # Migration Pipeline Architecture — v2
 
+How the advisor consumes the slice plan. The migration worker reads this to understand what each plan field feeds downstream (coder fan-out, ledger, territory validation, bisect). The advisor is the primary actor for everything below; the migration worker only PLANS.
+
+## Contents
+
+- Overview
+- Architecture Decisions (1: gate mode, 2: fan-out, 3: granularity, 4: ledger persistence)
+- Pipeline Phases (0, 1, 0.5, 2, 3, 4, 5)
+- Resumable Slice Ledger (schema, update protocol, resumption)
+- Territory Validation
+- Parallel Wave Execution
+- Bug Isolation via Bisect
+- Scale Considerations
+- Key Invariants (v2)
+
 ## Overview
 
 The migration pipeline is **advisor-orchestrated**. Workers cannot summon workers; the advisor is the sole coordinator. The pipeline converts a source repository into a new-architecture codebase via an ordered sequence of atomic, tested commits, each corresponding to one behavior-coherent slice — expanded into exactly **two commits per slice** (literal + idiomatic).
@@ -17,7 +31,7 @@ Workers cannot talk to each other. All coordination flows through the advisor.
 
 ### Decision 1: Equivalence Gate Mode — per-SUBSYSTEM, requires user confirmation
 
-Mode is detected **per subsystem** (not per whole repo). The migration worker auto-detects runnability per subsystem in Step 7.1 and tags each slice's mode accordingly. The advisor surfaces the per-subsystem assignment to the user before any coder is dispatched.
+Mode is detected **per subsystem** (not per whole repo). The migration worker auto-detects runnability per subsystem in SKILL.md Step 7.1 and tags each slice's mode accordingly. The advisor surfaces the per-subsystem assignment to the user before any coder is dispatched.
 
 **Option A — RUNNABLE subsystem: golden-master / characterization tests**
 
@@ -144,7 +158,7 @@ The migration worker reads these files via Read tool, avoiding MCP git calls (wh
 **Input:** source_repo path, arch_def, epics, pre-staged workspace files
 **Output:** `$OUTPUT_DIR/slice-plan.md`
 
-1. Migration worker executes Steps 0–8 from `CLAUDE.md` (v2).
+1. Migration worker executes Steps 0–8 from the migration skill (SKILL.md).
 2. Advisor receives `result` with path to `slice-plan.md`.
 3. Advisor reads `slice-plan.md`, extracts per-subsystem mode table and dead-code exclusions.
 4. **GATE:** Advisor presents per-subsystem equivalence gate mode table to user and waits for confirmation. No dispatch until confirmed.

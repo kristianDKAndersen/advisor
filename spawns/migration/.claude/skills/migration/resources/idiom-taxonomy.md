@@ -2,10 +2,19 @@
 
 Reference for the migration worker's `idiomatic_note` field and Commit 2 gate verification.
 For each source pattern, the table gives the idiomatic target for Rust, Go, Python, and TypeScript.
-See `migration-agent.CLAUDE.md` Step 5 (Idiomatic rewrite mandate) for usage.
+See `SKILL.md` Step 5 (Idiomatic rewrite mandate) for usage.
 
 The source language is typically the OLD system language (often C, C++, Java, Python 2, JavaScript, Ruby, or PHP).
 Each row names a **source-language pattern** (the anti-pattern or legacy idiom to remove) and the preferred idiom in each target.
+For PHP-specific source patterns of the 2016 era (mysql_*, superglobals, mixed HTML+logic, ...), see the dedicated catalog [php-2016-idioms.md](php-2016-idioms.md).
+
+## Contents
+
+- Category Table (10 categories, per-language target idioms)
+- Graph-Class Idioms (needs cross-module context)
+- Language-Pair Quick Reference
+- Idiomatic Note Quality Standard
+- Ruff / ESLint / clippy Anchors for Commit 2 Gate Verification
 
 ---
 
@@ -51,6 +60,9 @@ The most common migration paths and their highest-priority idioms (top 3 per pai
 | JavaScript (callbacks) → TypeScript (async) | `async`/`await` (Cat 7) | `Promise.all` (Cat 4) | Template literals (Cat 9) |
 | C++ → Rust | Ownership + RAII (Cat 1) | `Option<T>` (Cat 2) | Iterator chains (Cat 5) |
 | Python sync → Rust | `Result<T,E>` (Cat 3) | Ownership model (Cat 1) | `serde` serialization (Cat 9) |
+| Legacy PHP → any target | Parameterized data-access (php-2016 P1) | Request-boundary DTOs (php-2016 P3) | Typed records from array shapes (php-2016 P7) |
+
+For the PHP source-side detail behind that last row, see [php-2016-idioms.md](php-2016-idioms.md).
 
 ---
 
@@ -59,7 +71,7 @@ The most common migration paths and their highest-priority idioms (top 3 per pai
 A valid `idiomatic_note` for a migration slice must:
 1. **Name a specific language feature** — not a general principle. "Use Rust idioms" fails; "use `impl Iterator<Item=T>` instead of returning `Vec<T>` to keep iteration lazy" passes.
 2. **Reference a concrete library or standard library facility** when one exists — "use `serde_json::Value` for dynamic JSON parsing instead of manual string splitting" is verifiable; "parse JSON idiomatically" is not.
-3. **Map to a category in this table** — the coder can look up the exact pattern and confirm the migration satisfies it.
+3. **Map to a category in this table** (or a pattern in [php-2016-idioms.md](php-2016-idioms.md)) — the coder can look up the exact pattern and confirm the migration satisfies it.
 4. **Be verifiable by grep or AST check** — the Commit 2 gate must be able to confirm the idiom is present. "Uses ownership semantics" is not verifiable; "`Arc<Mutex<T>>` present in the type signature" is.
 
 **Anti-patterns (reject these as idiomatic notes):**
