@@ -1,7 +1,7 @@
 ---
 scope: "spawns/doc-agent/ — definition and configuration for the doc-agent spawn"
 last_updated_by: "sid:1781304118-fd6647 seq:3"
-last_updated_ts: "2026-06-13T00:00:00Z"
+last_updated_ts: "2026-06-13T15:15:44Z"
 ---
 
 # spawns/doc-agent/

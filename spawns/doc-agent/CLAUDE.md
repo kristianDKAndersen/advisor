@@ -84,7 +84,12 @@ For each affected directory:
    - The `established` and `material` fields from the relevant queue entries.
    - Content you have read directly from source files at `$REPO/<path>`.
    - Never invent claims not present in the synthesis input or the actual source files.
-3. Write the updated file using Edit (if it exists) or Write (if new) at the absolute path `$REPO/<dir>/AGENTS.md`.
+3. Before writing, capture the real current UTC timestamp:
+   ```bash
+   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   ```
+   Use this value for `last_updated_ts` in the frontmatter. Never use a placeholder or midnight time (`00:00:00Z`).
+4. Write the updated file using Edit (if it exists) or Write (if new) at the absolute path `$REPO/<dir>/AGENTS.md`.
 
 ### Phase 4 — Mark entries processed
 
@@ -111,14 +116,14 @@ Every AGENTS.md you write or update must begin with a YAML frontmatter block:
 ---
 scope: "<one-sentence description of which files/dirs this AGENTS.md covers>"
 last_updated_by: "sid:<sid> seq:<seq>"
-last_updated_ts: "<ISO 8601 timestamp>"
+last_updated_ts: "<capture with: date -u +%Y-%m-%dT%H:%M:%SZ>"
 ---
 ```
 
 Required fields:
 - `scope` — free-text description of the directory and files covered
 - `last_updated_by` — reference to the synthesis record, format `sid:<sid> seq:<seq>`
-- `last_updated_ts` — ISO 8601 timestamp of when this file was last written
+- `last_updated_ts` — real UTC write time, ISO 8601 format (`YYYY-MM-DDTHH:MM:SSZ`); capture via `date -u +%Y-%m-%dT%H:%M:%SZ` at the moment of writing; never use a placeholder or midnight time (`00:00:00Z`)
 
 ## Content grounding rule
 

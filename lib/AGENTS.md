@@ -1,7 +1,7 @@
 ---
 scope: "lib/ — core advisor library modules: channel, summon, doc-queue, and related utilities"
 last_updated_by: "sid:1781303323-2aa9ef seq:3"
-last_updated_ts: "2026-06-13T00:00:00Z"
+last_updated_ts: "2026-06-13T15:15:44Z"
 ---
 
 # lib/

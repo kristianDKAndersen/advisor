@@ -1,7 +1,7 @@
 ---
 scope: "tests/ — automated test suite for the advisor library modules"
 last_updated_by: "sid:1781304001-e1ba49 seq:3"
-last_updated_ts: "2026-06-13T00:00:00Z"
+last_updated_ts: "2026-06-13T15:15:44Z"
 ---
 
 # tests/
