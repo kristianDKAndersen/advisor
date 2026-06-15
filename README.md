@@ -59,7 +59,7 @@ lib/
   tmux-runner.js      # detached background-loop runner used by bin/advisor-schedule; module-load reapers (orphan tmux sessions + stale coder worktrees; opt out with ADVISOR_NO_REAPER=1)
   tool-guard.js       # PreToolUse hook: blocks writes to spec-authored protected test paths (ADVISOR_PROTECTED_TESTS) + live circuit breaker — halts a worker on the 3rd identical tool call
   vault.js            # native vault writer + FTS5 search (synthesis notes, session notes, lessons)
-  hooks/              # PostToolUse worker hooks (worker-trace.js, worker-inbox-poll.sh, worker-auto-close.sh) — opt-in via ADVISOR_WORKER_HOOKS
+  hooks/              # PostToolUse worker hooks (worker-trace.js, worker-inbox-poll.sh, worker-auto-close.sh) — opt-in via ADVISOR_WORKER_HOOKS; branch-guard.js (coder-only PreToolUse)
 adapter/
   intelligence-map.json  # 7-band tier→model+reasoning manifest used by --intelligence flag (haiku-4-5 → sonnet-4-6 → opus-4-8 → fable-5 at [95,100])
 spawns/
@@ -268,6 +268,8 @@ Seven hook commands are registered across five lifecycle events in `.claude/sett
 **Transcript compaction (`lib/compactor.js`):** a standalone PreCompact hook entry point. Invoked directly, it reads `{transcript_path}` from stdin, repairs orphaned `tool_use`/`tool_result` pairing (`repairToolUseResultPairing`), runs the 4-phase `compactMessages` pipeline — prune tool_results → trim to a user-turn boundary within the token budget → summarize → sanitize — and rewrites the transcript in place via atomic tmp+rename. The PreCompact hook registered in `.claude/settings.json` is the git checkpoint above; `compactor.js` is also importable (`compactMessages`, `repairToolUseResultPairing`, `summarizeInStages`) for programmatic compaction.
 
 **Worker PostToolUse hooks (opt-in):** Three hooks in `lib/hooks/` (`worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) are installed in all 16 `spawns/*/.claude/settings.json` files, gated by `ADVISOR_WORKER_HOOKS` (default 0). When enabled, they automate the trace/recv/close-tab boilerplate; when disabled, workers rely on the `/worker-protocol` skill for manual handling. See the active-experiment bullet in `CLAUDE.md` for rollout status.
+
+**Coder-only PreToolUse hook:** `branch-guard.js` in `lib/hooks/` blocks `Edit` and `Write` calls when the coder worktree is on the wrong branch. It derives the expected branch `ws/<sid>` from the `INBOX` environment variable (by parsing `/runs/<sid>/channel`), and resolves the workspace via `CLAUDE_PROJECT_DIR` or `process.cwd()`. Fails open on every ambiguous case (non-`Edit`/`Write` tool, `INBOX` unset, workspace not a git repo, detached HEAD); blocks (exit 2) only when git returns a non-empty branch that differs from `ws/<sid>`.
 
 ## Tool guard — protected tests and loop circuit breaker
 

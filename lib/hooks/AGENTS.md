@@ -23,3 +23,19 @@ Command: node $CLAUDE_PROJECT_DIR/lib/hooks/agents-md-lint.js --commit-gate
 ```
 
 Run standalone as `node lib/hooks/agents-md-lint.js --file <path>` to validate a single file (exit 0 = pass).
+
+## branch-guard.js
+
+Coder-only PreToolUse hook: blocks `Edit` and `Write` tool calls when the worktree branch does not match `ws/<sid>`.
+
+- `extractSid(inbox)` — parses the session ID from an INBOX path (`/runs/<sid>/channel`); returns `null` when unset or no match
+
+Fails open on: non-`Edit`/`Write` tool; `INBOX` unset or sid-less; workspace not a git repo or git missing; detached HEAD. Blocks (exit 2) only when git returns a non-empty branch that differs from the expected `ws/<sid>`. Workspace resolved via `CLAUDE_PROJECT_DIR` or `process.cwd()`.
+
+Intended hook registration (coder-only PreToolUse):
+```
+PreToolUse matcher: Edit|Write
+Command: node $CLAUDE_PROJECT_DIR/lib/hooks/branch-guard.js
+```
+
+Run standalone by piping a tool-call JSON to stdin with `INBOX` set: `echo '{"tool_name":"Edit"}' | INBOX=~/.advisor/runs/<sid>/channel/inbox.jsonl node lib/hooks/branch-guard.js` (exit 0 = pass, exit 2 = blocked).
