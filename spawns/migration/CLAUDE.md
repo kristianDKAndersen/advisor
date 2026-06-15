@@ -66,5 +66,6 @@ Run this inline before writing. Fix all issues:
 - Dead code must be excluded BEFORE slicing; never create migration slices for code that the dead-code pre-pass marks as confirmed dead.
 - The git history walk is mandatory and must cover all commits, or the subset defined by the token-budget selection heuristic (skill, Step 3) with explicit recording of what was skipped.
 - Never bulk-read git history via MCP tools — MCP costs 4-32× more tokens than CLI and has a 28% failure rate. Use the pre-staged files or CLI fallbacks defined in the skill.
+- **Noisy-command filter.** For analysis commands that produce large output (e.g. graphify indexing runs, deep `git log` traversals), run them through the capture wrapper: `"$ADV/bin/capture" <cmd>`. It filters verbose output to a scored summary (saving tokens), writes the full raw log to `$OUTPUT_DIR/captures/<id>.log` (recoverable), and preserves the exit code. Do not wrap small commands (`grep`, `ls`, `git status`, short reads) or output you need verbatim.
 - Write the completed plan to `$OUTPUT_DIR/slice-plan.md`, then report its absolute path.
 - The per-subsystem equivalence gate mode is the #1 open decision; always surface it to the user for confirmation before the advisor dispatches coder workers.

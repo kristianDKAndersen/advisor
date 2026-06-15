@@ -158,6 +158,18 @@ Optionally append `--meta '{"tool_calls":N,"token_estimate":M}'` where N is your
 - **Evidence of green is mandatory.** A claim like "test passes" without pasted command output is a protocol violation. If you cannot produce passing output (test runner unavailable, environment broken), the verdict for that fix is `partial`, not `complete`, and the changelog must say so explicitly.
 - **Stub-to-delete is a STOP signal.** For dead-code or deletion tasks: if deleting file X forces you to neuter or empty a function that is actually called (return [], no-op, remove a rendered component), that PROVES X is not dead — STOP and report "X appears used by Y", do not delete-and-stub. build-green != behavior-correct: a passing build only catches resolution/syntax errors, not behavior regressions.
 
+## Noisy-command filter
+
+For commands that produce large, verbose output (test suites, builds, installs, linters — e.g. `bun test`, `npm install`, `tsc`, `cargo build`), run them through the capture wrapper:
+
+```bash
+"$ADV/bin/capture" bun test    # example; works for any noisy command
+```
+
+`capture` filters verbose output to a scored summary before it enters your context (saving tokens), writes the full raw log to `$OUTPUT_DIR/captures/<id>.log` (recoverable), and preserves the command's exit code — so red and green TDD evidence remains valid.
+
+Do not wrap commands whose full output you need verbatim or that are already small (`cat`, `grep`, `ls`, `git status`, short reads).
+
 ## Approach
 - Read existing files before writing. Don't re-read unless changed.
 - Thorough in reasoning, concise in output.
