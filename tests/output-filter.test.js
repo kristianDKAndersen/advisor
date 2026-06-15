@@ -40,7 +40,8 @@ describe('scoreLine', () => {
   test('warning = 0.7', () => expect(scoreLine('warning: unused variable')).toBe(0.7));
   test('WARN = 0.7', () => expect(scoreLine('[WARN] something happened')).toBe(0.7));
   test('tests summary = 0.6', () => expect(scoreLine('3 tests passed, 0 skipped')).toBe(0.6));
-  test('file:line ref = 0.5', () => expect(scoreLine('  at src/foo.js:42')).toBe(0.5));
+  test('file:line ref = 0.5', () => expect(scoreLine('compiled src/foo.js:42')).toBe(0.5));
+  test('stack at line = 0.8', () => expect(scoreLine('  at src/foo.js:42')).toBe(0.8));
   test('blank line = 0.1', () => expect(scoreLine('')).toBe(0.1));
   test('spinner noise = 0.1', () => expect(scoreLine('.......')).toBe(0.1));
 });
@@ -171,6 +172,50 @@ describe('filter — stats', () => {
     const raw = bigNoise(200);
     const { stats } = filter(raw, { minBytes: 0 });
     expect(stats.keptLines + stats.droppedLines).toBe(stats.rawLines);
+  });
+});
+
+// ── Assertion-detail survival (A1 regression) ────────────────────────────────
+
+describe('filter — bun-test assertion-detail lines survive verbatim', () => {
+  // Simulates a realistic bun test failure block surrounded by noise
+  const failureBlock = [
+    ' × validates final output count',
+    'error: expect(received).toBe(expected)',
+    '',
+    'Expected: 9999',
+    'Received: 12',
+    '',
+    '      at Object.<anonymous> (tests/pipeline.test.js:42:18)',
+    '      at Module._compile (node:internal/modules/cjs/loader:1364:14)',
+  ].join('\n');
+
+  const noiseLines = Array.from({ length: 100 }, (_, i) => `  processing batch ${i}...`).join('\n');
+  const raw = noiseLines + '\n' + failureBlock + '\n' + noiseLines;
+
+  test('error: line survives', () => {
+    const { summary } = filter(raw, { minBytes: 0 });
+    expect(summary).toContain('error: expect(received).toBe(expected)');
+  });
+
+  test('Expected: line survives', () => {
+    const { summary } = filter(raw, { minBytes: 0 });
+    expect(summary).toContain('Expected: 9999');
+  });
+
+  test('Received: line survives', () => {
+    const { summary } = filter(raw, { minBytes: 0 });
+    expect(summary).toContain('Received: 12');
+  });
+
+  test('fail marker survives', () => {
+    const { summary } = filter(raw, { minBytes: 0 });
+    expect(summary).toContain('validates final output count');
+  });
+
+  test('stack at line survives', () => {
+    const { summary } = filter(raw, { minBytes: 0 });
+    expect(summary).toContain('at Object.<anonymous>');
   });
 });
 

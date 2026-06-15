@@ -36,6 +36,15 @@ The auto-PostToolUse-interceptor delivery was tested end-to-end and **refuted**:
 
 **Consequence:** the auto-hook (`lib/hooks/worker-output-filter.js` + `summon.js` wiring) does not deliver filtered output on this version. The viable path is h5i's explicit **wrapper** (`capture <cmd>` → filtered summary on its own stdout, raw to `captures/`), which needs no `updatedToolOutput` and no output-replacing `settings.json`.
 
+## Post-fix verification (advisor-run, after the capture-wrapper rebuild)
+
+On a regenerated **6842-byte** failure-heavy real `bun test` capture (filter engaged, not passthrough):
+
+- **Failure-line survival: 28/28** (was 22/28) after the scoring fix (`RE_ASSERT_DETAIL` for `Expected|Received|Actual|at ` + 2-line adjacency promotion). Verified independently of the coder's `measurement-v2.md`, which reused the unrepresentative 694-byte passthrough input.
+- **Reduction: 56%** on that input.
+- **`bin/capture`** (the delivery mechanism that replaces the dead hook): on a failing command it propagated **exit code 1**, printed the filtered summary + footer `187→101 lines; raw at <captures path>`, and wrote the raw log; on a small command it passed through unchanged at exit 0.
+- **Full suite: 1115 pass / 0 fail / 1 skip** (1116 tests, 117 files) — no regression.
+
 ## Verdict
 
-The filter **library** is sound and clearly beats the existing fallback on signal preservation, but: (1) benefit is recalibrated to 45–69%, not 95%; (2) a real assertion-diff scoring defect must be fixed; (3) **the auto-hook delivery mechanism is refuted on Claude Code 2.1.177** — switch to the explicit wrapper. **Conditional GO on the technique, NO-GO on the auto-hook delivery as built.** Wiring is gated OFF in `summon.js` (empty allowlist) pending these fixes.
+The filter **library** is sound and clearly beats the existing fallback on signal preservation. Status after rebuild: (1) benefit recalibrated to 45–69%, not 95%; (2) the assertion-diff scoring defect is **FIXED and verified (28/28)**; (3) the auto-hook delivery was **refuted on Claude Code 2.1.177** and **replaced by `bin/capture`** (explicit wrapper, verified). The dead hook + `summon.js` wiring are removed. **GO on the technique via the `capture` wrapper.** Remaining before production use: wire workers to invoke `capture` for noisy commands (agent-prompt change, deliberately out of scope here).

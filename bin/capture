@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+'use strict';
+
+const { spawnSync } = require('child_process');
+const { filter } = require('../lib/output-filter.js');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+const args = process.argv.slice(2);
+if (!args.length) {
+  process.stderr.write('Usage: capture <cmd> [args...]\n');
+  process.exit(1);
+}
+
+const result = spawnSync(args[0], args.slice(1), {
+  stdio: ['inherit', 'pipe', 'pipe'],
+  encoding: 'buffer',
+});
+
+const stdoutBuf = result.stdout || Buffer.alloc(0);
+const stderrBuf = result.stderr || Buffer.alloc(0);
+const raw = Buffer.concat([stdoutBuf, stderrBuf]).toString('utf8');
+
+// Determine output path
+const capturesDir = process.env.OUTPUT_DIR
+  ? path.join(process.env.OUTPUT_DIR, 'captures')
+  : path.join(process.cwd(), '.advisor-captures');
+fs.mkdirSync(capturesDir, { recursive: true });
+
+const sha8 = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 8);
+const rawPath = path.join(capturesDir, `${sha8}.log`);
+fs.writeFileSync(rawPath, raw);
+
+// Filter or fail-open
+const minBytes = 2048;
+let output;
+try {
+  const rawBytes = Buffer.byteLength(raw, 'utf8');
+  if (rawBytes < minBytes) {
+    output = raw;
+  } else {
+    const { summary, stats } = filter(raw, { lineBudget: 80 });
+    const N = stats.rawLines;
+    const M = summary.split('\n').length;
+    output = summary + '\n[output-filter: ' + N + '->' + M + ' lines; raw at ' + rawPath + ']\n';
+  }
+} catch (_) {
+  output = raw;
+}
+
+process.stdout.write(output);
+process.exit(result.status != null ? result.status : 1);
