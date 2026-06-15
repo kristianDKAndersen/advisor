@@ -1,26 +1,31 @@
 // Sub-teams advisor integration tests
 // Wave 1 (U0): written first as failing tests
 // Wave 2 (U6): --sub-team flag wiring tests pass after bin/summon + lib/summon.js changes
-import { test, expect, describe, afterEach, beforeAll } from 'bun:test';
+import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
 
 const REPO = path.join(import.meta.dir, '..');
 const SUMMON_JS = path.join(REPO, 'lib', 'summon.js');
 
-// Track session dirs created during tests for cleanup
-const createdSids = [];
-
-function cleanupAll() {
-  for (const sid of createdSids.splice(0)) {
-    try { fs.rmSync(path.join(process.env.HOME, '.advisor', 'runs', sid), { recursive: true, force: true }); } catch (_) {}
-  }
-}
+// Throwaway git repo + runs root so coder worktrees never register in the real .git.
+let tmpRepo;
+let tmpRuns;
 
 beforeAll(() => {
-  process.on('exit', cleanupAll);
-  process.on('SIGINT', () => { cleanupAll(); process.exit(1); });
+  tmpRuns = fs.mkdtempSync(path.join(os.tmpdir(), 'sub-teams-runs-'));
+  tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'sub-teams-repo-'));
+  execFileSync('git', ['init'], { cwd: tmpRepo, stdio: 'ignore' });
+  execFileSync('git', ['-C', tmpRepo, 'config', 'user.email', 'test@example.com'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', tmpRepo, 'config', 'user.name', 'Test'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', tmpRepo, 'commit', '--allow-empty', '-m', 'init'], { stdio: 'ignore' });
+});
+
+afterAll(() => {
+  try { fs.rmSync(tmpRuns, { recursive: true, force: true }); } catch (_) {}
+  try { fs.rmSync(tmpRepo, { recursive: true, force: true }); } catch (_) {}
 });
 
 function runSummon(extraArgs = []) {
@@ -32,29 +37,13 @@ function runSummon(extraArgs = []) {
     ...extraArgs,
   ];
   const result = execFileSync('node', args, {
-    cwd: REPO,
+    cwd: tmpRepo,
     encoding: 'utf8',
     timeout: 30000,
+    env: { ...process.env, ADVISOR_RUNS_ROOT: tmpRuns },
   });
-  const meta = JSON.parse(result);
-  createdSids.push(meta.sid);
-  return meta;
+  return JSON.parse(result);
 }
-
-afterEach(() => {
-  // Clean up created git worktrees and session dirs
-  for (const sid of createdSids.splice(0)) {
-    try {
-      execFileSync('git', ['-C', REPO, 'worktree', 'remove', '--force', `ws/${sid}`], {
-        stdio: 'ignore',
-      });
-    } catch (_) {}
-    try {
-      const sessionDir = path.join(process.env.HOME, '.advisor', 'runs', sid);
-      fs.rmSync(sessionDir, { recursive: true, force: true });
-    } catch (_) {}
-  }
-});
 
 // ============================================================================
 // U0/U1: Sub-teams lib files exist (Wave 2 implementation test)
