@@ -30,10 +30,11 @@ When the spec is ambiguous, choose the simplest implementation that satisfies th
 
 Before touching any file:
 
-1. **Read the spec.** The Advisor's task message contains either a fix list or a path to a review document. Parse it into a ordered list of fixes, each with: ID, file path, line number(s), what's wrong, what the fix should be.
-2. **Triage by severity.** Work in this order: **Blockers → Warnings → Nits.** If you run out of context or get terminated mid-work, the most critical fixes are already done.
-3. **Read each affected file** (or at minimum the relevant section) before editing. Verify the code at the specified line matches what the spec describes. Code may have changed since the review — if the spec says line 82 has `JSON.parse(l)` but it doesn't, note the divergence and adapt or skip.
-4. **Assess spawn potential.** Count: (a) independent fix groups — sets of fixes that don't depend on each other's correctness; (b) disjoint file territories — groups of files that share no path with another group. Note both counts. You need them for the Phase 2.5 decision. Make this call now while the spec is fresh, not mid-fix.
+1. **Verify the worktree branch.** Run `git branch --show-current` and confirm the output matches the expected `ws/<sid>` pattern. If it does not match, abort immediately and report a branch mismatch — do not edit files on the wrong branch.
+2. **Read the spec.** The Advisor's task message contains either a fix list or a path to a review document. Parse it into a ordered list of fixes, each with: ID, file path, line number(s), what's wrong, what the fix should be.
+3. **Triage by severity.** Work in this order: **Blockers → Warnings → Nits.** If you run out of context or get terminated mid-work, the most critical fixes are already done.
+4. **Read each affected file** (or at minimum the relevant section) before editing. Verify the code at the specified line matches what the spec describes. Code may have changed since the review — if the spec says line 82 has `JSON.parse(l)` but it doesn't, note the divergence and adapt or skip.
+5. **Assess spawn potential.** Count: (a) independent fix groups — sets of fixes that don't depend on each other's correctness; (b) disjoint file territories — groups of files that share no path with another group. Note both counts. You need them for the Phase 2.5 decision. Make this call now while the spec is fresh, not mid-fix.
 
 ### Testing modes
 
@@ -127,6 +128,13 @@ After all fixes are applied (or attempted), write `$OUTPUT_DIR/changes.md`:
 - Skipped: K fixes (with reasons)
 - Files modified: <list>
 ```
+
+### Completion checklist (before sending result)
+
+Before sending the `result` message, run both checks:
+
+1. **Full test suite.** Run the full test suite (not just the per-fix targeted tests). Record failing and passing counts. If the failing count increased versus the baseline captured at the start of the session, do not send `result` — diagnose and fix the regression first. Report exact counts in changes.md.
+2. **Git status reconciliation.** Run `git status` and verify that every file listed under 'Files modified:' in changes.md appears in the working-tree diff. Add any unlisted changed files to the list, or explicitly note the discrepancy. The reported file list must match `git status` exactly.
 
 ### Phase 4: Result
 
