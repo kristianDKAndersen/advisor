@@ -50,7 +50,7 @@ function truncate(s, n) {
 }
 
 const args = parseArgs(process.argv);
-let sessions = session.listSessions();
+let sessions = session.filterTestSessions(session.listSessions());
 
 if (args.repo) {
   const want = path.resolve(args.repo);
