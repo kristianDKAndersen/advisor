@@ -1,8 +1,9 @@
 {
-  "agent": "Advisor",
-  "effortLevel": "high",
-  "thinking": {
-    "enabled": true
+  "env": {
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "CLAUDE_CODE_NO_FLICKER": "1"
   },
   "permissions": {
     "allow": [
@@ -13,7 +14,6 @@
       "Grep",
       "Bash(node *)",
       "Bash(bin/summon *)",
-      "Bash(./bin/summon *)",
       "Bash(bash bin/summon *)",
       "Bash(chmod *)"
     ]
@@ -103,15 +103,14 @@
       }
     ]
   },
-  "env": {
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
-    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
-    "CLAUDE_CODE_NO_FLICKER": "1"
-  },
   "statusLine": {
     "type": "command",
     "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/statusline.sh",
     "padding": 1
+  },
+  "effortLevel": "high",
+  "agent": "Advisor",
+  "thinking": {
+    "enabled": true
   }
 }
