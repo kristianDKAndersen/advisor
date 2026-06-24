@@ -7,7 +7,9 @@
 // Streams each new outbox message as a single JSON line to stdout (Monitor-friendly).
 // Exits 0 on a `result` message, 1 on an `error` message, 2 on timeout.
 
+const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { Tail } = require(path.join(__dirname, '..', 'lib', 'channel.js'));
 const { loadTerminal } = require(path.join(__dirname, '..', 'lib', 'terminal-persist.js'));
 
@@ -56,6 +58,13 @@ async function main() {
   let lastActivityAt = Date.now();
   let stalledEmitted = false;
 
+  const inboxPath = path.join(channelDir, 'inbox.jsonl');
+  const heartbeatPath = path.join(channelDir, 'heartbeat.jsonl');
+  const inboxTailer = new Tail();
+  let inboxCursor = 0;
+  let terminateSeenAt = null;
+  let lastEmittedToolCount = -1;
+
   while (true) {
     const msgs = tailer.read(outboxPath).filter(m => m.seq > cursor);
     for (const m of msgs) {
@@ -73,10 +82,44 @@ async function main() {
       if (m.type === 'error') process.exit(1);
     }
 
+    // ── Inbox terminate check ──────────────────────────────────────────────
+    const inboxMsgs = inboxTailer.read(inboxPath).filter(m => m.seq > inboxCursor);
+    for (const im of inboxMsgs) {
+      inboxCursor = Math.max(inboxCursor, im.seq);
+      if (im.type === 'terminate' && terminateSeenAt === null) {
+        terminateSeenAt = Date.now();
+      }
+    }
+
+    // ── Heartbeat ─────────────────────────────────────────────────────────
+    try {
+      if (fs.existsSync(heartbeatPath)) {
+        const hbLines = fs.readFileSync(heartbeatPath, 'utf8').split('\n').filter(l => l.trim());
+        if (hbLines.length > 0) {
+          const lastHb = JSON.parse(hbLines[hbLines.length - 1]);
+          if (lastHb.tool_count !== lastEmittedToolCount) {
+            lastEmittedToolCount = lastHb.tool_count;
+            const agoSecs = Math.round((Date.now() / 1000 - lastHb.ts));
+            process.stdout.write(JSON.stringify({ type: 'heartbeat', sid, tool_count: lastHb.tool_count, last_active_secs: agoSecs }) + '\n');
+          }
+        }
+      }
+    } catch (_) {} // absent or malformed heartbeat.jsonl = silent
+
     const silentMs = Date.now() - lastActivityAt;
     if (!stalledEmitted && silentMs >= 60_000) {
       process.stdout.write(JSON.stringify({ type: 'stalled', sid, silentMs }) + '\n');
       stalledEmitted = true;
+    }
+
+    // ── Post-terminate auto-close ─────────────────────────────────────────
+    // If a terminate was sent to the worker (observed in inbox) but no result
+    // has arrived in the outbox within 30s, close the worker tab unconditionally.
+    if (terminateSeenAt !== null && Date.now() - terminateSeenAt >= 30_000) {
+      const closeScript = path.join(__dirname, 'close-worker-tab');
+      spawnSync(closeScript, [sid], { stdio: 'inherit' });
+      process.stderr.write(`advisor-observe: terminate observed, no result after 30s — closed worker tab for ${sid}\n`);
+      process.exit(0);
     }
 
     if (Date.now() >= deadline) {

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# advisor-terminate <sid> — send terminate to a worker, then unconditionally close its tab.
+#
+# Usage: advisor-terminate <sid>
+#
+# Sends a 'terminate' message to the worker's inbox via channel.js, then runs
+# close-worker-tab unconditionally — cleanup cannot be skipped even if the send fails.
+
+set -u
+
+sid="${1:-}"
+if [[ -z "$sid" ]]; then
+  echo "Usage: advisor-terminate <sid>" >&2
+  exit 1
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+adv_root="$(dirname "$script_dir")"
+home="${HOME:-${USERPROFILE:-}}"
+inbox="$home/.advisor/runs/$sid/channel/inbox.jsonl"
+
+# Send terminate — best-effort; failure must not block close-worker-tab.
+bun "$adv_root/lib/channel.js" send \
+  --file "$inbox" \
+  --type terminate \
+  --from "advisor-terminate" \
+  --quiet || true
+
+# Close tab unconditionally (even if send failed).
+"$script_dir/close-worker-tab" "$sid"
