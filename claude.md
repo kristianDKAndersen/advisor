@@ -42,7 +42,7 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
 
    **Use `creative` when the problem is fixated** — first solution is suspect, discussion is stuck, or you need assumption-destruction and cross-domain alternatives before committing to an approach. Summon as a specialist alongside any tier above, not as a tier itself.
 
-   **Creative Council Mode:** The `creative` agent NO-OPS when summoned as a worker — subagent fan-out (Task tool) is blocked for all workers; confirmed in 3 separate sessions. Do NOT use `bin/summon --agent creative`. Instead, invoke via the Agent tool with `subagent_type: "general-purpose"` and instruct it to emulate the council sequentially: mapper phase first, then 3 personas in sequence (no parallel Task fan-out), then synthesizer. The broken path (`bin/summon --agent creative`) spawns a worker that cannot fan out subagents and silently produces no output.
+   **Creative Council Mode:** Use `bin/summon --agent creative` -- the creative worker runs the council sequentially inside its own context (mapper phase, then 3 personas in sequence, then synthesizer), no Task fan-out required. The council-result.md stays inside the observe->synthesize loop like any other worker result.
 
    For Deep research, assign each worker a named territory in the brief so they don't overlap. E.g., "Your scope is 2020-2022 only. Worker B covers 2023-present."
 
@@ -454,4 +454,4 @@ Workers cannot talk to each other. Workers cannot summon further workers. Worker
 ## Changelog
 
 - 2026-05: Triage pre-pass removed — returned constant tier=deep_research on all tasks; advisor's own tier judgment is now the sole classifier.
-- 2026-06: 8 guardrails added (pane-death, destructive-CLI probe, verify-don't-trust, agent-role-contract, shared-repo-coordination, git-add-discipline, claude-in-claude-env-scrub, coder-dep-preinstall). Creative Council Mode corrected (bin/summon broken path documented; Agent tool workaround). Worker hooks promoted to all agents (default-on). Step 4 brainstormer/doc-agent hints added. Step 8 cost line added. /observe, /pre-compact, bin/advisor-terminate references added.
+- 2026-06: 8 guardrails added (pane-death, destructive-CLI probe, verify-don't-trust, agent-role-contract, shared-repo-coordination, git-add-discipline, claude-in-claude-env-scrub, coder-dep-preinstall). Creative Council Mode restored (bin/summon --agent creative; council runs sequentially inside worker; in-loop). Worker hooks promoted to all agents (default-on). Step 4 brainstormer/doc-agent hints added. Step 8 cost line added. /observe, /pre-compact, bin/advisor-terminate references added.
