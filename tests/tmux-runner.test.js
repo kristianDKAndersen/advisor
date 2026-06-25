@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ensureStopHook, parseTranscript, makeTmuxName, makeWindowName, ensureAdvisorSession, pollCapturePane, reaperSweepOrphanSessions, reapStaleWorktrees, runLoadReapers, spawnHeadless } from '../lib/tmux-runner.js';
+import { ensureStopHook, parseTranscript, makeTmuxName, makeWindowName, ensureAdvisorSession, ensureTuiPane, pollCapturePane, reaperSweepOrphanSessions, reapStaleWorktrees, runLoadReapers, spawnHeadless } from '../lib/tmux-runner.js';
 import { execFileSync } from 'child_process';
 
 const STOP_HOOK_COMMAND =
@@ -1079,4 +1079,50 @@ test('reapStaleWorktrees: grace floor spares a <1h-old sid even with a stale ses
 
   expect(calls).toHaveLength(0);
   expect(captureCount).toBe(0);
+});
+
+// ── ensureTuiPane cosmetic fixes (select-pane + stty -echo) ──────────────────
+
+test('ensureTuiPane: select-pane targets the worker pane returned by split-window', () => {
+  const workerPaneId = '%55';
+  const calls = [];
+
+  const execFn = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === 'tmux' && args[0] === 'new-session') return '';
+    // tui window already exists — skip placeholder-creation branch
+    if (cmd === 'tmux' && args[0] === 'list-windows') return 'tui\n';
+    if (cmd === 'tmux' && args[0] === 'split-window') return `${workerPaneId}\n`;
+    return '';
+  };
+
+  ensureTuiPane('test-sid-001', { execFn, lockDir: path.join(tmpDir, 'tui-lock1') });
+
+  const selectPane = calls.find((c) => c[0] === 'tmux' && c[1] === 'select-pane');
+  expect(selectPane).toBeDefined();
+  expect(selectPane).toContain(workerPaneId);
+});
+
+test('ensureTuiPane: placeholder new-window command contains stty -echo and new banner text', () => {
+  const workerPaneId = '%77';
+  const placeholderPaneId = '%66';
+  const calls = [];
+
+  const execFn = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === 'tmux' && args[0] === 'new-session') return '';
+    // list-windows returns empty → tui window does not exist yet → placeholder created
+    if (cmd === 'tmux' && args[0] === 'list-windows') return '';
+    if (cmd === 'tmux' && args[0] === 'new-window') return `${placeholderPaneId}\n`;
+    if (cmd === 'tmux' && args[0] === 'split-window') return `${workerPaneId}\n`;
+    return '';
+  };
+
+  ensureTuiPane('test-sid-002', { execFn, lockDir: path.join(tmpDir, 'tui-lock2') });
+
+  const newWindow = calls.find((c) => c[0] === 'tmux' && c[1] === 'new-window');
+  expect(newWindow).toBeDefined();
+  const cmdStr = newWindow.join(' ');
+  expect(cmdStr).toContain('stty -echo');
+  expect(cmdStr).toContain('[advisor] holding tui window open');
 });
