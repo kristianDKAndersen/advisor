@@ -32,6 +32,7 @@ Workers run in isolated, ephemeral workspaces. Durable output lands in `$OUTPUT_
 ```
 bin/
   _worktree-capture.sh  # capture-before-remove helper — snapshots a coder worktree's changed+untracked files into $OUTPUT_DIR before removal (sourced, internal)
+  advisor-cost        # per-session cost report — reads ~/.advisor/state/token-usage.jsonl and prints token counts + estimated cost by session
   advisor-list        # list all sessions under ~/.advisor/runs/ (--json, --repo, --agent)
   advisor-observe     # tail a session's outbox; emits JSON per message; exits on result/error/timeout (--after, --max-wait, --poll)
   advisor-schedule    # launch autonomous loops detached in a tmux window (--sid, --interval, --task, --once)
@@ -39,6 +40,7 @@ bin/
   advisor-vault       # query the native vault index (search / backlinks / path / due [--within <days>])
   advisor-vault-mcp   # JSON-RPC 2.0 MCP stdio server exposing the vault to Claude Desktop and claude-code (internal)
   brief               # validate 5-field brief and emit bin/summon command (auto-populates --allowed-tools)
+  capture             # noisy-command output filter — pipes stdout/stderr through a scored summary, saves full raw log to $OUTPUT_DIR/captures/<id>.log; preserves exit code for TDD evidence
   browser-act         # execute one browser action via the daemon UNIX socket (internal)
   browser-launch      # start Chrome and browser daemon, print session JSON (internal)
   browser-state       # read current browser DOM state from the daemon (internal)
@@ -141,6 +143,8 @@ skills/
 | `tournament-evaluator` | Scores and ranks competing coder implementations against a shared test suite; used by the `/tournament` skill |
 | `migration` | Migrates a source codebase to a target architecture; reads `source_repo` and an `arch_def` (prose, YAML, Confluence export, or Miro export) and produces migration changes in the target tree |
 | `vault-curator` | Curates vault notes by deduplication — walks notes matching `scope_glob`, flags or merges pairs whose similarity exceeds `similarity_threshold`, and produces a curation report |
+| `brainstormer` | Facilitates structured product ideation sessions using a 6-stage stage-gated model (Frame → Discover → Focus → Generate → Decide → Validate) that prevents premature convergence through enforced phase separation, technique rotation, and an explicit idea ledger; produces `ideas.md` + `session.md` |
+| `doc-agent` | Batch-processes unprocessed entries from `~/.advisor/doc-queue.jsonl` and updates the nearest `AGENTS.md` for each affected directory in the repo; skips when queue is empty |
 
 ## Creative Council Mode
 

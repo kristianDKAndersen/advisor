@@ -39,6 +39,19 @@ GUIDANCE="${GUIDANCE%${_RS}}"
 
 echo "$NEW_SEQ" > "$SEQ_FILE"
 
+# Heartbeat — fail-open: never blocks or fails the inbox poll above.
+{
+  _HB_DIR="$(dirname "$INBOX")"
+  _HB_COUNTER="$_HB_DIR/hook-tool-count"
+  _HB_FILE="$_HB_DIR/heartbeat.jsonl"
+  _HB_COUNT=0
+  [[ -f "$_HB_COUNTER" ]] && _HB_COUNT=$(cat "$_HB_COUNTER" 2>/dev/null || echo 0)
+  _HB_COUNT=$((_HB_COUNT + 1))
+  echo "$_HB_COUNT" > "$_HB_COUNTER"
+  _HB_TS=$(node -e "process.stdout.write(String(Date.now()/1000))" 2>/dev/null || echo 0)
+  printf '{"ts": %s, "tool_count": %d}\n' "$_HB_TS" "$_HB_COUNT" >> "$_HB_FILE"
+} 2>/dev/null || true
+
 if [[ -n "$GUIDANCE" ]]; then
   echo "[advisor-guidance] $GUIDANCE" >&2
 fi

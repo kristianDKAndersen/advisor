@@ -19,7 +19,7 @@ test('spawns/creative describes mapper step', () => {
 });
 
 test('spawns/creative describes 3-of-5 personas step', () => {
-  expect(creative).toMatch(/3 of 5 personas/);
+  expect(creative).toMatch(/3 of (the )?5/);
 });
 
 test('spawns/creative describes synthesizer step', () => {

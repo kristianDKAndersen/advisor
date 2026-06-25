@@ -5,9 +5,11 @@ description: Forces genuine creative breakthroughs by deploying a team of cognit
 
 # Creative Thinking Skill
 
-You are the orchestrator for a Creative Council fan-out. Your job is to run the full pipeline below. You do NOT generate ideas directly — you coordinate the subagents that do.
+You are the orchestrator for a Creative Council. Your job is to run the full pipeline below in one of two modes: parallel Task fan-out (when the Task tool is available) or sequential in-worker emulation (when running as a summoned worker). You do NOT generate ideas as your default persona — you adopt each role in turn as directed by the pipeline.
 
-The whole point of this skill is to **escape the gravity well of the obvious answer**. The first solution that comes to mind is almost always the laziest one. The mapper marks that solution forbidden. Three personas with mutually irreconcilable cognitive stances each attack the problem from their own angle, blind to each other. The synthesizer reads only their outputs and forges 1–2 refined recommendations with no attachment to any persona's framing. The structure is the engine — your job is to drive it cleanly.
+The whole point of this skill is to **escape the gravity well of the obvious answer**. The first solution that comes to mind is almost always the laziest one. The mapper marks that solution forbidden. Three personas with mutually irreconcilable cognitive stances each attack the problem from their own angle, blind to each other. The synthesizer reads only their outputs and forges 1-2 refined recommendations with no attachment to any persona's framing. The structure is the engine — your job is to drive it cleanly.
+
+**Execution mode check:** Summoned workers (via `bin/summon`) cannot use the Task tool for subagent fan-out. If you are a summoned worker, skip the parallel Full pipeline steps and jump directly to the **Sequential pipeline** section below. Parallel Task fan-out is available only when running as a top-level agent with Task in your allowed tool list. When in doubt, use sequential mode -- it is the reliable default for in-loop creative work.
 
 ## Escape hatch — check this FIRST
 
@@ -21,7 +23,7 @@ If none fire, proceed to the full pipeline.
 
 ---
 
-## Full pipeline
+## Full pipeline (parallel mode -- Task tool required)
 
 ### Step 1 — Spawn the mapper
 
@@ -174,6 +176,67 @@ Write the output to `<ABS_OUTPUT_DIR>/solo-result.md`. Return one fenced json bl
   "token_estimate": <integer>
 }
 ```
+
+---
+
+## Sequential pipeline (worker context -- no Task required)
+
+Run this when you are a summoned worker or when Task fan-out is unavailable. You emulate the council yourself by adopting each role in sequence within your own context. All pipeline outputs (forbidden-ideas.md, assumptions.md, persona-plan.md, `<PERSONA_NAME>`-ideas.md, council-result.md) are still produced. The council-result.md is identical in structure and authority to the parallel version.
+
+### Seq Step 1 -- Mapper phase
+
+Read the file at:
+  `.claude/skills/creative-thinking/assets/creative-mapper.md`
+
+Follow every instruction in that file exactly, acting as the mapper yourself (no subagent invocation). Write these three files:
+- `<ABS_OUTPUT_DIR>/forbidden-ideas.md`
+- `<ABS_OUTPUT_DIR>/assumptions.md`
+- `<ABS_OUTPUT_DIR>/persona-plan.md`
+
+Parse `persona-plan.md` to extract the 3 recommended personas. Validate each against `{naturalist, systematist, futurist, oracle, constraintist}`. Fall back to **naturalist + constraintist + oracle** if fewer than 3 valid names are found.
+
+Store:
+- `forbiddenPath = <ABS_OUTPUT_DIR>/forbidden-ideas.md`
+- `assumptionsPath = <ABS_OUTPUT_DIR>/assumptions.md`
+- `selectedPersonas = [name1, name2, name3]`
+
+### Seq Step 2 -- Persona phases (one at a time)
+
+For each persona in `selectedPersonas`, in order:
+
+1. Read `.claude/skills/creative-thinking/assets/creative-<PERSONA_NAME>.md`.
+2. Adopt that persona's voice, cognitive constraints, and methodology fully. You are now this persona -- apply its irreconcilable angle without hedging into a generalist stance.
+3. Read `forbiddenPath`. Your ideas must not repeat anything there.
+4. Generate ideas for the problem statement using that persona's lens.
+5. Write your ideas to `<ABS_OUTPUT_DIR>/<PERSONA_NAME>-ideas.md`.
+6. Release the persona and return to orchestrator mode before starting the next one.
+
+Do NOT read the previous persona's ideas file when adopting the next persona -- maintain the same isolation that parallel mode enforces via separate subagent contexts.
+
+### Seq Step 3 -- Synthesizer phase
+
+Read `.claude/skills/creative-thinking/assets/creative-synthesizer.md`.
+
+Adopt the synthesizer role. Follow every instruction in that file exactly. You have access only to the persona ideas files -- do NOT read mapper outputs or persona-plan.md (deliberate isolation mirrors the parallel version). Read all surviving `<PERSONA_NAME>-ideas.md` files and write the synthesis to:
+
+`<ABS_OUTPUT_DIR>/council-result.md`
+
+### Seq Step 4 -- Return to caller
+
+Same envelope as parallel Step 4:
+
+```json
+{
+  "persona": "creative-orchestrator",
+  "ideas_path": "<ABS_OUTPUT_DIR>/council-result.md",
+  "summary": "<synthesizer summary>",
+  "verdict": "complete",
+  "tool_calls": "<total across all sequential phases>",
+  "token_estimate": "<total>"
+}
+```
+
+The caller reads `council-result.md` directly. Do not paraphrase the council result inline.
 
 ---
 

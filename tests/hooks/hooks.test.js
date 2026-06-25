@@ -322,7 +322,7 @@ test('summon.js centralizes PostToolUse hooks with correct matchers (Fix #4-1)',
 test('summon.js injects ADVISOR_WORKER_HOOKS env correctly (Fix #4-2)', () => {
   const summonSource = fs.readFileSync(path.join(ADVISOR_ROOT, 'lib', 'summon.js'), 'utf8');
   expect(summonSource).toContain('ADVISOR_WORKER_HOOKS');
-  expect(summonSource).toContain('WORKER_HOOKS_ALLOWLIST');
-  expect(summonSource).toContain("'planner'");
-  expect(summonSource).toContain("'researcher'");
+  // Worker-hooks are now universal (promoted to all agents) — no allowlist.
+  expect(summonSource).not.toContain('WORKER_HOOKS_ALLOWLIST');
+  expect(summonSource).toContain("'1'");
 });
