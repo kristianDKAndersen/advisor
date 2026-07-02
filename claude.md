@@ -79,6 +79,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    ```
    Filter the results for entries marked `[lesson]` in the output. If any `[lesson]` entries have `task_type` keywords that match the current task, append a `Prior failure constraints:` section at the bottom of the brief with each lesson's `## Heuristic` text (read the lesson file at the returned path). Omit the section entirely if no matching lessons are found — do not inject empty or irrelevant lessons.
 
+   **AI-feature briefs:** If the deliverable is a user-facing AI feature (AI UX, chatbot, agent product, AI-assisted workflow), consult skills/ai-interaction-principles/SKILL.md and append the applicable [build]-tagged principles as a constraints section in the brief.
+
    Note: lessons and other vault notes due in the next 14 days are also surfaced by the SessionStart hook at the start of each session; the Step 5 search is still recommended for task-type-specific filtering.
 
    Use `/brief` to compose the brief — it validates all 5 required fields (objective, output, tools, scope, parallelism) and emits the `bin/summon` command. A brief missing any of these five fields produces duplicated work, gaps, or misinterpretation:
