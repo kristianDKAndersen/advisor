@@ -2,10 +2,11 @@
 // advisor-cost — per-session token usage and estimated cost.
 //
 // Usage:
-//   advisor-cost [--sid <uuid>] [--last N] [--by-agent] [--help]
+//   advisor-cost [<sid>] [--sid <uuid>] [--last N] [--by-agent] [--help]
 //
 // Reads ~/.advisor/state/token-usage.jsonl (cumulative snapshots — takes last per sid).
-// Lines are Claude Code session UUIDs — no join to runs/meta.json is possible.
+// Lines are Claude Code session UUIDs. A positional or --sid run-sid (e.g.
+// "1783078917-04d530") is resolved to its claude_uuid via session-map.jsonl.
 // --by-agent reads optional ~/.advisor/state/session-map.jsonl {run_sid,claude_uuid,agent}.
 // Override state path with ADVISOR_STATE_DIR for testing.
 //
@@ -103,6 +104,28 @@ function readSessionMap(stDir) {
   return map.size > 0 ? map : null;
 }
 
+// Advisor run-sids look like "<epoch>-<hex>" (e.g. "1783078917-04d530"),
+// distinct from Claude Code session UUIDs stored in token-usage.jsonl.
+function isRunSid(s) {
+  return /^\d+-[0-9a-f]+$/.test(s);
+}
+
+// Resolves a run-sid to its claude_uuid via session-map.jsonl {run_sid, claude_uuid}.
+// Returns null when session-map.jsonl is absent or has no matching entry.
+function resolveRunSid(stDir, runSid) {
+  const p = path.join(stDir, 'session-map.jsonl');
+  if (!fs.existsSync(p)) return null;
+  const lines = fs.readFileSync(p, 'utf8').split('\n');
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e.run_sid === runSid && e.claude_uuid) return e.claude_uuid;
+    } catch (_) {}
+  }
+  return null;
+}
+
 // Cache-aware cost. 5 params; modelId optional (falls back to sonnet rates).
 function estimateCost(input_tokens, output_tokens, cache_read, cache_creation, modelId) {
   const r = priceForModel(modelId);
@@ -169,6 +192,14 @@ function buildRows({ stateDirectory, sidFilter, lastN, byAgent } = {}) {
 function fmt(n) { return Number(n).toLocaleString(); }
 function fmtCost(c) { return '$' + Number(c).toFixed(4); }
 function pad(s, n) { return String(s).slice(0, n).padEnd(n); }
+// Numeric columns must never be truncated (unlike text columns) — slicing a
+// formatted number mid-digit runs it into the next column with no separator.
+// When the value overflows the column width, pad with a minimum gap instead
+// of truncating, so it never runs directly into the next column.
+function padNum(s, n) {
+  const str = String(s);
+  return str.length < n ? str.padEnd(n) : str + '  ';
+}
 
 function printTable({ rows, noMap }, byAgent) {
   if (noMap) {
@@ -184,7 +215,7 @@ function printTable({ rows, noMap }, byAgent) {
     console.log(pad('AGENT', 16) + pad('INPUT', 12) + pad('OUTPUT', 12) + pad('CACHE_READ', 12) + pad('CACHE_WR', 12) + pad('EST COST', 12) + 'SESSIONS');
     console.log('─'.repeat(88));
     for (const r of rows) {
-      console.log(pad(r.agent, 16) + pad(fmt(r.input), 12) + pad(fmt(r.output), 12) + pad(fmt(r.cache_read), 12) + pad(fmt(r.cache_creation), 12) + pad(fmtCost(r.cost), 12) + r.count);
+      console.log(pad(r.agent, 16) + padNum(fmt(r.input), 12) + padNum(fmt(r.output), 12) + padNum(fmt(r.cache_read), 12) + padNum(fmt(r.cache_creation), 12) + padNum(fmtCost(r.cost), 12) + r.count);
     }
     const totInput = rows.reduce((s, r) => s + r.input, 0);
     const totOutput = rows.reduce((s, r) => s + r.output, 0);
@@ -193,12 +224,12 @@ function printTable({ rows, noMap }, byAgent) {
     const totCost = rows.reduce((s, r) => s + r.cost, 0);
     const totCount = rows.reduce((s, r) => s + r.count, 0);
     console.log('─'.repeat(88));
-    console.log(pad('TOTAL', 16) + pad(fmt(totInput), 12) + pad(fmt(totOutput), 12) + pad(fmt(totRead), 12) + pad(fmt(totWr), 12) + pad(fmtCost(totCost), 12) + totCount);
+    console.log(pad('TOTAL', 16) + padNum(fmt(totInput), 12) + padNum(fmt(totOutput), 12) + padNum(fmt(totRead), 12) + padNum(fmt(totWr), 12) + padNum(fmtCost(totCost), 12) + totCount);
   } else {
     console.log(pad('SID', 38) + pad('INPUT', 12) + pad('OUTPUT', 12) + pad('CACHE_READ', 12) + pad('CACHE_WR', 12) + 'EST COST');
     console.log('─'.repeat(92));
     for (const r of rows) {
-      console.log(pad(r.sid, 38) + pad(fmt(r.input), 12) + pad(fmt(r.output), 12) + pad(fmt(r.cache_read), 12) + pad(fmt(r.cache_creation), 12) + fmtCost(r.cost));
+      console.log(pad(r.sid, 38) + padNum(fmt(r.input), 12) + padNum(fmt(r.output), 12) + padNum(fmt(r.cache_read), 12) + padNum(fmt(r.cache_creation), 12) + fmtCost(r.cost));
     }
     const totInput = rows.reduce((s, r) => s + r.input, 0);
     const totOutput = rows.reduce((s, r) => s + r.output, 0);
@@ -206,14 +237,14 @@ function printTable({ rows, noMap }, byAgent) {
     const totWr = rows.reduce((s, r) => s + r.cache_creation, 0);
     const totCost = rows.reduce((s, r) => s + r.cost, 0);
     console.log('─'.repeat(92));
-    console.log(pad('TOTAL', 38) + pad(fmt(totInput), 12) + pad(fmt(totOutput), 12) + pad(fmt(totRead), 12) + pad(fmt(totWr), 12) + fmtCost(totCost));
+    console.log(pad('TOTAL', 38) + padNum(fmt(totInput), 12) + padNum(fmt(totOutput), 12) + padNum(fmt(totRead), 12) + padNum(fmt(totWr), 12) + fmtCost(totCost));
   }
   console.log('\nPricing (per MTok): haiku $0.80in/$4.00out/$0.08cr/$1.00cw  sonnet $3.00in/$15.00out/$0.30cr/$3.75cw  opus $15.00in/$75.00out/$1.50cr/$18.75cw');
   console.log('cr=cache_read  cw=cache_creation  fable assumed sonnet rates  default: sonnet');
 }
 
 function parseArgs(argv) {
-  const out = {};
+  const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') { out.help = true; continue; }
@@ -222,9 +253,28 @@ function parseArgs(argv) {
       const next = argv[i + 1];
       if (next !== undefined && !next.startsWith('--')) { out[k] = next; i++; }
       else out[k] = true;
+    } else {
+      out._.push(a);
     }
   }
   return out;
+}
+
+// Resolves a user-supplied sid (positional arg or --sid flag) to the claude_uuid
+// used as the key in token-usage.jsonl. Run-sids (e.g. "1783078917-04d530") are
+// looked up in session-map.jsonl; anything else is assumed to already be a
+// claude_uuid. Returns { sidFilter, error } — error is set when a run-sid has
+// no session-map.jsonl entry.
+function resolveSidArg(stDir, rawSid) {
+  if (!rawSid) return { sidFilter: null, error: null };
+  if (isRunSid(rawSid)) {
+    const resolved = resolveRunSid(stDir, rawSid);
+    if (!resolved) {
+      return { sidFilter: null, error: `unknown or unmapped run-sid '${rawSid}' (no matching entry in session-map.jsonl)` };
+    }
+    return { sidFilter: resolved, error: null };
+  }
+  return { sidFilter: rawSid, error: null };
 }
 
 function main() {
@@ -259,14 +309,28 @@ Set ADVISOR_STATE_DIR to override ~/.advisor/state.
     process.exit(0);
   }
 
+  const sd = stateDir();
+  const rawSid = args._[0] || args.sid || null;
+  const { sidFilter, error } = resolveSidArg(sd, rawSid);
+  if (error) {
+    process.stderr.write(`advisor-cost: ${error}\n`);
+    process.exit(1);
+  }
+
   const result = buildRows({
-    sidFilter: args.sid || null,
+    stateDirectory: sd,
+    sidFilter,
     lastN: args.last ? parseInt(args.last, 10) : null,
     byAgent: !!args['by-agent'],
   });
 
+  if (rawSid && !result.noMap && result.rows.length === 0) {
+    process.stderr.write(`advisor-cost: no usage found for sid '${rawSid}'\n`);
+    process.exit(1);
+  }
+
   printTable(result, !!args['by-agent']);
 }
 
-module.exports = { buildRows, estimateCost, priceForModel, lastPerSid, normalizeEntry, readTokenUsage, readSessionMap };
+module.exports = { buildRows, estimateCost, priceForModel, lastPerSid, normalizeEntry, readTokenUsage, readSessionMap, isRunSid, resolveRunSid, resolveSidArg };
 if (require.main === module) main();

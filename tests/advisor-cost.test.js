@@ -1,8 +1,12 @@
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, it, test, expect, beforeAll, afterAll } from 'bun:test';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { buildRows, estimateCost, priceForModel, lastPerSid, normalizeEntry } from '../bin/advisor-cost';
+import { spawnSync } from 'child_process';
+import { buildRows, estimateCost, priceForModel, lastPerSid, normalizeEntry, isRunSid, resolveRunSid, resolveSidArg } from '../bin/advisor-cost';
+
+const REPO = path.resolve(import.meta.dir, '..');
+const BIN = path.join(REPO, 'bin', 'advisor-cost');
 
 describe('priceForModel', () => {
   it('returns haiku rates including cache rates', () => {
@@ -188,5 +192,150 @@ describe('buildRows (integration)', () => {
     expect(advisor.count).toBe(1);
 
     fs.unlinkSync(mapPath);
+  });
+});
+
+describe('isRunSid', () => {
+  it('matches an advisor run-sid shape', () => {
+    expect(isRunSid('1783078917-04d530')).toBe(true);
+  });
+  it('rejects a claude session uuid', () => {
+    expect(isRunSid('aaaa1111-aaaa-1111-aaaa-111111111111')).toBe(false);
+  });
+});
+
+describe('resolveRunSid / resolveSidArg', () => {
+  let tmpDir, stateDir;
+
+  beforeAll(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'advisor-cost-resolve-test-'));
+    stateDir = path.join(tmpDir, 'state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'session-map.jsonl'), [
+      JSON.stringify({ run_sid: '1783078917-04d530', claude_uuid: 'aaaa1111-aaaa-1111-aaaa-111111111111', agent: 'coder' }),
+    ].join('\n') + '\n');
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('resolves a known run-sid to its claude_uuid', () => {
+    expect(resolveRunSid(stateDir, '1783078917-04d530')).toBe('aaaa1111-aaaa-1111-aaaa-111111111111');
+  });
+
+  it('returns null for an unmapped run-sid', () => {
+    expect(resolveRunSid(stateDir, '9999999999-deadbe')).toBe(null);
+  });
+
+  it('resolveSidArg passes through a plain claude uuid unchanged', () => {
+    const { sidFilter, error } = resolveSidArg(stateDir, 'aaaa1111-aaaa-1111-aaaa-111111111111');
+    expect(sidFilter).toBe('aaaa1111-aaaa-1111-aaaa-111111111111');
+    expect(error).toBe(null);
+  });
+
+  it('resolveSidArg resolves a run-sid via session-map', () => {
+    const { sidFilter, error } = resolveSidArg(stateDir, '1783078917-04d530');
+    expect(sidFilter).toBe('aaaa1111-aaaa-1111-aaaa-111111111111');
+    expect(error).toBe(null);
+  });
+
+  it('resolveSidArg returns an error for an unmapped run-sid', () => {
+    const { sidFilter, error } = resolveSidArg(stateDir, '9999999999-deadbe');
+    expect(sidFilter).toBe(null);
+    expect(error).toMatch(/unknown or unmapped/i);
+  });
+});
+
+describe('CLI: positional sid + --sid resolution (bug fix)', () => {
+  const SID_A = 'aaaa1111-aaaa-1111-aaaa-111111111111';
+  const SID_B = 'bbbb2222-bbbb-2222-bbbb-222222222222';
+  const RUN_SID_A = '1783078917-04d530';
+  const RUN_SID_B = '1783079000-1a2b3c';
+  const UNKNOWN_RUN_SID = '9999999999-deadbe';
+  const UNKNOWN_UUID = 'cccc3333-cccc-3333-cccc-333333333333';
+
+  let stateDir;
+
+  beforeAll(() => {
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'advisor-cost-cli-test-'));
+
+    const tokenUsage = [
+      { sid: SID_A, input_tokens: 600000000, output_tokens: 100, cache_read: 0, cache_creation: 0, total: 600000100, ts: 1 },
+      { sid: SID_B, input_tokens: 650000000, output_tokens: 200, cache_read: 0, cache_creation: 0, total: 650000200, ts: 2 },
+    ];
+    fs.writeFileSync(
+      path.join(stateDir, 'token-usage.jsonl'),
+      tokenUsage.map(e => JSON.stringify(e)).join('\n') + '\n'
+    );
+
+    const sessionMap = [
+      { run_sid: RUN_SID_A, claude_uuid: SID_A, agent: 'coder' },
+      { run_sid: RUN_SID_B, claude_uuid: SID_B, agent: 'researcher' },
+    ];
+    fs.writeFileSync(
+      path.join(stateDir, 'session-map.jsonl'),
+      sessionMap.map(e => JSON.stringify(e)).join('\n') + '\n'
+    );
+  });
+
+  afterAll(() => {
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  function run(args = []) {
+    return spawnSync('bun', [BIN, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, ADVISOR_STATE_DIR: stateDir },
+      timeout: 15000,
+    });
+  }
+
+  test('T1: positional run-sid resolves via session-map and filters to that session only', () => {
+    const r = run([RUN_SID_A]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(SID_A);
+    expect(r.stdout).not.toContain(SID_B);
+  });
+
+  test('T2: --sid flag with run-sid form also resolves through session-map', () => {
+    const r = run(['--sid', RUN_SID_B]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(SID_B);
+    expect(r.stdout).not.toContain(SID_A);
+  });
+
+  test('T3: positional plain claude uuid still filters directly (no session-map hop)', () => {
+    const r = run([SID_A]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(SID_A);
+    expect(r.stdout).not.toContain(SID_B);
+  });
+
+  test('T4: unknown/unmapped run-sid exits 1 with stderr error, no fallback to machine-wide total', () => {
+    const r = run([UNKNOWN_RUN_SID]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/unknown or unmapped/i);
+    expect(r.stdout).not.toContain(SID_A);
+    expect(r.stdout).not.toContain(SID_B);
+  });
+
+  test('T5: unknown claude uuid (no matching rows) exits 1 with stderr error', () => {
+    const r = run([UNKNOWN_UUID]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/no usage found/i);
+  });
+
+  test('T6: TOTAL row keeps large numeric columns separated, not run together', () => {
+    const r = run([]);
+    expect(r.status).toBe(0);
+    const totalLine = r.stdout.split('\n').find(l => l.startsWith('TOTAL'));
+    expect(totalLine).toBeDefined();
+    const numbers = totalLine.match(/[\d,]+/g);
+    // input totals to 1,250,000,000 (13 chars, wider than the 12-char column) and
+    // output totals to 300 — they must appear as distinct tokens, not merged
+    // into a single garbled run like "1,250,000,00300".
+    expect(numbers).toContain('1,250,000,000');
+    expect(numbers).toContain('300');
   });
 });
