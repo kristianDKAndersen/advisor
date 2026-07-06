@@ -70,3 +70,15 @@ Now issue `/compact`. The handover file and the checkpoint commit ensure the ses
 ## Recovery
 
 On the next session start, `session-start.js` surfaces the last handover file path. Read it and call `readSessionState(sid)` to restore `tier`, `decomposition[]`, `next_action`, and `synthesis_seq` without re-parsing the full channel history.
+
+A handover written by step 2 is unresolved by design — the work it describes isn't done yet, it's about to be interrupted by `/compact`. It stays OPEN (surfaced by `session-start.js` on every subsequent session start, per `lib/maintenance.js`'s `RESOLVED_RE` check) until a *later* session actually finishes the handed-over work.
+
+### Resolving a handover
+
+Once a successor session (this one, resumed, or a later one) has completed the work the handover describes, mark it resolved mechanically — don't hand-type a `FINAL OUTCOME:` line, since a remembered marker is exactly the kind of artifact that gets forgotten:
+
+```bash
+bin/handover-resolve <path-to-handover-file> --outcome "<one-line summary of what got completed>"
+```
+
+This appends `FINAL OUTCOME: <text>` to the file. `lib/maintenance.js`'s `newestUnresolvedHandover()` (and therefore the `session-start.js` OPEN-handover banner) will stop surfacing it, and `archiveResolvedHandovers()` will move it to `plans/_archive/` after 24h. Run it as soon as the handover's work is verifiably done — not at write time in step 2, since at that point the work is still pending.
