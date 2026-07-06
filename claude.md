@@ -83,6 +83,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
 
    Note: lessons and other vault notes due in the next 14 days are also surfaced by the SessionStart hook at the start of each session; the Step 5 search is still recommended for task-type-specific filtering.
 
+   Note: `bin/summon` also auto-injects the top-3 vault recall hits for the task text into every worker's bootstrap prompt (disable with `ADVISOR_VAULT_RECALL=0`); the manual search above remains the recommended path for task-type-specific lesson filtering.
+
    Use `/brief` to compose the brief — it validates all 5 required fields (objective, output, tools, scope, parallelism) and emits the `bin/summon` command. A brief missing any of these five fields produces duplicated work, gaps, or misinterpretation:
    - **Objective:** one sentence on what to answer (not the topic — the question)
    - **Output format:** what the deliverable looks like (bullet list of findings? markdown report? JSON? exact file name?)

@@ -267,3 +267,125 @@ test('listDue: uses parameterized DISMISSED_STATUSES (not string-interpolated in
   expect(body).not.toContain('_DISMISSED_SQL');
   expect(body).toContain('DISMISSED_STATUSES.map');
 });
+
+// memtrace-inspired weighted scoring
+test('searchNotes returns numeric score field, sorted descending', () => {
+  vault.writeNote('synthesis/score-test-1.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'Weighted scoring unique token ZQXW.');
+  const results = vault.searchNotes('ZQXW');
+  expect(results.length).toBeGreaterThan(0);
+  expect(typeof results[0].score).toBe('number');
+  for (let i = 1; i < results.length; i++) {
+    expect(results[i - 1].score).toBeGreaterThanOrEqual(results[i].score);
+  }
+});
+
+test('searchNotes legacy:true returns old raw-BM25 shape without score field', () => {
+  const results = vault.searchNotes('ZQXW', 10, { legacy: true });
+  expect(results.length).toBeGreaterThan(0);
+  expect(results[0].score).toBeUndefined();
+});
+
+test('searchNotes excludes superseded notes by default, includes with legacy:true', () => {
+  vault.writeNote('synthesis/superseded-old.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'Supersede unique token YVUT.');
+  vault.writeNote('synthesis/superseded-new.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'Replacement note YVUT.');
+  vault.supersedeNote('synthesis/superseded-old.md', 'synthesis/superseded-new.md');
+  const results = vault.searchNotes('YVUT');
+  expect(results.find(r => r.path === 'synthesis/superseded-old.md')).toBeUndefined();
+  const legacyResults = vault.searchNotes('YVUT', 10, { legacy: true });
+  expect(legacyResults.find(r => r.path === 'synthesis/superseded-old.md')).toBeDefined();
+});
+
+test('searchNotes halves score for status=stale notes', () => {
+  vault.writeNote('synthesis/stale-score-a.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'Stale scoring token WPQR fresh.');
+  vault.writeNote('synthesis/stale-score-b.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'Stale scoring token WPQR fresh.');
+  vault.setStatus('synthesis/stale-score-b.md', 'stale');
+  const results = vault.searchNotes('WPQR');
+  const a = results.find(r => r.path === 'synthesis/stale-score-a.md');
+  const b = results.find(r => r.path === 'synthesis/stale-score-b.md');
+  expect(a).toBeDefined();
+  expect(b).toBeDefined();
+  expect(b.score).toBeLessThan(a.score);
+});
+
+// supersession model
+test('supersedeNote sets superseded_by in frontmatter and DB', () => {
+  vault.writeNote('synthesis/sup-src.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'Supersede target content.');
+  vault.supersedeNote('synthesis/sup-src.md', 'synthesis/sup-dst.md');
+  const note = vault.readNote('synthesis/sup-src.md');
+  expect(note.fm.superseded_by).toBe('synthesis/sup-dst.md');
+});
+
+// staleness scan
+test('scanStale marks note stale when referenced absolute path is deleted; dryRun does not mutate', () => {
+  const scanDir = path.join(os.homedir(), '.advisor-vault-scan-test-1');
+  fs.mkdirSync(scanDir, { recursive: true });
+  const refFile = path.join(scanDir, 'scan-ref.txt');
+  fs.writeFileSync(refFile, 'ref content');
+  vault.writeNote('synthesis/scan-test-1.md', { type: 'synthesis', created_at: new Date(Date.now() - 1000).toISOString() }, `References ${refFile} for details.`);
+  fs.unlinkSync(refFile);
+
+  try {
+    const dry = vault.scanStale({ dryRun: true });
+    expect(dry.report.find(r => r.path === 'synthesis/scan-test-1.md' && r.action === 'marked-stale')).toBeDefined();
+    const noteAfterDry = vault.readNote('synthesis/scan-test-1.md');
+    expect(noteAfterDry.fm.status).not.toBe('stale');
+
+    const real = vault.scanStale({ dryRun: false });
+    expect(real.markedStale).toBeGreaterThan(0);
+    const noteAfterReal = vault.readNote('synthesis/scan-test-1.md');
+    expect(noteAfterReal.fm.status).toBe('stale');
+  } finally {
+    fs.rmSync(scanDir, { recursive: true, force: true });
+  }
+});
+
+test('scanStale clears stale status when references are intact and older than note', () => {
+  const scanDir = path.join(os.homedir(), '.advisor-vault-scan-test-2');
+  fs.mkdirSync(scanDir, { recursive: true });
+  const refFile = path.join(scanDir, 'scan-ref2.txt');
+  fs.writeFileSync(refFile, 'ref content');
+  const created = new Date(Date.now() + 60000).toISOString();
+  vault.writeNote('synthesis/scan-test-2.md', { type: 'synthesis', created_at: created, status: 'stale' }, `References ${refFile} for details.`);
+
+  try {
+    const result = vault.scanStale({ dryRun: false });
+    expect(result.cleared).toBeGreaterThan(0);
+    const note = vault.readNote('synthesis/scan-test-2.md');
+    expect(note.fm.status).not.toBe('stale');
+  } finally {
+    fs.rmSync(scanDir, { recursive: true, force: true });
+  }
+});
+
+test('advisor-vault scan CLI --dry-run exits 0', () => {
+  const result = spawnSync('bun', ['bin/advisor-vault', 'scan', '--dry-run'], {
+    encoding: 'utf8',
+    env: { ...process.env, ADVISOR_VAULT: tmpVaultRoot },
+    timeout: 10000,
+    cwd: path.resolve(import.meta.dirname, '..')
+  });
+  expect(result.status).toBe(0);
+});
+
+test('advisor-vault supersede CLI exits 0 and sets superseded_by', () => {
+  vault.writeNote('synthesis/cli-sup-src.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'CLI supersede test content.');
+  const result = spawnSync('bun', ['bin/advisor-vault', 'supersede', 'synthesis/cli-sup-src.md', 'synthesis/cli-sup-dst.md'], {
+    encoding: 'utf8',
+    env: { ...process.env, ADVISOR_VAULT: tmpVaultRoot },
+    timeout: 10000,
+    cwd: path.resolve(import.meta.dirname, '..')
+  });
+  expect(result.status).toBe(0);
+  const note = vault.readNote('synthesis/cli-sup-src.md');
+  expect(note.fm.superseded_by).toBe('synthesis/cli-sup-dst.md');
+});
+
+test('advisor-vault search --legacy CLI exits 0', () => {
+  const result = spawnSync('bun', ['bin/advisor-vault', 'search', '--text', 'ZQXW', '--legacy'], {
+    encoding: 'utf8',
+    env: { ...process.env, ADVISOR_VAULT: tmpVaultRoot },
+    timeout: 10000,
+    cwd: path.resolve(import.meta.dirname, '..')
+  });
+  expect(result.status).toBe(0);
+});

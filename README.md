@@ -360,6 +360,8 @@ bin/advisor-vault search --text '<3 keywords from task type>'
 
 Matching `[lesson]` entries are appended as a `Prior failure constraints:` block at the bottom of the brief, so the new worker inherits the constraint without rediscovering the failure mode.
 
+`bin/summon` also auto-injects the top-3 vault recall hits for the raw task text into every worker's bootstrap prompt (gated by `ADVISOR_VAULT_RECALL=0` to disable), but this manual search remains the recommended path when you need task-type-specific lesson filtering.
+
 **Trigger threshold:** lesson extraction is auto-triggered on the **2nd or subsequent** `overall_pass: false` evaluator verdict for the same task shape in a session — a single failure is treated as task-specific noise. Lessons are always negative-polarity (what to avoid); positive-polarity success notes are not stored.
 
 The vault is backed by an FTS5 SQLite index at `~/.advisor/vault/.cache/index.sqlite` and indexes synthesis records, session notes, and lessons. All three are written automatically — no manual indexing step.

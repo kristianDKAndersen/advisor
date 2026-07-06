@@ -5,7 +5,7 @@
 //   advisor-vault backlinks --note "sessions/1777631574-208ed7"
 //   advisor-vault path
 
-import { searchNotes, backlinks, listDue, listUnresolved, vaultRoot, rebuildIndex, deleteNote, previewDeleteNote, listHubs, listGaps, backfillVerdicts, retroLink, computeCommunities, listCommunities, embedNotes, pruneFixtures } from '../lib/vault.js';
+import { searchNotes, backlinks, listDue, listUnresolved, vaultRoot, rebuildIndex, deleteNote, previewDeleteNote, listHubs, listGaps, backfillVerdicts, retroLink, computeCommunities, listCommunities, embedNotes, pruneFixtures, scanStale, supersedeNote } from '../lib/vault.js';
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -17,16 +17,33 @@ function getFlag(flag, fallback) {
 }
 
 if (cmd === 'search') {
-  if (helpMode) { console.log('Usage: advisor-vault search --text <query> [--limit N]'); process.exit(0); }
+  if (helpMode) { console.log('Usage: advisor-vault search --text <query> [--limit N] [--legacy]'); process.exit(0); }
   const text = getFlag('--text', args[1]);
   const limit = parseInt(getFlag('--limit', '10'), 10);
-  if (!text) { console.error('Usage: advisor-vault search --text <query> [--limit N]'); process.exit(1); }
-  const results = searchNotes(text, limit);
+  const legacy = args.includes('--legacy');
+  if (!text) { console.error('Usage: advisor-vault search --text <query> [--limit N] [--legacy]'); process.exit(1); }
+  const results = searchNotes(text, limit, { legacy });
   if (!results.length) { console.log('No results.'); process.exit(0); }
   for (const r of results) {
-    console.log(`${r.path}  [${r.type}] ${r.created_at}`);
+    const scoreStr = typeof r.score === 'number' ? `  score=${r.score.toFixed(3)}` : '';
+    console.log(`${r.path}  [${r.type}] ${r.created_at}${scoreStr}`);
     console.log(`  ${r.snippet}`);
   }
+} else if (cmd === 'scan') {
+  if (helpMode) { console.log('Usage: advisor-vault scan [--dry-run]'); process.exit(0); }
+  const dryRun = args.includes('--dry-run');
+  const { scanned, markedStale, cleared, report } = scanStale({ dryRun });
+  console.log(`Scanned: ${scanned}  Marked stale: ${markedStale}  Cleared: ${cleared}${dryRun ? '  [dry-run]' : ''}`);
+  for (const r of report) {
+    if (r.action !== 'unchanged') console.log(`  [${r.action}] ${r.path}`);
+  }
+} else if (cmd === 'supersede') {
+  if (helpMode) { console.log('Usage: advisor-vault supersede <old> <new>'); process.exit(0); }
+  const oldName = args[1];
+  const newName = args[2];
+  if (!oldName || !newName) { console.error('Usage: advisor-vault supersede <old> <new>'); process.exit(1); }
+  supersedeNote(oldName, newName);
+  console.log(`Superseded: ${oldName} -> ${newName}`);
 } else if (cmd === 'backlinks') {
   if (helpMode) { console.log('Usage: advisor-vault backlinks --note <name>'); process.exit(0); }
   const note = getFlag('--note', args[1]);
@@ -170,6 +187,6 @@ if (cmd === 'search') {
   }
   if (pruned.length > 20) console.log(`  ... and ${pruned.length - 20} more`);
 } else {
-  console.error('Usage: advisor-vault <search|backlinks|path|due|unresolved|rebuild|embed|delete|hubs|gaps|backfill-verdicts|retro-link|communities|prune-fixtures> [options]');
+  console.error('Usage: advisor-vault <search|backlinks|path|due|unresolved|rebuild|embed|delete|hubs|gaps|backfill-verdicts|retro-link|communities|prune-fixtures|scan|supersede> [options]');
   process.exit(1);
 }
