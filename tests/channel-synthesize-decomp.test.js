@@ -103,3 +103,40 @@ test('synthesize when all existing entries are already synthesized pushes a new 
   expect(newEntry).toBeDefined();
   expect(newEntry.status).toBe('complete');
 }, TEST_TIMEOUT);
+
+// Regression: with two pending (synthesis_seq == null) decomposition entries,
+// synthesize must update the entry matching --worker-sid, not just the first
+// pending entry in array order.
+test('synthesize with two pending entries matches by worker sid, not first-pending-wins', () => {
+  const sid = `decomp-two-pending-${Date.now()}`;
+  createdSids.push(sid);
+
+  const runDir = path.join(tmpRuns, sid);
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(runDir, 'session.json'),
+    JSON.stringify({
+      schema_version: 2,
+      sid,
+      user_prompt: '',
+      tier: '',
+      decomposition: [
+        { role: 'coder', scope: 'task-a', status: 'in_progress', synthesis_seq: null, sid: 'worker-a' },
+        { role: 'coder', scope: 'task-b', status: 'in_progress', synthesis_seq: null, sid: 'worker-b' },
+      ],
+      decisions: [],
+      next_action: '',
+    }, null, 2)
+  );
+
+  const result = runSynthesize(sid, ['--seq', '77', '--worker-sid', 'worker-b']);
+  expect(result.status).toBe(0);
+
+  const state = readSessionState(sid);
+  const entryA = state.decomposition.find(d => d.sid === 'worker-a');
+  const entryB = state.decomposition.find(d => d.sid === 'worker-b');
+  expect(entryA.synthesis_seq).toBeNull();
+  expect(entryB).toBeDefined();
+  expect(entryB.synthesis_seq).toBe(77);
+  expect(entryB.status).toBe('complete');
+}, TEST_TIMEOUT);

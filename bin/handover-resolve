@@ -1,0 +1,54 @@
+#!/usr/bin/env bun
+// bin/handover-resolve — mechanically resolve a context-handover file written
+// by .claude/skills/pre-compact/SKILL.md, by appending a `FINAL OUTCOME: <text>`
+// line. lib/maintenance.js's RESOLVED_RE check (a plain content regex, not a
+// timing convention) treats any file matching that marker as resolved — this
+// CLI is the single place that marker gets written, so resolution stops
+// depending on someone remembering to type it.
+//
+// Run this from the SUCCESSOR session that actually finishes the handed-over
+// work (see the "Recovery" section of the pre-compact SKILL.md) — not at
+// handover-write time, since the work isn't done yet when the handover is written.
+//
+// Usage:
+//   handover-resolve <file> --outcome "<status text>"
+
+import fs from 'fs';
+import path from 'path';
+import { RESOLVED_RE } from '../lib/maintenance.js';
+
+const args = process.argv.slice(2);
+const helpMode = args.includes('-h') || args.includes('--help');
+
+function getFlag(flag, fallback) {
+  const idx = args.indexOf(flag);
+  return idx !== -1 ? args[idx + 1] : fallback;
+}
+
+const file = args[0] && !args[0].startsWith('--') ? args[0] : null;
+const outcome = getFlag('--outcome', null);
+
+if (helpMode) {
+  console.log('Usage: handover-resolve <file> --outcome "<status text>"');
+  process.exit(0);
+}
+if (!file || !outcome) {
+  console.error('Usage: handover-resolve <file> --outcome "<status text>"');
+  process.exit(1);
+}
+
+const abs = path.resolve(file);
+if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+  console.error(`handover-resolve: no such file: ${abs}`);
+  process.exit(1);
+}
+
+const content = fs.readFileSync(abs, 'utf8');
+if (RESOLVED_RE.test(content)) {
+  console.error(`handover-resolve: already resolved: ${abs}`);
+  process.exit(1);
+}
+
+const sep = content.endsWith('\n') ? '\n' : '\n\n';
+fs.appendFileSync(abs, `${sep}FINAL OUTCOME: ${outcome}\n`);
+console.log(`resolved ${abs}`);
