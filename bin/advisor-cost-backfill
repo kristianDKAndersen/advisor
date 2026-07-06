@@ -1,0 +1,110 @@
+#!/usr/bin/env node
+// advisor-cost-backfill — backfills token-usage.jsonl rows for worker
+// sessions whose Stop hook never fired.
+//
+// Root cause: a worker session runs its whole task as one agent turn and
+// self-terminates (close-tab) before that turn ends, so
+// .claude/hooks/stop-telemetry.js — wired into the worker's Stop hooks —
+// never actually gets invoked inside the worker. lib/channel.js now accrues
+// telemetry at synthesize time for new sessions; this script backfills every
+// already-mapped session that predates that fix (or whose synthesize-time
+// accrual itself failed, e.g. because the tab was closed before synthesize
+// ran).
+//
+// Iterates ~/.advisor/state/session-map.jsonl, skips claude_uuids already
+// present in token-usage.jsonl, and computes a row for every remaining
+// mapped uuid whose Claude Code transcript still exists on disk. Uses
+// lib/telemetry-backfill.js as the single computation engine (which in turn
+// reuses .claude/hooks/stop-telemetry.js for the actual summing).
+//
+// Usage:
+//   advisor-cost-backfill [--dry-run]
+//
+// Override state path with ADVISOR_STATE_DIR, runs root with
+// ADVISOR_RUNS_ROOT (both for testing; functionally identical in production).
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+  stateDir,
+  readSessionMapEntries,
+  alreadyRecordedUuids,
+  transcriptPathFor,
+  accrueForSid,
+} = require('../lib/telemetry-backfill');
+
+function runsRoot() {
+  return process.env.ADVISOR_RUNS_ROOT || path.join(os.homedir(), '.advisor', 'runs');
+}
+
+function readMetaWorkspace(runSid) {
+  const metaPath = path.join(runsRoot(), runSid, 'meta.json');
+  if (!fs.existsSync(metaPath)) return null;
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    return meta.workspace || null;
+  } catch {
+    return null;
+  }
+}
+
+function main() {
+  const dryRun = process.argv.includes('--dry-run');
+  const sd = stateDir();
+  const entries = readSessionMapEntries(sd);
+  const already = alreadyRecordedUuids(sd);
+
+  // One attempt per uuid; the last run_sid mapped to a given uuid wins.
+  const byUuid = new Map();
+  for (const e of entries) byUuid.set(e.claude_uuid, e.run_sid);
+
+  let backfilled = 0;
+  let skippedRecorded = 0;
+  let skippedNoWorkspace = 0;
+  let skippedNoTranscript = 0;
+
+  for (const [claudeUuid, runSid] of byUuid) {
+    if (already.has(claudeUuid)) {
+      skippedRecorded++;
+      continue;
+    }
+    const workspace = readMetaWorkspace(runSid);
+    if (!workspace) {
+      skippedNoWorkspace++;
+      console.error(`skip run_sid=${runSid} claude_uuid=${claudeUuid}: no workspace in meta.json`);
+      continue;
+    }
+    if (dryRun) {
+      const transcriptPath = transcriptPathFor(workspace, claudeUuid);
+      if (!fs.existsSync(transcriptPath)) {
+        skippedNoTranscript++;
+        continue;
+      }
+      console.log(`would backfill: run_sid=${runSid} claude_uuid=${claudeUuid}`);
+      backfilled++;
+      continue;
+    }
+    const result = accrueForSid(runSid, workspace, sd);
+    if (result.ok) {
+      backfilled++;
+      console.log(`backfilled: run_sid=${runSid} claude_uuid=${claudeUuid}`);
+    } else if (result.reason && result.reason.startsWith('transcript not found')) {
+      skippedNoTranscript++;
+    } else {
+      skippedNoWorkspace++;
+      console.error(`skip run_sid=${runSid} claude_uuid=${claudeUuid}: ${result.reason}`);
+    }
+  }
+
+  console.log(
+    `\nSummary: backfilled=${backfilled} ` +
+    `skipped_already_recorded=${skippedRecorded} ` +
+    `skipped_no_workspace=${skippedNoWorkspace} ` +
+    `skipped_no_transcript=${skippedNoTranscript} ` +
+    `total_mapped=${byUuid.size}` +
+    `${dryRun ? ' (dry-run)' : ''}`
+  );
+}
+
+main();
