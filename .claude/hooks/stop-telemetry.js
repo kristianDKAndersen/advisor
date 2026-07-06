@@ -6,7 +6,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const DEBUG_LOG = path.join(os.homedir(), '.advisor', 'state', 'stop-hook-debug.jsonl');
+// Override state path with ADVISOR_STATE_DIR for testing (matches bin/advisor-cost).
+function stateDir() {
+  return process.env.ADVISOR_STATE_DIR ||
+    path.join(os.homedir(), '.advisor', 'state');
+}
+
+const DEBUG_LOG = path.join(stateDir(), 'stop-hook-debug.jsonl');
 
 function debugLog(entry) {
   if (process.env.ADVISOR_DEBUG !== '1') return;
@@ -60,7 +66,7 @@ async function main() {
 
   const total_used = Object.values(breakdown).reduce((a, b) => a + b, 0);
 
-  const outDir = path.join(os.homedir(), '.advisor', 'state');
+  const outDir = stateDir();
   fs.mkdirSync(outDir, { recursive: true });
   debugLog({ ts: new Date().toISOString(), sid, phase: 'done', total_used, elapsed_ms: Date.now() - t0 });
   fs.appendFileSync(
