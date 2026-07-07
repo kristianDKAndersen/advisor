@@ -40,15 +40,29 @@ if [[ "$_is_tmux" == "1" ]]; then
   fi
   if [[ -n "${TMUX:-}" ]]; then
     if [[ "${ADVISOR_TMUX_MULTIPLEX:-}" == "1" ]]; then
+      # Use $TMUX_PANE only. Do NOT fall back to `tmux display-message -p
+      # '#{pane_id}'` — that returns the ATTACHED CLIENT's active pane, not
+      # this process's own pane, so it can kill an innocent live worker.
+      # If $TMUX_PANE is empty, no-op rather than guess.
       _pane="${TMUX_PANE:-}"
-      [[ -z "$_pane" ]] && _pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)
-      [[ -n "$_pane" ]] && tmux kill-pane -t "$_pane" 2>/dev/null || true
+      if [[ -n "$_pane" ]]; then
+        tmux kill-pane -t "$_pane" 2>/dev/null || true
+        _tab_trace tmux-kill -
+      else
+        _tab_trace no-pane-noop -
+      fi
     else
       _sess=$(tmux display-message -p '#S' 2>/dev/null || true)
-      [[ -n "$_sess" ]] && tmux kill-session -t "$_sess" 2>/dev/null || true
+      if [[ -n "$_sess" ]]; then
+        tmux kill-session -t "$_sess" 2>/dev/null || true
+        _tab_trace tmux-kill -
+      else
+        _tab_trace no-match -
+      fi
     fi
+  else
+    _tab_trace no-match -
   fi
-  if [[ -n "${_sess:-}" ]]; then _tab_trace tmux-kill -; else _tab_trace no-match -; fi
   exit 0
 fi
 
