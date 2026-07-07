@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ensureStopHook, parseTranscript, makeTmuxName, makeWindowName, ensureAdvisorSession, ensureTuiPane, pollCapturePane, reaperSweepOrphanSessions, reapStaleWorktrees, runLoadReapers, spawnHeadless } from '../lib/tmux-runner.js';
+import { ensureStopHook, parseTranscript, makeTmuxName, makeWindowName, ensureAdvisorSession, ensureTuiPane, pollCapturePane, pollSentinel, reaperSweepOrphanSessions, reapStaleWorktrees, runLoadReapers, spawnHeadless } from '../lib/tmux-runner.js';
 import { execFileSync } from 'child_process';
 
 const STOP_HOOK_COMMAND =
@@ -1125,4 +1125,129 @@ test('ensureTuiPane: placeholder new-window command contains stty -echo and new 
   const cmdStr = newWindow.join(' ');
   expect(cmdStr).toContain('stty -echo');
   expect(cmdStr).toContain('[advisor] holding tui window open');
+});
+
+// ── pollSentinel: cross-session sentinel ownership validation (FIX 1) ────────
+
+test('pollSentinel: accepts sentinel whose payload cwd matches ownerDir', async () => {
+  const sentinel = path.join(tmpDir, 'claude-i-owned.done');
+  const ownerDir = path.join(tmpDir, 'runs', 'sid-a', 'workspace');
+  fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+  fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: ownerDir, session_id: 'a' }));
+  fs.writeFileSync(sentinel, '');
+
+  const result = await pollSentinel(sentinel, 1000, 20, ownerDir);
+  expect(result).toBe(true);
+  // Legit payload must survive — not deleted.
+  expect(fs.existsSync(sentinel + '.json')).toBe(true);
+});
+
+test('pollSentinel: discards foreign-cwd sentinel (cross-session leak) and keeps polling for the real one', async () => {
+  const sentinel = path.join(tmpDir, 'claude-i-foreign.done');
+  const ownerDir = path.join(tmpDir, 'runs', 'sid-b', 'workspace');
+  const foreignDir = path.join(tmpDir, 'runs', 'sid-child', 'workspace');
+  fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+
+  // A child claude process (inherited CLAUDE_I_SENTINEL) writes its own Stop
+  // payload to the WORKER's sentinel path first — this is the exact leak
+  // scenario from the forensics (7 live workers killed 2026-07-07).
+  fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: foreignDir, session_id: 'child' }));
+  fs.writeFileSync(sentinel, '');
+
+  setTimeout(() => {
+    fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: ownerDir, session_id: 'owner' }));
+    fs.writeFileSync(sentinel, '');
+  }, 60);
+
+  const result = await pollSentinel(sentinel, 2000, 20, ownerDir);
+  expect(result).toBe(true);
+  const payload = JSON.parse(fs.readFileSync(sentinel + '.json', 'utf8'));
+  expect(payload.cwd).toBe(ownerDir); // must be the real owner's payload, not the foreign one
+});
+
+test('pollSentinel: without ownerDir arg (back-compat), returns true on first existence — no ownership check', async () => {
+  const sentinel = path.join(tmpDir, 'claude-i-nocheck.done');
+  fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: '/anywhere' }));
+  fs.writeFileSync(sentinel, '');
+
+  const result = await pollSentinel(sentinel, 1000, 20);
+  expect(result).toBe(true);
+});
+
+// ── reaperSweepOrphanSessions: 2h grace floor (FIX 2a) ───────────────────────
+
+test('reaperSweepOrphanSessions: spares a session younger than 2h even with no session.json and no live process', () => {
+  const runsDir = path.join(tmpDir, 'runs-grace-a');
+  fs.mkdirSync(runsDir, { recursive: true });
+  const nowSec = Math.floor(Date.now() / 1000);
+  const sid = `${nowSec}-fresh1`; // just provisioned — no run dir, no session.json yet
+
+  const killed = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'ls') return `advisor-${sid}\n`;
+    if (cmd === 'tmux' && args[0] === 'kill-session') {
+      killed.push(args[args.indexOf('-t') + 1]);
+      return '';
+    }
+    if (cmd === 'pgrep') throw new Error('not found'); // no live process — old code would kill
+    return '';
+  };
+
+  reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+  expect(killed).toHaveLength(0); // grace floor must spare it regardless of staleness signal
+});
+
+test('reaperSweepOrphanSessions: still kills a session older than the 2h grace floor with no live process', () => {
+  const runsDir = path.join(tmpDir, 'runs-grace-b');
+  fs.mkdirSync(runsDir, { recursive: true });
+  const oldSec = Math.floor(Date.now() / 1000) - 3 * 3600; // 3h old — past the grace floor
+  const sid = `${oldSec}-old001`;
+
+  const killed = [];
+  const execFn = (cmd, args) => {
+    if (cmd === 'tmux' && args[0] === 'ls') return `advisor-${sid}\n`;
+    if (cmd === 'tmux' && args[0] === 'kill-session') {
+      killed.push(args[args.indexOf('-t') + 1]);
+      return '';
+    }
+    if (cmd === 'pgrep') throw new Error('not found');
+    return '';
+  };
+
+  reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+  expect(killed).toContain(`advisor-${sid}`);
+});
+
+test('reaper advisor-window sweep: spares a matched window younger than 2h even with stale session.json', () => {
+  const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
+  process.env.ADVISOR_TMUX_MULTIPLEX = '1';
+  try {
+    const runsDir = path.join(tmpDir, 'runs-grace-win');
+    const nowSec = Math.floor(Date.now() / 1000);
+    const sid = `${nowSec}-freshw1`;
+    const runDir = path.join(runsDir, sid);
+    fs.mkdirSync(runDir, { recursive: true });
+    const sessionJsonPath = path.join(runDir, 'session.json');
+    fs.writeFileSync(sessionJsonPath, '{}');
+    const oldTime = new Date(Date.now() - 25 * 3600 * 1000); // stale mtime, but sid is fresh
+    fs.utimesSync(sessionJsonPath, oldTime, oldTime);
+
+    const killedWindows = [];
+    const execFn = (cmd, args) => {
+      if (cmd === 'tmux' && args[0] === 'ls') return '';
+      if (cmd === 'tmux' && args[0] === 'list-windows') return `coder-${sid}\n`;
+      if (cmd === 'tmux' && args[0] === 'kill-window') {
+        killedWindows.push(args[args.indexOf('-t') + 1]);
+        return '';
+      }
+      if (cmd === 'pgrep') throw new Error('not found');
+      return '';
+    };
+
+    reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
+    expect(killedWindows).toHaveLength(0); // fresh sid → grace floor spares it
+  } finally {
+    if (origMultiplex === undefined) delete process.env.ADVISOR_TMUX_MULTIPLEX;
+    else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
+  }
 });

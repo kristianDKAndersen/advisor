@@ -115,6 +115,7 @@ exit 0
       PATH: newPath,
       ADVISOR_TMUX_MULTIPLEX: '', // isolate from host env: test non-multiplex path
       TMUX: '/tmp/tmux-1000/default,12345,0',
+      TMUX_PANE: '%42',
       PPID: String(process.pid),
     },
   });
@@ -199,6 +200,7 @@ exit 0
       ADVISOR_TMUX: '1',
       ADVISOR_TMUX_MULTIPLEX: '1',
       TMUX: '/tmp/tmux-1000/default,12345,0',
+      TMUX_PANE: '%42',
       PPID: String(process.pid),
     },
   });
@@ -233,6 +235,7 @@ exit 0
       PATH: newPath,
       ADVISOR_TMUX_MULTIPLEX: '1',
       TMUX: '/tmp/tmux-1000/default,12345,0',
+      TMUX_PANE: '%42',
       PPID: String(process.pid),
     },
   });
@@ -280,7 +283,11 @@ exit 0
   expect(calls).not.toMatch(/kill-pane -t %99/);
 });
 
-test('close-tab: ADVISOR_TMUX_MULTIPLEX=1 with TMUX_PANE unset falls back to display-message for pane_id', () => {
+test('close-tab: ADVISOR_TMUX_MULTIPLEX=1 with TMUX_PANE unset is a no-op — must NOT kill the attached client active pane', () => {
+  // Regression test for the "close-tab active-pane misfire" bug: falling back to
+  // `tmux display-message -p '#{pane_id}'` returns the ATTACHED CLIENT's active
+  // pane, not this worker's own pane, so it could kill an innocent live worker.
+  // Fix: use $TMUX_PANE only; if empty, no-op (no kill-pane call at all).
   const log = path.join(tmpDir, 'pane-fallback.log');
   const tmuxBin = path.join(tmpDir, 'bin', 'tmux');
   fs.mkdirSync(path.join(tmpDir, 'bin'), { recursive: true });
@@ -301,7 +308,7 @@ exit 0
   const newPath = `${path.join(tmpDir, 'bin')}:${process.env.PATH}`;
   const envWithoutTmuxPane = { ...process.env };
   delete envWithoutTmuxPane.TMUX_PANE;
-  spawnSync('bash', [CLOSE_TAB], {
+  const result = spawnSync('bash', [CLOSE_TAB], {
     env: {
       ...envWithoutTmuxPane,
       PATH: newPath,
@@ -313,7 +320,8 @@ exit 0
   });
 
   const calls = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
-  expect(calls).toMatch(/kill-pane -t %42/);
+  expect(calls).not.toMatch(/kill-pane/); // must never kill the active-client pane fallback
+  expect(result.status).toBe(0);
 });
 
 test('close-tab: ADVISOR_TMUX_MULTIPLEX=1 + TMUX + session name "advisor-foo" does NOT take tmux branch', () => {
@@ -338,6 +346,7 @@ exit 0
       PATH: newPath,
       ADVISOR_TMUX_MULTIPLEX: '1',
       TMUX: '/tmp/tmux-1000/default,12345,0',
+      TMUX_PANE: '%42',
       PPID: String(process.pid),
     },
   });
