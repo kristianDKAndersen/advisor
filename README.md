@@ -32,7 +32,8 @@ Workers run in isolated, ephemeral workspaces. Durable output lands in `$OUTPUT_
 ```
 bin/
   _worktree-capture.sh  # capture-before-remove helper — snapshots a coder worktree's changed+untracked files into $OUTPUT_DIR before removal (sourced, internal)
-  advisor-cost        # per-session cost report — reads ~/.advisor/state/token-usage.jsonl and prints token counts + estimated cost by session
+  advisor-cost        # per-session cost report — reads ~/.advisor/state/token-usage.jsonl and prints token counts + estimated cost by session; --by-agent aggregates by agent name (requires session-map.jsonl)
+  advisor-cost-backfill  # backfill token-usage.jsonl rows for worker sessions whose Stop hook never fired and whose synthesize-time accrual predates or missed the fix (--dry-run)
   advisor-list        # list all sessions under ~/.advisor/runs/ (--json, --repo, --agent)
   advisor-observe     # tail a session's outbox; emits JSON per message; exits on result/error/timeout (--after, --max-wait, --poll)
   advisor-schedule    # launch autonomous loops detached in a tmux window (--sid, --interval, --task, --once)
@@ -45,8 +46,10 @@ bin/
   browser-launch      # start Chrome and browser daemon, print session JSON (internal)
   browser-state       # read current browser DOM state from the daemon (internal)
   browser-stop        # stop browser daemon and Chrome for a session (internal)
-  close-tab           # close current macOS Terminal tab (called by workers on self-terminate)
+  close-tab           # close current macOS Terminal tab (called by workers on self-terminate); in ADVISOR_TMUX_MULTIPLEX=1 mode, kills only $TMUX_PANE (never falls back to the attached client's active pane, which could kill an unrelated live worker)
   close-worker-tab    # close a specific worker's tab by SID (called by Advisor post-result)
+  advisor-terminate   # atomic terminate + close-worker-tab in one call
+  handover-resolve    # resolve a context-handover file by appending "FINAL OUTCOME: <text>" (run from the successor session, not at handover-write time)
   run-pipeline        # pipeline orchestrator (internal)
   summon              # provision + open a worker session in a new Terminal tab; flags: --agent, --task, --goal, --model, --intelligence, --ensemble, --allowed-tools, --sub-team, --sub-team-model, --timeout
   summon-parallel     # fan out multiple briefs to parallel worker sessions (--briefs <path.json>)
@@ -145,6 +148,10 @@ skills/
 | `vault-curator` | Curates vault notes by deduplication — walks notes matching `scope_glob`, flags or merges pairs whose similarity exceeds `similarity_threshold`, and produces a curation report |
 | `brainstormer` | Facilitates structured product ideation sessions using a 6-stage stage-gated model (Frame → Discover → Focus → Generate → Decide → Validate) that prevents premature convergence through enforced phase separation, technique rotation, and an explicit idea ledger; produces `ideas.md` + `session.md` |
 | `doc-agent` | Batch-processes unprocessed entries from `~/.advisor/doc-queue.jsonl` and updates the nearest `AGENTS.md` for each affected directory in the repo; skips when queue is empty |
+
+### Advisor-side skills (`.claude/skills/`)
+
+Not to be confused with worker-facing `skills/` above — these are invoked directly in the Advisor's own session: `/observe` (canonical outbox-watching pattern), `/pre-compact` (pre-flight checklist before manual `/compact`), `/context-timeline` (launches `bin/advisor-timeline` for the current session).
 
 ## Creative Council Mode
 
@@ -255,6 +262,12 @@ Each session writes `~/.advisor/runs/<sid>/session.json` — the recovery checkp
 
 Read with `readSessionState(sid)` · Update with `updateSessionState(sid, patchFn)` — both from `lib/session.js`.
 
+`session.json` is written twice: an initial `status:'in-flight'` stub at provision time (`bin/summon`), then updated per synthesize call. This closes a race where a session younger than the orphan-reaper's grace floor (below) had no `session.json` yet.
+
+## Token-economy bootstrap injection
+
+`lib/summon.js` injects a token-frugality block into every worker's bootstrap prompt via `lib/eco-rules.js` — ECO-CORE for most agents, ECO-REVIEW (a completeness-preserving variant) for exhaustiveness-critical agents (`code-reviewer`, `evaluator`, `tournament-evaluator`, `fact-checker`, per the `ECO_REVIEW_AGENTS` set in `lib/eco-rules.js`). Disable globally with `ADVISOR_ECO=0`.
+
 ## Hooks
 
 Seven hook commands are registered across five lifecycle events in `.claude/settings.json`:
@@ -265,12 +278,12 @@ Seven hook commands are registered across five lifecycle events in `.claude/sett
 | `workspace-guard.js` | `PreToolUse` | `Edit\|Write` | Rejects edits that would write outside the session's designated workspace; prevents accidental clobbering of other sessions' output. |
 | inline `session.json` updater | `PostToolUse` | `Bash` | Detects `channel.js synthesize` calls by inspecting `CLAUDE_TOOL_INPUT`; extracts `--next` directive and patches `next_action` in `session.json` atomically. |
 | `test-on-edit.js` | `PostToolUse` | `Edit` | Runs the project test suite after any file edit; surfaces test failures inline so the worker sees red/green in the same turn as the edit. |
-| `stop-telemetry.js` | `Stop` | — | Reads `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, sums all four token fields, and appends a record to `~/.advisor/state/token-usage.jsonl` for cross-session cost tracking. |
+| `stop-telemetry.js` | `Stop` | — | Reads `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, sums all four token fields, and appends a record to `~/.advisor/state/token-usage.jsonl` for cross-session cost tracking. Fires reliably for the Advisor's own session but **not** inside worker sessions, which self-terminate via `close-tab` before their turn ends and never emit `Stop`. `bun lib/channel.js synthesize` now accrues telemetry for the worker directly (`lib/telemetry-backfill.js`) as the primary path for worker token counts. |
 | `git add -A && git commit …` | `PreCompact` | — | `git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"` — preserves session state across context resets. Note GH#13572: does not fire on manual `/compact`; the Stop hook covers that path. |
 
 **Transcript compaction (`lib/compactor.js`):** a standalone PreCompact hook entry point. Invoked directly, it reads `{transcript_path}` from stdin, repairs orphaned `tool_use`/`tool_result` pairing (`repairToolUseResultPairing`), runs the 4-phase `compactMessages` pipeline — prune tool_results → trim to a user-turn boundary within the token budget → summarize → sanitize — and rewrites the transcript in place via atomic tmp+rename. The PreCompact hook registered in `.claude/settings.json` is the git checkpoint above; `compactor.js` is also importable (`compactMessages`, `repairToolUseResultPairing`, `summarizeInStages`) for programmatic compaction.
 
-**Worker PostToolUse hooks (opt-in):** Three hooks in `lib/hooks/` (`worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) are installed in all 16 `spawns/*/.claude/settings.json` files, gated by `ADVISOR_WORKER_HOOKS` (default 0). When enabled, they automate the trace/recv/close-tab boilerplate; when disabled, workers rely on the `/worker-protocol` skill for manual handling. See the active-experiment bullet in `CLAUDE.md` for rollout status.
+**Worker PostToolUse hooks (default-on):** Three hooks in `lib/hooks/` (`worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) are installed in all 16 `spawns/*/.claude/settings.json` files. `ADVISOR_WORKER_HOOKS` is now promoted to ALL agents via the `WORKER_HOOKS_ALLOWLIST` expansion in `lib/summon.js` (default-on) — every summoned worker receives hook coverage automatically, no per-agent `settings.json` changes needed. To disable for a specific agent type, remove it from `WORKER_HOOKS_ALLOWLIST` in `lib/summon.js`. The hooks automate the trace/recv/close-tab boilerplate; the `/worker-protocol` skill remains the fallback for manual handling if hooks are absent.
 
 **Coder-only PreToolUse hook:** `branch-guard.js` in `lib/hooks/` blocks `Edit` and `Write` calls when the coder worktree is on the wrong branch. It derives the expected branch `ws/<sid>` from the `INBOX` environment variable (by parsing `/runs/<sid>/channel`), and resolves the workspace via `CLAUDE_PROJECT_DIR` or `process.cwd()`. Fails open on every ambiguous case (non-`Edit`/`Write` tool, `INBOX` unset, workspace not a git repo, detached HEAD); blocks (exit 2) only when git returns a non-empty branch that differs from `ws/<sid>`.
 
@@ -329,7 +342,7 @@ Ctrl-b w                                      # interactive window picker
 
 ### Cleanup
 
-Workers self-terminate on completion. `bin/close-worker-tab <sid>` (called automatically by synthesize) kills the worker's pane (located via the `@advisor_sid` pane tag) or window; the window collapses when its last pane exits. A reaper sweeps stale orphan windows and sessions (>24h, no live process) at module load, intentionally skipping `ensemble-*` and `tui` windows whose lifecycle is managed separately. A second module-load reaper captures-then-removes leaked coder worktrees (see Worktree durability below); both reapers are disabled by `ADVISOR_NO_REAPER=1`.
+Workers self-terminate on completion. `bin/close-worker-tab <sid>` (called automatically by synthesize) kills the worker's pane (located via the `@advisor_sid` pane tag) or window; the window collapses when its last pane exits. A reaper sweeps stale orphan windows and sessions (>24h, no live process) at module load, intentionally skipping `ensemble-*` and `tui` windows whose lifecycle is managed separately. A second reaper (`reaperSweepOrphanSessions`) kills orphaned `advisor-*` tmux sessions whose `session.json` is missing/stale (>24h) and has no live process — but never touches a session younger than 2h, since `session.json` may not exist yet for a session still mid-provision. A third module-load reaper captures-then-removes leaked coder worktrees (see Worktree durability below); all reapers are disabled by `ADVISOR_NO_REAPER=1`.
 
 ## Worktree durability
 
@@ -337,6 +350,7 @@ Coder workspaces are real git worktrees (branch `ws/<sid>`), so uncommitted code
 
 - **Capture-before-remove.** Before any coder worktree is force-removed, `bin/_worktree-capture.sh` snapshots its changed + untracked files into `$OUTPUT_DIR/worktree-capture/`. Fail-closed: if capture fails, a `CAPTURE_FAILED` marker is written and removal is skipped — un-captured work is never destroyed (operator escape hatch: `ADVISOR_FORCE_REMOVE_UNCAPTURED=1`). Used by both `bin/close-worker-tab` (synthesize-driven teardown) and the orphan reaper. Non-worktree (copyDir) workspaces are a graceful no-op.
 - **Reaper race protection.** `reapStaleWorktrees` (`lib/tmux-runner.js`) captures-then-removes leaked `ws/<sid>` worktrees at module load, capped at 25 per sweep so a leaked backlog can never stall import. Mid-provision worktrees are spared: a worktree with no `session.json` is skipped (provisioning may still be in flight), as is any worktree younger than ~1h (grace floor derived from the sid's unix-timestamp prefix). `bin/summon` exports `ADVISOR_NO_REAPER=1` during provisioning so module loads triggered by summon itself never reap; the test harness sets the same flag via `tests/setup-no-reaper.js` (wired in `bunfig.toml`).
+- **Sentinel ownership validation.** `pollSentinel` (`lib/tmux-runner.js`) validates that the Stop-hook sentinel's JSON payload actually belongs to the polling worker (matches the expected `ownerDir`/`cwd`); a foreign or mismatched payload is discarded rather than accepted, preventing one worker's Stop hook from falsely completing another's poll.
 - **Stale-lock recovery and atomic writes.** The session and seq locks in `lib/channel.js` reclaim locks left behind by hard-killed processes, and `lib/compactor.js` rewrites transcripts via write-temp-then-rename, so a crash mid-operation can neither wedge the channel nor corrupt a transcript.
 
 ## Advisor model (per worker)
