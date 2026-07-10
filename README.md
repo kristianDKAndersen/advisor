@@ -126,10 +126,20 @@ skills/
 
 ## Quick start
 
-1. Open this repo in Claude Code. The `.claude/settings.json` activates the Advisor harness and prints an agent banner on session start.
-2. Describe your task. Advisor classifies it, decomposes it, and summons workers automatically.
-3. Each worker opens in a new macOS Terminal tab and reports back via the JSONL channel.
-4. When a worker delivers `result`, the SYNTHESIS REQUIRED block appears. Run `/synth` with the four fields filled in. (`bin/close-worker-tab <sid>` is auto-called by synthesize; manual fallback only.)
+From your repo's directory:
+
+```bash
+claude                           # Open Claude Code
+/advisor "your task description" # Launch the Advisor
+```
+
+(`/advisor` is a custom command at `~/.claude/commands/advisor.md` — run from any repo to activate the Advisor for that repo. Task description is optional; describe it in the chat after if you prefer.)
+
+Then:
+
+1. Advisor classifies your task, decomposes it, and summons workers automatically.
+2. Each worker opens in a new macOS Terminal tab and reports back via the JSONL channel.
+3. When a worker delivers `result`, the SYNTHESIS REQUIRED block appears. Run `/synth` with the four fields filled in. (`bin/close-worker-tab <sid>` is auto-called by synthesize; manual fallback only.)
 
 ## Agents catalog
 
