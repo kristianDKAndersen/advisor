@@ -83,7 +83,7 @@ Append-only JSONL channel protocol. Exports `send`, `recv`, `tail`, and `synthes
 
 ## summon.js
 
-Provisions worker sessions: composes bootstrap prompts, writes `launch.sh`, and opens a Terminal tab. Coder agents receive a git worktree (branch `ws/<sid>`); all other agents receive a plain directory copy. The `WORKER_HOOKS_ALLOWLIST` array controls which agent types receive PostToolUse hooks.
+Provisions worker sessions: composes bootstrap prompts, writes `launch.sh`, and opens a Terminal tab. Coder agents receive a git worktree (branch `ws/<sid>`); all other agents receive a plain directory copy. `injectWorkerHooks()` unconditionally injects PostToolUse/SessionStart/Stop hooks for all agent types and sets `ADVISOR_WORKER_HOOKS=1` in the worker environment — there is no allowlist; every summoned worker receives the trace/inbox-poll/auto-close hooks.
 
 ## vault.js
 

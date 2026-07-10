@@ -1,7 +1,7 @@
 // tests/summon-intelligence-map.test.js
 // Tests for adapter/intelligence-map.json band partition — intentional 7-band layout:
-// [0,29] haiku/low, [30,49] haiku/high, [50,69] sonnet-4-6/medium, [70,84] sonnet-4-6/high,
-// [85,89] opus-4-8/medium, [90,94] opus-4-8/high, [95,100] fable-5/high.
+// [0,29] haiku/low, [30,49] haiku/high, [50,69] sonnet-5/medium, [70,84] sonnet-5/high,
+// [85,89] opus-4-8/medium, [90,94] opus-4-8/high, [95,100] opus-4-8/max.
 
 import { test, expect } from 'bun:test';
 import { resolveIntelligence } from '../lib/summon.js';
@@ -35,26 +35,26 @@ test('score 49 resolves to haiku high band (upper boundary)', () => {
 // Band 3: sonnet medium [50, 69]
 test('score 50 resolves to sonnet medium band (lower boundary)', () => {
   const r = resolveIntelligence(50);
-  expect(r.model).toBe('claude-sonnet-4-6');
+  expect(r.model).toBe('claude-sonnet-5');
   expect(r.reasoning).toBe('medium');
 });
 
 test('score 69 resolves to sonnet medium band (upper boundary)', () => {
   const r = resolveIntelligence(69);
-  expect(r.model).toBe('claude-sonnet-4-6');
+  expect(r.model).toBe('claude-sonnet-5');
   expect(r.reasoning).toBe('medium');
 });
 
 // Band 4: sonnet high [70, 84]
 test('score 70 resolves to sonnet high band (lower boundary)', () => {
   const r = resolveIntelligence(70);
-  expect(r.model).toBe('claude-sonnet-4-6');
+  expect(r.model).toBe('claude-sonnet-5');
   expect(r.reasoning).toBe('high');
 });
 
 test('score 84 resolves to sonnet high band (upper boundary)', () => {
   const r = resolveIntelligence(84);
-  expect(r.model).toBe('claude-sonnet-4-6');
+  expect(r.model).toBe('claude-sonnet-5');
   expect(r.reasoning).toBe('high');
 });
 
@@ -84,26 +84,26 @@ test('score 94 resolves to opus high band (upper boundary)', () => {
   expect(r.reasoning).toBe('high');
 });
 
-// Band 7: fable-5 [95, 100]
-test('score 95 resolves to fable-5 band (lower boundary)', () => {
+// Band 7: opus-4-8 max [95, 100]
+test('score 95 resolves to opus-4-8 max band (lower boundary)', () => {
   const r = resolveIntelligence(95);
-  expect(r.model).toBe('claude-fable-5');
-  expect(r.reasoning).toBe('high');
+  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.reasoning).toBe('max');
 });
 
-test('score 100 resolves to fable-5 band (upper boundary)', () => {
+test('score 100 resolves to opus-4-8 max band (upper boundary)', () => {
   const r = resolveIntelligence(100);
-  expect(r.model).toBe('claude-fable-5');
-  expect(r.reasoning).toBe('high');
+  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.reasoning).toBe('max');
 });
 
 // Model string must not contain literal quote characters
-test('fable-5 model string contains no single-quote characters', () => {
+test('top-band (opus-4-8) model string contains no single-quote characters', () => {
   const r = resolveIntelligence(95);
   expect(r.model).not.toContain("'");
 });
 
-test('fable-5 model string contains no double-quote characters', () => {
+test('top-band (opus-4-8) model string contains no double-quote characters', () => {
   const r = resolveIntelligence(95);
   expect(r.model).not.toContain('"');
 });

@@ -68,12 +68,14 @@ lib/
 adapter/
   intelligence-map.json  # 7-band tier→model+reasoning manifest used by --intelligence flag (haiku-4-5 → sonnet-4-6 → opus-4-8 → fable-5 at [95,100])
 spawns/
-  browser/            # (each contains CLAUDE.md that defines the worker's role)
+  brainstormer/       # (each contains CLAUDE.md that defines the worker's role)
+  browser/
   code-reviewer/
   coder/
   creative/
   deep-researcher/
   diff-walker/
+  doc-agent/
   evaluator/
   fact-checker/
   frontend/
@@ -85,19 +87,22 @@ spawns/
   tournament-evaluator/
   vault-curator/
 skills/
-  advisor-doctor/     # /advisor-doctor — one-shot diagnosis of a stalled advisor session
-  brief/              # /brief — validates fields and emits bin/summon command (--allowed-tools)
-  extract-lesson/     # /extract-lesson — post-mortem analyst; writes negative-polarity lesson notes
-  sub-teams/          # /sub-teams — orchestrates a delegator + N teammates via the Task tool
-  synth/              # /synth — validates fields and runs channel.js synthesize
-  tournament/         # /tournament — parallel TDD tournament orchestrator
-  vault-due/          # /vault-due — act on the SessionStart vault-due banner (done / snooze / archive)
-  worker-protocol/    # /worker-protocol — inbox polling, tracing, self-terminate rules
+  advisor-doctor/           # /advisor-doctor — one-shot diagnosis of a stalled advisor session
+  ai-interaction-principles/ # /ai-interaction-principles — 39 human-AI interaction design principles checklist for user-facing AI features
+  brief/                    # /brief — validates fields and emits bin/summon command (--allowed-tools)
+  extract-lesson/           # /extract-lesson — post-mortem analyst; writes negative-polarity lesson notes
+  sub-teams/                # /sub-teams — orchestrates a delegator + N teammates via the Task tool
+  synth/                    # /synth — validates fields and runs channel.js synthesize
+  tournament/               # /tournament — parallel TDD tournament orchestrator
+  vault-due/                # /vault-due — act on the SessionStart vault-due banner (done / snooze / archive)
+  worker-protocol/          # /worker-protocol — inbox polling, tracing, self-terminate rules
 .claude/
   settings.json       # Advisor harness config (permissions, hooks, env vars)
   hooks/              # SessionStart banner (vault-due next 14d + last handover), PostToolUse session.json updater, statusline
   skills/
     context-timeline/ # /context-timeline — triggers bin/advisor-timeline for the current session
+    observe/          # /observe — live session observation mode
+    pre-compact/      # /pre-compact — manual pre-compaction checkpoint
 ~/.advisor/runs/<sid>/
   channel/inbox.jsonl   # Advisor → worker
   channel/outbox.jsonl  # worker → Advisor
@@ -199,16 +204,7 @@ Skills are installed to `~/.claude/skills/` by `bin/summon` and invoked with a s
 | `/tournament` | Runs a parallel TDD tournament — summons N coder workers each with a different strategy, evaluates all against a shared test suite via `tournament-evaluator`, and applies the winning implementation; uses `bin/tournament` |
 | `/advisor-doctor` | One-shot diagnosis of a stalled advisor session — inspects `session.json`, the recent outbox tail, tmux panes, processes, and sentinel files |
 | `/vault-due` | Acts on the SessionStart vault-due banner — subcommands `done <note>`, `snooze <note> <days>`, `archive <note>` |
-
-## Reference docs
-
-The `docs/` directory contains reference materials for advanced features:
-
-| File | Description |
-|------|-------------|
-| `docs/tournament-contract.md` | Tournament protocol specification — defines the contract between spec agent, coder workers, and tournament-evaluator |
-| `docs/tournament-delta.md` | Tournament protocol changelog and delta from prior versions |
-| `docs/specs/` | Additional specification documents |
+| `/ai-interaction-principles` | 39 human-AI interaction design principles checklist (Bakusevych/UX Collective 2026) for briefing or reviewing user-facing AI features — chatbots, agent products, AI-assisted workflows |
 
 ## Channel protocol
 
@@ -283,7 +279,7 @@ Seven hook commands are registered across five lifecycle events in `.claude/sett
 
 **Transcript compaction (`lib/compactor.js`):** a standalone PreCompact hook entry point. Invoked directly, it reads `{transcript_path}` from stdin, repairs orphaned `tool_use`/`tool_result` pairing (`repairToolUseResultPairing`), runs the 4-phase `compactMessages` pipeline — prune tool_results → trim to a user-turn boundary within the token budget → summarize → sanitize — and rewrites the transcript in place via atomic tmp+rename. The PreCompact hook registered in `.claude/settings.json` is the git checkpoint above; `compactor.js` is also importable (`compactMessages`, `repairToolUseResultPairing`, `summarizeInStages`) for programmatic compaction.
 
-**Worker PostToolUse hooks (default-on):** Three hooks in `lib/hooks/` (`worker-trace.js`, `worker-inbox-poll.sh`, `worker-auto-close.sh` — ordered H3→H1→H2) are installed in all 16 `spawns/*/.claude/settings.json` files. `ADVISOR_WORKER_HOOKS` is now promoted to ALL agents via the `WORKER_HOOKS_ALLOWLIST` expansion in `lib/summon.js` (default-on) — every summoned worker receives hook coverage automatically, no per-agent `settings.json` changes needed. To disable for a specific agent type, remove it from `WORKER_HOOKS_ALLOWLIST` in `lib/summon.js`. The hooks automate the trace/recv/close-tab boilerplate; the `/worker-protocol` skill remains the fallback for manual handling if hooks are absent.
+**Worker hooks (default-on, injected at provision time):** Five hooks in `lib/hooks/` are injected into every worker's ephemeral workspace `.claude/settings.json` by `lib/summon.js` (`injectWorkerHooks`) — they are **not** stored statically in `spawns/*/.claude/settings.json`. The five hooks: `worker-trace.js` (`PostToolUse`), `worker-inbox-poll.sh` (`PostToolUse`), `worker-auto-close.sh` (`PostToolUse`, `Bash`-only), `worker-session-map.sh` (`SessionStart`), and `worker-result-check.js` (`Stop`). `ADVISOR_WORKER_HOOKS=1` is also set in the worker env by the same code path so the `/worker-protocol` skill's manual trace step is automatically skipped. The hooks automate trace/recv/close-tab boilerplate; `/worker-protocol` remains the fallback if hooks are absent.
 
 **Coder-only PreToolUse hook:** `branch-guard.js` in `lib/hooks/` blocks `Edit` and `Write` calls when the coder worktree is on the wrong branch. It derives the expected branch `ws/<sid>` from the `INBOX` environment variable (by parsing `/runs/<sid>/channel`), and resolves the workspace via `CLAUDE_PROJECT_DIR` or `process.cwd()`. Fails open on every ambiguous case (non-`Edit`/`Write` tool, `INBOX` unset, workspace not a git repo, detached HEAD); blocks (exit 2) only when git returns a non-empty branch that differs from `ws/<sid>`.
 

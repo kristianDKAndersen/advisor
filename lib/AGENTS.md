@@ -24,7 +24,7 @@ Append-only JSONL message channel and synthesis runner.
 Provisions and launches worker sessions.
 
 - `provisionCoderWorktree()` — creates an isolated git worktree for coder workers
-- `injectWorkerHooks()` — injects per-worker hook configuration; `doc-agent` is in `WORKER_HOOKS_ALLOWLIST` (line 578) so it receives the worker-hooks environment
+- `injectWorkerHooks()` — unconditionally injects PostToolUse/SessionStart/Stop hooks for all agent types and sets `ADVISOR_WORKER_HOOKS=1`; there is no allowlist — every summoned agent receives the worker-hooks environment
 - `composeBootstrapPrompt()` / `composeTaskBody()` — assembles the task prompt sent to the worker
 - Skill bundle merging at lines 501–534 — agent-private skills from `spawns/<agent>/.claude/skills/` are merged into the worker's Claude config at summon time
 - consumed by `tests/summon-skill-expand.test.js`, `tests/summon-tier-skills.test.js`, and integration tests

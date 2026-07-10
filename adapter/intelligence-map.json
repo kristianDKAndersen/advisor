@@ -4,10 +4,10 @@
   "bands": [
     { "low": 0,  "high": 29,  "model": "claude-haiku-4-5-20251001", "reasoning": "low" },
     { "low": 30, "high": 49,  "model": "claude-haiku-4-5-20251001", "reasoning": "high" },
-    { "low": 50, "high": 69,  "model": "claude-sonnet-4-6",         "reasoning": "medium" },
-    { "low": 70, "high": 84,  "model": "claude-sonnet-4-6",         "reasoning": "high" },
+    { "low": 50, "high": 69,  "model": "claude-sonnet-5",           "reasoning": "medium" },
+    { "low": 70, "high": 84,  "model": "claude-sonnet-5",           "reasoning": "high" },
     { "low": 85, "high": 89,  "model": "claude-opus-4-8",           "reasoning": "medium" },
     { "low": 90, "high": 94,  "model": "claude-opus-4-8",           "reasoning": "high" },
-    { "low": 95, "high": 100, "model": "claude-fable-5",            "reasoning": "high" }
+    { "low": 95, "high": 100, "model": "claude-opus-4-8",           "reasoning": "max" }
   ]
 }

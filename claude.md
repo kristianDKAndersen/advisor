@@ -55,6 +55,17 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
      Then match to the table. If criteria 1 and 2 point to different tiers, pick the higher one.
    - **Role distinction:** if spawning multiple workers, name each one's distinct angle so they don't duplicate searches. E.g., 'Worker A: current regulatory landscape. Worker B: historical precedents. Worker C: competitor approaches.' Roles that overlap produce wasted calls and conflicting findings.
    - **Which tools fit:** Web search for broad external questions; direct WebFetch for known authoritative URLs; Grep/Read for codebase questions. Name this in the brief.
+   - **Intelligence score (`--intelligence`):** grade the task to a 0-100 score, then pass it to `bin/summon`; it resolves through `adapter/intelligence-map.json` to a model + reasoning band. Compute:
+
+     `score = tier_base + reasoning_delta + role_delta + blast_delta`, then clamp to `[0,100]`.
+
+     - **tier_base:** Fact `20`, Comparison `55`, Deep research `82`. Implementation *and* design/architecture both anchor on **scope**: single-locus fix → Fact; bounded change or one bounded feature/component design → Comparison; broad synthesis or system-wide redesign → Deep research. Do not classify a bounded design as Deep research just because it is a design — design reaches Opus via the role/blast deltas, not an inflated base.
+     - **The three deltas are adjustments *above the tier's normal demand*, not absolute properties.** Each tier base already includes its typical reasoning load — a Deep-research task is synthesis-heavy by definition and earns no synthesis bonus. Apply a positive delta only when the task needs *more* than its tier's norm.
+       - `reasoning_delta`: `−10` pure retrieval · `0` at norm · `+10` heavy synthesis/novel design · `+15` adversarial rigor (proofs, exhaustive audit, security reasoning).
+       - `role_delta`: `−10` quick-lookup · `0` standard producer (researcher/coder/doc) · `+10` judgment/design (evaluator, code-reviewer, architecture or protocol edits) · `+15` correctness-critical (security-review, migration, a spec that gates a tournament, a fact-check that gates a decision).
+       - `blast_delta`: `−5` throwaway/reversible · `0` normal · `+15` irreversible or wide-blast (edits `CLAUDE.md`/agent prompts/protocol, data migration, public API, prod/security).
+     - **Philosophy:** raw breadth is Sonnet-tier (Deep-research base 82 → `sonnet-5/high`); Opus bands (85+) are reached only when role or blast-radius modifiers cross 84 — judgment, irreversibility, or rigor. The top band (`opus-4-8/max`, 95-100) is for correctness-over-cost.
+     - Band cheat-sheet: `0-29` haiku/low · `30-49` haiku/high · `50-69` sonnet-5/medium · `70-84` sonnet-5/high · `85-89` opus-4-8/medium · `90-94` opus-4-8/high · `95-100` opus-4-8/max.
 
    **Persist the plan.** For any task that will spawn 2+ workers (only then — skip for trivial single-worker tasks), write the decomposition plan to a file before summoning:
 
@@ -270,6 +281,7 @@ own judgement (long session, many syntheses, repeated rework)), take these steps
 2. Write the output to `~/.advisor/runs/plans/$(date +%Y%m%d-%H%M%S)-context-handover.md`.
 3. Record: active sid, tier, decomposition[] statuses, next_action, and synthesis_seq for each worker.
 4. Issue `/clear`.
+5. From the successor session (after resuming), run `bin/handover-resolve <handover-file> --outcome "<final status text>"` to append a `FINAL OUTCOME: <text>` marker that resolves the handover file — this runs at resolution time, not at handover-write time.
 
 The session-start.js hook will surface the last handover on the next session start. It also surfaces a 'vault due (next 14d)' banner listing any vault notes due within 14 days, including lessons.
 Do NOT /clear before completing step 2 — the sid is lost after /clear if it is not
@@ -277,7 +289,7 @@ written to disk.
 
 Note: the PreCompact hook is now installed in `.claude/settings.json` — it auto-commits a checkpoint (`git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"`) before auto-compaction fires, so the handover write above is already persisted. Use `/pre-compact` to manually trigger the checkpoint at any time (e.g., before issuing `/compact`). Caveat GH#13572: PreCompact does not fire on manual `/compact`; in that case, complete the handover write manually before issuing `/compact`, or rely on the Stop hook which fires after every response.
 
-**Worker PostToolUse hooks:** `ADVISOR_WORKER_HOOKS` is now promoted to ALL agents via the `WORKER_HOOKS_ALLOWLIST` expansion in `lib/summon.js` (default-on). Every summoned worker receives hook coverage automatically — no per-agent `settings.json` changes needed. To disable for a specific agent type, remove it from `WORKER_HOOKS_ALLOWLIST` in `lib/summon.js`. Rollback reference: `~/.advisor/vault/lessons/manual-20260522-worker-hooks-rollout-advisor-1.md`.
+**Worker PostToolUse hooks:** `ADVISOR_WORKER_HOOKS` is set unconditionally for ALL agents by `injectWorkerHooks()` in `lib/summon.js` (default-on, no allowlist). Every summoned worker receives hook coverage automatically — no per-agent `settings.json` changes needed, and there is no per-agent opt-out. Rollback reference: `~/.advisor/vault/lessons/manual-20260522-worker-hooks-rollout-advisor-1.md`.
 
 ## Recovery after compression
 
@@ -387,6 +399,11 @@ The `--ensemble` and `tui` windows are skipped by the session reaper. Cleanup is
 - `ADVISOR_DEFAULT_TUI=1`: act as `--tui` for every non-ensemble `bin/summon` call. Ensemble fan-out (`--ensemble N`) is unaffected — it always runs headless.
 - `ADVISOR_NO_TIMELINE=1`: suppress the timeline auto-start and browser open in headless mode; equivalent to `--no-timeline`.
 - `--headless` flag: per-call override that forces the headless branch even when `ADVISOR_DEFAULT_TUI=1` is set. Unattended call sites (`bin/advisor-schedule`, `lib/parallel.js`) pass this automatically so scheduled and parallel runs never pop open Terminal windows.
+- `ADVISOR_ECO=0`: disables the token-economy bootstrap injection block (see below) for every summoned worker.
+
+### Token-economy bootstrap injection (`ADVISOR_ECO`)
+
+`lib/summon.js` injects a token-frugality block into every worker's bootstrap prompt via `lib/eco-rules.js` — ECO-CORE for most agents, ECO-REVIEW (a completeness-preserving variant) for exhaustiveness-critical agents (`code-reviewer`, `evaluator`, `tournament-evaluator`, `fact-checker`, per `ECO_REVIEW_AGENTS` in `lib/eco-rules.js`). Set `ADVISOR_ECO=0` to disable the injection globally.
 
 ## Guardrails
 
@@ -459,3 +476,4 @@ Workers cannot talk to each other. Workers cannot summon further workers. Worker
 
 - 2026-05: Triage pre-pass removed — returned constant tier=deep_research on all tasks; advisor's own tier judgment is now the sole classifier.
 - 2026-06: 8 guardrails added (pane-death, destructive-CLI probe, verify-don't-trust, agent-role-contract, shared-repo-coordination, git-add-discipline, claude-in-claude-env-scrub, coder-dep-preinstall). Creative Council Mode restored (bin/summon --agent creative; council runs sequentially inside worker; in-loop). Worker hooks promoted to all agents (default-on). Step 4 brainstormer/doc-agent hints added. Step 8 cost line added. /observe, /pre-compact, bin/advisor-terminate references added.
+- 2026-07: Token-economy bootstrap injection added — `lib/eco-rules.js` writes an ECO-CORE/ECO-REVIEW block into every worker's bootstrap prompt, opt-out via `ADVISOR_ECO=0`. Three worker-lifecycle fixes landed: `spawnHeadless` sentinel-ownership validation (a foreign sentinel payload can no longer falsely complete another worker's poll), `reaperSweepOrphanSessions` 2-hour grace floor for freshly-summoned sessions, and `close-tab` restricted to killing only `$TMUX_PANE` in multiplex mode (no fallback to the attached client's active pane). Synthesize-time telemetry accrual added (`lib/channel.js` calls `telemetry-backfill.js` before tab close, since worker sessions self-terminate before `Stop` fires), plus `bin/advisor-cost-backfill` and `bin/advisor-cost --by-agent`.
