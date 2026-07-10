@@ -129,8 +129,7 @@ skills/
 From your repo's directory:
 
 ```bash
-claude                           # Open Claude Code
-/advisor "your task description" # Launch the Advisor
+claude /advisor  # Launch the Advisor Framework
 ```
 
 (`/advisor` is a custom command at `~/.claude/commands/advisor.md` — run from any repo to activate the Advisor for that repo. Task description is optional; describe it in the chat after if you prefer.)
