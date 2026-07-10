@@ -15,6 +15,7 @@ ONCE=false
 AGENT='coder'
 GOAL=''
 WHEN=''
+REPLACE=false
 
 # Self-loop guard: refuse if we're already inside a scheduled-loop session.
 if [[ "${ADVISOR_SCHEDULED_LOOP:-}" == "1" ]]; then
@@ -28,12 +29,13 @@ while [[ $# -gt 0 ]]; do
     --interval)  INTERVAL="$2";   shift 2 ;;
     --task)      TASK_TEXT="$2";  shift 2 ;;
     --once)      ONCE=true;       shift   ;;
+    --replace)   REPLACE=true;    shift   ;;
     --agent)     AGENT="$2";      shift 2 ;;
     --goal)      GOAL="$2";       shift 2 ;;
     --when)      WHEN="$2";       shift 2 ;;
     -h|--help)
       cat <<'EOF'
-Usage: advisor-schedule --sid <session-id> --interval <duration> --task '<text>' [--once] [--agent <name>] [--goal '<text>'] [--when '<expr>']
+Usage: advisor-schedule --sid <session-id> --interval <duration> --task '<text>' [--once] [--agent <name>] [--goal '<text>'] [--when '<expr>'] [--replace]
 
 Detaches a tmux window that loops bin/summon at the given interval.
 
@@ -46,9 +48,14 @@ Flags:
   --goal '<text>'    Goal text passed to bin/summon (default: same as --task)
   --when '<expr>'    Shell expression evaluated before each summon; summon is
                      skipped when the expression exits non-zero
+  --replace          Kill any existing loop already scheduled for this --sid
+                     before starting a new one
 
 The tmux window runs with ADVISOR_SCHEDULED_LOOP=1 so nested scheduling is
 blocked — any advisor-schedule call from inside the loop will be refused.
+
+Only one active loop per --sid is allowed. If a loop for the given --sid is
+already running, advisor-schedule refuses unless --replace is passed.
 EOF
       exit 0
       ;;
@@ -118,6 +125,33 @@ if [[ "${ADVISOR_DRY_RUN:-}" == "1" ]]; then
 fi
 
 INNER_CMD="export ADVISOR_SCHEDULED_LOOP=1; ${LOOP_BODY}"
+
+# Per-sid dedup guard: find an existing tmux session or window already named
+# for this sid, whether it was created via the new-session or new-window path.
+find_existing_loop_target() {
+  if tmux has-session -t "=${WINDOW_NAME}" 2>/dev/null; then
+    echo "${WINDOW_NAME}"
+    return 0
+  fi
+  local hit
+  hit="$(tmux list-windows -a -F '#{session_name}:#{window_index}:#{window_name}' 2>/dev/null \
+    | awk -F: -v n="$WINDOW_NAME" '$3==n {print $1":"$2; exit}')"
+  if [[ -n "$hit" ]]; then
+    echo "$hit"
+    return 0
+  fi
+  return 1
+}
+
+EXISTING_TARGET="$(find_existing_loop_target || true)"
+if [[ -n "$EXISTING_TARGET" ]]; then
+  if [[ "$REPLACE" == true ]]; then
+    tmux kill-window -t "$EXISTING_TARGET" 2>/dev/null || tmux kill-session -t "$EXISTING_TARGET" 2>/dev/null || true
+  else
+    echo "advisor-schedule: a loop for sid ${SID} already exists — terminate it first, or pass --replace." >&2
+    exit 1
+  fi
+fi
 
 # Prefer attaching to an existing tmux session; fall back to creating one.
 if tmux info &>/dev/null 2>&1; then
