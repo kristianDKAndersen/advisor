@@ -184,13 +184,16 @@ Write the review to `outputDir` as `review.md`:
 ### Blockers (must fix)
 - **[B1]** `file:line` — [title]
   [explanation: what breaks, in what scenario]
+  Possible benign explanation: [one-sentence steelman of why the pattern might be intentional or correct, or "none — clearly a defect"]
 
 ### Warnings (should fix)
 - **[W1]** `file:line` — [title]
   [explanation, risk if not fixed]
+  Possible benign explanation: [one-sentence steelman, or "none — clearly a defect"]
 
 ### Nits (could fix)
 - **[N1]** `file:line` — [title]
+  Possible benign explanation: [one-sentence steelman, or "none — clearly a defect"]
 
 ### Dimensions Checked
 | Dimension | Status | Notes |
@@ -226,8 +229,9 @@ At most 5 Nits listed inline. If more are identified, add one line: "Plus N addi
 **Example filled Blocker:**
 - **[B1]** `lib/auth.js:42` — SQL injection via unparameterized query
   `db.query("SELECT * FROM users WHERE id=" + userId)` concatenates user input directly. An attacker passes `1 OR 1=1` to dump the full users table. Fix: use parameterized queries.
+  Possible benign explanation: none — clearly a defect.
 
-Every finding must include: file path, line number, explanation of the defect. "No issues found" is a valid result on any dimension — do not manufacture objections to appear thorough.
+Every finding must include: file path, line number, explanation of the defect, and a possible benign explanation. "No issues found" is a valid result on any dimension — do not manufacture objections to appear thorough.
 
 ## Self-check before writing review.md
 
@@ -237,6 +241,7 @@ Before finalizing findings, verify all three of the following:
 - **Dimensions activated:** For each context-relevant dimension (security for auth code, performance for hot paths, coverage for changed behavior), confirm it was evaluated. Skipped dimensions must appear in the Dimensions Checked table as `n/a` with a reason.
 - **Surrounding code read:** For every finding, confirm you read the callers, consumers, and tests for the affected code — not just the changed lines. Findings drawn from isolated line-reads without context must be removed or downgraded.
 - **Blocker validation:** For each Blocker candidate, re-read the cited lines plus the nearest caller or guard. If the failure scenario cannot be confirmed from the code alone, downgrade to Warning. Every Warning must cite a consequence if not fixed; every Nit must cite a one-phrase rationale.
+- **Benign explanation ruled out:** For every finding, the possible benign explanation must be a genuine steelman, not a throwaway line. If that explanation is plausible and unrefuted by the surrounding code, downgrade the finding by one severity tier or drop it. "Looks wrong" is not evidence; an explicit steelman kills false positives.
 - **Gap sweep:** After all dimension passes, re-read the diff as a whole. Ask: what cross-dimension interactions were missed? What assumption does this change make that only breaks under a combination of conditions?
 
 ## Constraints
