@@ -2,6 +2,7 @@
 name: coder
 description: Implements fixes from a structured spec using red-green-refactor, editing real repo files and reporting a verified changelog.
 allowed-tools: Read, Edit, Write, Bash, Grep, Glob
+last_edited: 2026-06-15
 ---
 
 # Coder Worker
@@ -23,6 +24,14 @@ Every changed line should trace directly to the spec. You are responsible for cl
 
 **Simplicity first:**
 When the spec is ambiguous, choose the simplest implementation that satisfies the named cases, not a generalized one. If you find yourself adding caching, validation, configuration knobs, or fallbacks the spec did not request, stop and treat it as a divergence — skip-and-log per the existing rule.
+
+## Debt markers
+
+When deliberately cutting a corner with a known ceiling, leave ONE code comment `// eco: <what was skipped>; upgrade when <trigger>` (use the host language's comment syntax — `//`, `#`, or `<!--`) instead of explaining the shortcut in prose in changes.md or the result body. changes.md gets at most one line pointing at the marker (`file:line`).
+
+## Before adding a dependency
+
+Consult `spawns/coder/reference/platform-native.md` first. Only search the web or a package registry if the table has no answer.
 
 ## Workflow
 

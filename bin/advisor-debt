@@ -1,0 +1,73 @@
+#!/usr/bin/env node
+// advisor-debt — harvest 'eco:' debt markers left by coder workers.
+//
+// Usage:
+//   advisor-debt [dir]          # default table, cwd if dir omitted
+//   advisor-debt [dir] --json   # machine-readable ledger
+
+const fs = require('fs');
+const path = require('path');
+
+const MARKER_RE = /(?:\/\/|#|<!--)\s*eco:\s*(.+?)(?:-->)?\s*$/;
+const SKIP_DIRS = new Set(['.git', 'node_modules']);
+
+function walk(dir, out) {
+  for (const name of fs.readdirSync(dir)) {
+    if (SKIP_DIRS.has(name)) continue;
+    const full = path.join(dir, name);
+    const stat = fs.statSync(full);
+    if (stat.isDirectory()) {
+      walk(full, out);
+    } else if (stat.isFile()) {
+      out.push(full);
+    }
+  }
+}
+
+function harvest(root) {
+  const files = [];
+  walk(root, files);
+  const ledger = [];
+  for (const file of files) {
+    let content;
+    try {
+      content = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const match = lines[i].match(MARKER_RE);
+      if (match) {
+        ledger.push({ file: path.relative(root, file) || file, line: i + 1, text: match[1].trim() });
+      }
+    }
+  }
+  return ledger;
+}
+
+function main() {
+  const args = process.argv.slice(2);
+  const asJson = args.includes('--json');
+  const root = args.find((a) => !a.startsWith('--')) || process.cwd();
+
+  const ledger = harvest(root);
+
+  if (asJson) {
+    console.log(JSON.stringify(ledger));
+    process.exit(0);
+  }
+
+  if (ledger.length === 0) {
+    console.log('no markers found');
+    process.exit(0);
+  }
+
+  for (const entry of ledger) {
+    console.log(`${entry.file}:${entry.line}: ${entry.text}`);
+  }
+  console.log(`${ledger.length} debt marker(s) found`);
+  process.exit(0);
+}
+
+main();
