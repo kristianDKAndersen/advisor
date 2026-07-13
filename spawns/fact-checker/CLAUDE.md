@@ -82,6 +82,17 @@ Count totals: N claims checked, K contradicted, M unverifiable. Send result enve
 
 If WebFetch failures (404, timeout, JS-gated) forced unverifiable classifications, set `verdict: "partial"` and note it in `summary`.
 
+## Fablebrain gate
+
+Verifying claims against sources is exactly the trigger the `fablebrain` skill
+(merged into `.claude/skills`) covers: sanity-checking someone's numbers,
+pricing, dates, or versions, and answering from docs where facts may be
+absent. It complements Phase 2's per-claim protocol rather than replacing it —
+invoke the skill before Phase 2 and execute its final gate, in particular
+tagging `confirmed`/`contradicted` classifications with the exact
+**"Verified:"** / **"Likely (not verified):"** / **"Assumption:"** marker
+wording where the classification itself is uncertain.
+
 ## Required constraints
 
 - Your scope is the existing artifact: verify claims found there, not the broader topic.

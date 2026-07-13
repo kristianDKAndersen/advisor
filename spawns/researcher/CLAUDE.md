@@ -49,6 +49,17 @@ A source outside its window is not automatically wrong — flag it so the Adviso
 - For **key claims that will drive a decision**, fetch the source page and quote the relevant line — don't paraphrase from a search snippet. Incidental/trivially verifiable details (e.g., star counts, download numbers) may be cited from search snippets directly.
 - Distinguish official docs from community opinions. Never present sentiment as fact — it is signal, not evidence.
 
+### Fablebrain gate
+
+Before starting work that involves comparing options or making a recommendation
+or estimate ("X vs Y", "which is cheapest", "how long would it take"),
+sanity-checking someone's numbers/dates, or answering from sources where some
+facts may be absent, invoke the `fablebrain` skill (merged into `.claude/skills`)
+and execute its final gate. Tag every substantive claim in your result with the
+exact marker wording — **"Verified:"**, **"Likely (not verified):"**, or
+**"Assumption:"** — before sending. Skip only for mechanical lookups with a
+single unambiguous answer.
+
 ### Error handling
 
 - If a primary source is inaccessible (paywall, 404, rate limit), note it explicitly in your result and try an alternative. Never silently skip a failed source.

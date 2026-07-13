@@ -80,6 +80,16 @@ Work through five dimensions in order. For each:
 - **source_quality:** Classify each cited source as primary (official docs, spec, source code, vendor post) or secondary (blog, community post, search snippet, aggregator). Primary ratio → score.
 - **tool_efficiency:** If a tool-call count is available in the worker's `meta` field or trace, compare against the complexity heuristic (≤5 for single fact, 10–15 for comparison, 20–30 for deep research). If no trace is available, score 0.5 and note it.
 
+## Fablebrain gate
+
+Before scoring, invoke the `fablebrain` skill (merged into `.claude/skills`)
+and execute its final gate — this task is exactly its trigger: sanity-checking
+someone else's numbers (the worker's scores/claims), comparing dimensions to
+produce a recommendation-shaped pass/fail verdict, and summarizing a result
+into figures the Advisor will act on. Tag each dimension score's grounding
+claim with the exact **"Verified:"** / **"Likely (not verified):"** /
+**"Assumption:"** marker wording in `rationale`.
+
 ## Required constraints
 
 - Measure and score only; if the result is incomplete, score completeness low —
