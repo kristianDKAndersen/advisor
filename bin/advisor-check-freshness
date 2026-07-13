@@ -1,0 +1,219 @@
+#!/usr/bin/env bun
+// bin/advisor-check-freshness — frontmatter doc-freshness checker.
+//
+// Usage:
+//   advisor-check-freshness [<root>] [--root <path>] [--fix] [--json]
+//
+// Walks spawns/*/CLAUDE.md and skills/*/SKILL.md under <root> (default cwd),
+// checking each file's YAML-ish frontmatter for a `last_edited: YYYY-MM-DD`
+// key. Missing the key is a hard failure (exit 1); present but older than
+// 180 days is a warning (exit 0). --fix stamps the key in place using the
+// file's last git-log date (or today, if untracked).
+
+const { readdirSync, statSync, readFileSync, writeFileSync } = require('node:fs');
+const { join, relative } = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+const STALE_DAYS = 180;
+
+let root = process.cwd();
+let fix = false;
+let json = false;
+let rootFromFlag = false;
+
+const args = process.argv.slice(2);
+while (args.length > 0) {
+  const arg = args.shift();
+  switch (arg) {
+    case '--root':
+      root = args.shift();
+      rootFromFlag = true;
+      break;
+    case '--fix':
+      fix = true;
+      break;
+    case '--json':
+      json = true;
+      break;
+    case '-h':
+    case '--help':
+      console.log(`Usage: advisor-check-freshness [<root>] [--root <path>] [--fix] [--json]
+
+Walks spawns/*/CLAUDE.md and skills/*/SKILL.md under <root> (default cwd)
+checking for a last_edited: YYYY-MM-DD key in each file's frontmatter.
+
+Flags:
+  --root <path>   Root directory to scan (default: cwd)
+  --fix           Stamp missing last_edited keys in place (from git log, or today)
+  --json          Emit machine-readable JSON instead of text
+`);
+      process.exit(0);
+      break;
+    default:
+      if (!rootFromFlag && !arg.startsWith('--')) {
+        root = arg;
+      } else {
+        console.error(`Unknown flag: ${arg}`);
+        process.exit(1);
+      }
+  }
+}
+
+function findTargets(root) {
+  const targets = [];
+  for (const [dirName, fileName] of [['spawns', 'CLAUDE.md'], ['skills', 'SKILL.md']]) {
+    const base = join(root, dirName);
+    let entries;
+    try {
+      entries = readdirSync(base);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = join(base, entry);
+      let st;
+      try {
+        st = statSync(entryPath);
+      } catch {
+        continue;
+      }
+      if (!st.isDirectory()) continue;
+      const filePath = join(entryPath, fileName);
+      try {
+        statSync(filePath);
+      } catch {
+        continue;
+      }
+      targets.push(filePath);
+    }
+  }
+  return targets;
+}
+
+// Parses the leading `---` fenced frontmatter block, if any, without a YAML
+// library — good enough for flat `key: value` lines, which is all this repo
+// uses. Preserves raw lines verbatim so --fix can splice in one new line
+// without disturbing anything else byte-for-byte.
+function parseFrontmatter(content) {
+  const lines = content.split('\n');
+  if (lines[0] !== '---') {
+    return { hasFrontmatter: false, lines, fmLines: [], closeIdx: -1 };
+  }
+  let closeIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '---') {
+      closeIdx = i;
+      break;
+    }
+  }
+  if (closeIdx === -1) {
+    return { hasFrontmatter: false, lines, fmLines: [], closeIdx: -1 };
+  }
+  const fmLines = lines.slice(1, closeIdx);
+  return { hasFrontmatter: true, lines, fmLines, closeIdx };
+}
+
+function fmValue(fmLines, key) {
+  for (const line of fmLines) {
+    const m = line.match(/^([\w-]+):\s*(.*)$/);
+    if (m && m[1] === key) return m[2].trim();
+  }
+  return null;
+}
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function gitLastEditedDate(filePath) {
+  try {
+    const out = execFileSync('git', ['log', '-1', '--format=%as', '--', filePath], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out || todayIso();
+  } catch {
+    return todayIso();
+  }
+}
+
+function daysAgo(isoDate) {
+  const then = new Date(`${isoDate}T00:00:00Z`).getTime();
+  if (Number.isNaN(then)) return null;
+  return Math.floor((Date.now() - then) / 86400000);
+}
+
+function applyFix(filePath, fm) {
+  const date = gitLastEditedDate(filePath);
+  let newLines;
+  if (fm.hasFrontmatter) {
+    newLines = [
+      '---',
+      ...fm.fmLines,
+      `last_edited: ${date}`,
+      ...fm.lines.slice(fm.closeIdx),
+    ];
+  } else {
+    newLines = ['---', `last_edited: ${date}`, '---', ...fm.lines];
+  }
+  writeFileSync(filePath, newLines.join('\n'));
+  return date;
+}
+
+const targets = findTargets(root);
+const offenders = [];
+const stale = [];
+const fixed = [];
+
+for (const filePath of targets) {
+  const relPath = relative(root, filePath);
+  const content = readFileSync(filePath, 'utf8');
+  const fm = parseFrontmatter(content);
+  const lastEdited = fm.hasFrontmatter ? fmValue(fm.fmLines, 'last_edited') : null;
+  const valid = lastEdited && /^\d{4}-\d{2}-\d{2}$/.test(lastEdited);
+
+  if (!valid) {
+    if (fix) {
+      const date = applyFix(filePath, fm);
+      fixed.push({ file: relPath, last_edited: date });
+    } else {
+      offenders.push(relPath);
+    }
+    continue;
+  }
+
+  const age = daysAgo(lastEdited);
+  if (age !== null && age > STALE_DAYS) {
+    stale.push({ file: relPath, last_edited: lastEdited, days: age });
+  }
+}
+
+if (json) {
+  console.log(JSON.stringify({ checked: targets.length, offenders, stale, fixed }));
+} else if (fix) {
+  if (fixed.length === 0) {
+    console.log(`advisor-check-freshness: ${targets.length} file(s) checked, nothing to fix.`);
+  } else {
+    console.log(`advisor-check-freshness: fixed ${fixed.length} file(s):`);
+    for (const f of fixed) console.log(`  - ${f.file} (last_edited: ${f.last_edited})`);
+  }
+  if (stale.length > 0) {
+    console.log(`Stale (>${STALE_DAYS}d):`);
+    for (const s of stale) console.log(`  - ${s.file} (last_edited: ${s.last_edited}, ${s.days}d ago)`);
+  }
+} else if (offenders.length > 0) {
+  console.error(`advisor-check-freshness: ${offenders.length} file(s) missing last_edited:`);
+  for (const o of offenders) console.error(`  - ${o}`);
+  if (stale.length > 0) {
+    console.error(`Stale (>${STALE_DAYS}d):`);
+    for (const s of stale) console.error(`  - ${s.file} (last_edited: ${s.last_edited}, ${s.days}d ago)`);
+  }
+} else {
+  console.log(`advisor-check-freshness: ${targets.length} file(s) checked, 0 missing, ${stale.length} stale (>${STALE_DAYS}d).`);
+  if (stale.length > 0) {
+    console.log(`Stale (>${STALE_DAYS}d):`);
+    for (const s of stale) console.log(`  - ${s.file} (last_edited: ${s.last_edited}, ${s.days}d ago)`);
+  }
+}
+
+process.exit(!fix && offenders.length > 0 ? 1 : 0);
