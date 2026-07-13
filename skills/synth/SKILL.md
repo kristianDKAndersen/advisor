@@ -1,6 +1,7 @@
 ---
 name: synth
 description: Record a synthesis checkpoint via channel.js synthesize with required fields: sid, seq, established, and gap. Use when the Advisor needs to log what has been established and what open question remains at a given session step.
+last_edited: 2026-06-09
 ---
 
 # Synth

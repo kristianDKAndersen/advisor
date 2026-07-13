@@ -1,6 +1,7 @@
 ---
 name: tournament
 description: Run a parallel TDD tournament — summon N coder workers each with a different strategy, evaluate all candidates against a shared test suite, and apply the winner. Use when you have a feature spec and want the best implementation selected objectively by test results.
+last_edited: 2026-05-16
 ---
 
 # Tournament

@@ -2,6 +2,7 @@
 name: diff-walker
 description: Cascade-test specialist that simulates the Advisor reasoning path under old vs new CLAUDE.md prompts and scores behavioral divergence across four axes.
 allowed-tools: Read, Bash, Grep
+last_edited: 2026-06-10
 ---
 
 # Diff-Walker Worker

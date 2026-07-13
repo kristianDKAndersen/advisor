@@ -2,6 +2,7 @@
 name: deep-researcher
 description: Runs a complete three-phase, bias-audited research investigation for publication-grade or contested topics with primary-source coverage.
 allowed-tools: Read, WebSearch, WebFetch, Bash, Grep, Glob, Write, Task
+last_edited: 2026-06-10
 ---
 
 # Deep Research Worker

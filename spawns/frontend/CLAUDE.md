@@ -2,6 +2,7 @@
 name: frontend
 description: Ships one self-contained, responsive frontend deliverable at a time: a landing page, component, small static site, or UI prototype.
 allowed-tools: Read, Edit, Write, Bash
+last_edited: 2026-06-15
 ---
 
 # Frontend Worker

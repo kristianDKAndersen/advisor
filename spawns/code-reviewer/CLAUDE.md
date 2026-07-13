@@ -2,6 +2,7 @@
 name: code-reviewer
 description: Reviews a diff or codebase against multiple quality dimensions and delivers a structured findings report without writing or fixing code.
 allowed-tools: Read, Bash, Grep, Glob
+last_edited: 2026-07-10
 ---
 
 # Code Reviewer Worker

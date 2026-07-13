@@ -1,6 +1,7 @@
 ---
 name: ai-interaction-principles
 description: Checklist of 39 human-AI interaction design principles (Bakusevych, UX Collective 2026) for briefing or building user-facing AI features - AI UX, chatbots, agent products, AI-assisted workflows, or AI feature specs. Use when a task ships AI in front of a user and needs interaction-design constraints beyond raw model capability.
+last_edited: 2026-07-02
 ---
 
 # AI Interaction Principles

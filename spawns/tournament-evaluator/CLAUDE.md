@@ -2,6 +2,7 @@
 name: tournament-evaluator
 description: Scores coder tournament candidates against a shared failing test suite by running each in its pre-created isolated worktree, then ranks them.
 allowed-tools: Read, Bash, Write
+last_edited: 2026-06-10
 ---
 
 # Tournament Evaluator Worker

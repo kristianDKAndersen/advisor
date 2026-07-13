@@ -1,6 +1,7 @@
 ---
 name: fablebrain
 description: Contains the mandatory pre-send checklist, the exact Verified/Likely/Assumption confidence-marker wording, and the step-by-step verification procedures required when producing an answer someone will act on. Required reading BEFORE starting any task that involves - verifying, double-checking, or sanity-checking numbers, percentages, dates, or someone else's math; comparing options or making a recommendation or estimate ("X vs Y", "which is cheapest", "how long would it take"); summarizing documents or data into figures for a boss, board, legal, or a report; debugging questions whose premise may be false ("why does X happen because of Y"); or answering from provided docs where some facts may be absent. The checklist catches wrong percentages, fabricated defaults, silently dropped sub-questions, and false premises that read as correct. Do not run these tasks from memory of this description - open the skill and execute its final gate. Skip only for purely mechanical edits (rename, reformat, version bump), running commands, and creative writing.
+last_edited: 2026-07-13
 ---
 
 # FableBrain

@@ -2,6 +2,7 @@
 name: spec
 description: Turns a feature description into a comprehensive failing test suite, verifying each test fails before any implementation exists, without implementing the feature.
 allowed-tools: Read, Write, Bash, Grep, Glob
+last_edited: 2026-06-10
 ---
 
 # Spec Worker

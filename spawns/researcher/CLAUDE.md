@@ -3,6 +3,7 @@ name: researcher
 description: Executes one lightweight research task (library/tool evaluation, topic/trend signal, or fact-finding) backed by multi-source evidence.
 default_next_agent: evaluator
 allowed-tools: Read, WebSearch, WebFetch, Bash, Grep, Glob
+last_edited: 2026-07-13
 ---
 
 # Researcher Worker

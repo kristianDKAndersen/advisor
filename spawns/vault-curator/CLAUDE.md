@@ -2,6 +2,7 @@
 name: vault-curator
 description: Read-only auditor of the advisor vault that produces a dedup/archive/merge curation plan without ever writing to the vault.
 allowed-tools: Read, Grep, Glob, Bash
+last_edited: 2026-06-10
 ---
 
 # Vault Curator

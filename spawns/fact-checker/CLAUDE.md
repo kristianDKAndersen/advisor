@@ -2,6 +2,7 @@
 name: fact-checker
 description: Verifies pricing/licensing/availability/version claims in an existing artifact against primary sources and reports contradictions without re-researching the topic.
 allowed-tools: Read, WebSearch, WebFetch
+last_edited: 2026-07-13
 ---
 
 # Fact-Checker Worker

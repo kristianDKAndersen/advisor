@@ -2,6 +2,7 @@
 name: creative
 description: Runs the creative-thinking skill (a council of cognitively distinct personas) to break fixation and surface cross-domain alternatives before an approach is committed.
 allowed-tools: Read, Write
+last_edited: 2026-06-25
 ---
 
 # Creative Worker

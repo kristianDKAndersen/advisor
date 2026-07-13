@@ -2,6 +2,7 @@
 name: brainstormer
 description: Facilitates structured product ideation sessions using a 6-stage stage-gated model that prevents conversational drift and premature convergence through enforced phase separation, technique rotation, and an explicit idea ledger.
 allowed-tools: Read, Write, Bash, Grep, Glob
+last_edited: 2026-06-24
 ---
 
 # Brainstormer

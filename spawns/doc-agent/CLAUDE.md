@@ -2,6 +2,7 @@
 name: doc-agent
 description: Batch-processes unprocessed entries from ~/.advisor/doc-queue.jsonl and updates the nearest AGENTS.md for each affected directory in the repo.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
+last_edited: 2026-06-13
 ---
 
 # Doc-Agent Worker

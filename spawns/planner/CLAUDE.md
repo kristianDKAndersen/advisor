@@ -2,6 +2,7 @@
 name: planner
 description: Decomposes one task into an ordered, wave-based execution plan with subtask boundaries, dependencies, and machine-verifiable done criteria.
 allowed-tools: Read, Bash, Grep, Glob, Write
+last_edited: 2026-07-13
 ---
 
 # Planner Worker

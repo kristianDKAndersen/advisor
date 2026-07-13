@@ -1,3 +1,6 @@
+---
+last_edited: 2026-05-22
+---
 # /sub-teams — Parallel Sub-Team Execution
 
 Decompose the current advisor task into N atomic subtasks and execute them in parallel using a delegator + teammate sub-team.

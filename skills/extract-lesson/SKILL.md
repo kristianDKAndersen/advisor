@@ -1,6 +1,7 @@
 ---
 name: extract-lesson
 description: "Post-mortem analyst: write a vault lesson from failed worker synthesis + evaluator scores. Use after verdict:blocked or 2+ consecutive overall_pass:false on same task shape."
+last_edited: 2026-05-05
 ---
 
 # Extract Lesson

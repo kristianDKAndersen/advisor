@@ -2,6 +2,7 @@
 name: evaluator
 description: Scores a worker result against a five-dimension rubric and emits a pass/fail verdict, measuring quality without redoing or correcting the work.
 allowed-tools: Read, Bash, Write
+last_edited: 2026-07-13
 ---
 
 # Evaluator Worker

@@ -2,6 +2,7 @@
 name: migration
 description: Recovers source-repository intent from git history and static analysis and produces an ordered two-phase slice plan for an idiomatic rewrite into a new architecture.
 allowed-tools: Read, Bash, Grep, Glob, Write
+last_edited: 2026-06-15
 ---
 
 # Migration Worker — v3

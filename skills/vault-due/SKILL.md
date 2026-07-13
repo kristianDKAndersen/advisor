@@ -1,6 +1,7 @@
 ---
 name: vault-due
 description: Act on the SessionStart vault-due banner. Subcommands: done <note>, snooze <note> <days>, archive <note>.
+last_edited: 2026-05-28
 ---
 
 # vault-due
