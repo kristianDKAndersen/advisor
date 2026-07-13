@@ -82,6 +82,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    Use-case hints for commonly confused agents:
    - **brainstormer** — structured ideation and diverge-converge cycles; use when you need multiple competing approaches before committing to one, not for pure research.
    - **doc-agent** — AGENTS.md updates and doc-queue items (`bin/advisor-vault due` may surface pending doc entries); use for documentation changes, not for code or research tasks.
+
+   **Nested-CLAUDE.md precedence:** `spawns/<agent>/CLAUDE.md` supplements this root file for that agent's session; on conflict, the more specific `spawns/<agent>/CLAUDE.md` rule wins, and the worker must name the conflict in its `progress` or `result` message rather than silently picking one.
 5. **Write the brief, then summon.**
 
    **Before writing the brief, query the lesson vault:**
@@ -91,6 +93,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    Filter the results for entries marked `[lesson]` in the output. If any `[lesson]` entries have `task_type` keywords that match the current task, append a `Prior failure constraints:` section at the bottom of the brief with each lesson's `## Heuristic` text (read the lesson file at the returned path). Omit the section entirely if no matching lessons are found — do not inject empty or irrelevant lessons.
 
    **AI-feature briefs:** If the deliverable is a user-facing AI feature (AI UX, chatbot, agent product, AI-assisted workflow), consult skills/ai-interaction-principles/SKILL.md and append the applicable [build]-tagged principles as a constraints section in the brief.
+
+   **Verification-critical briefs:** When the task involves "verifying, double-checking, or sanity-checking numbers, percentages, dates, or someone else's math; comparing options or making a recommendation or estimate ('X vs Y', 'which is cheapest', 'how long would it take'); summarizing documents or data into figures for a boss, board, legal, or a report; debugging questions whose premise may be false ('why does X happen because of Y'); or answering from provided docs where some facts may be absent" (quoting `skills/fablebrain/SKILL.md`'s own trigger conditions), the brief MUST name the `fablebrain` skill (tier-2, auto-merged into every worker) as required reading before work starts. Skip only for purely mechanical edits (rename, reformat, version bump), running commands, and creative writing — per that same skill's stated exemptions.
 
    Note: lessons and other vault notes due in the next 14 days are also surfaced by the SessionStart hook at the start of each session; the Step 5 search is still recommended for task-type-specific filtering.
 
@@ -106,6 +110,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    **Goal rewrite test:** Before writing `--goal`, rewrite the imperative directive into a verifiable loop condition. Examples: "Fix the auth bug" -> "auth_test.py::test_login passes against current branch". "Research X" -> "$outputDir/X.md exists with >=3 cited primary sources and a 5-bullet executive summary". If you cannot write a verifiable rewrite, the goal is too vague — return to Step 2 and ask the clarifying question.
 
    **Verifier red-team (before you summon):** Once you have the verifiable condition, adversarially test the verifier itself: could a worker satisfy the literal words while missing the real outcome? Could the condition be passed by weakening or faking the verifier (swapping in mocks, narrowing scope, editing the benchmark, asserting on a trivial subset)? If yes, tighten the verifier - name specific evidence that would be impossible to fake - before writing `--goal`.
+
+   **Doc freshness:** Every `spawns/*/CLAUDE.md` and `skills/*/SKILL.md` must carry `last_edited: YYYY-MM-DD` in its frontmatter, updated whenever the file's behavior-affecting content changes. Enforced by `bin/advisor-check-freshness` (walks both file sets, fails on missing `last_edited`, warns on stale >180 days).
 
    ```bash
    bin/summon --agent <name> \
@@ -272,6 +278,7 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
       track session spend.
    5. **Sign-off line:** `-- via <agent>, session <sid>`
    Do not open with "I", do not close with pleasantries.
+8.5. **Write the closing record.** After a worker's final `result` (or the Advisor's own Step 8 report), write `RESULT.md` to that run's `outputDir` from `templates/RESULT.md`, with three fixed sections: `## Completed` (what shipped, paths cited), `## Verification` (how `--goal` was actually checked, pass|fail), `## Remaining Work` ("none", or a list). For a `planner`-produced task, populate `## Verification` by embedding/referencing the planner's own `Claim | Required evidence` table rather than inventing a second bookkeeping structure.
 9. **Record `outputDir` for follow-up.** Remember `outputDir` so you can pass it to a fresh worker if the user iterates. The worker has self-terminated. See the Iteration section for how to handle follow-ups.
 
 ## Context pressure response

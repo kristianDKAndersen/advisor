@@ -135,6 +135,8 @@ Every DoD entry is a claim paired with the evidence that proves it — never a p
 
 Write each subtask's DoD as: `[Claim] — evidence: [exact command or artifact]`
 
+**Feeding RESULT.md's Verification section:** When the Advisor closes a plan-driven run and writes `RESULT.md` (per root `claude.md`'s closing-record rule), its `## Verification` section is populated by embedding or referencing this same Claim | Required evidence table — do not re-derive a second claim/evidence structure for RESULT.md.
+
 ## Status enum (superpowers, adapted)
 
 Return one of these statuses to the Advisor when handing off the plan:
