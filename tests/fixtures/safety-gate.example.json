@@ -1,0 +1,20 @@
+{
+  "path_denylist": [
+    "**/.env*",
+    "**/secrets/**",
+    "**/*.pem",
+    "**/id_rsa*",
+    "infra/**",
+    "deploy/**",
+    ".github/workflows/**"
+  ],
+  "action_allowlist": {
+    "git_commit": false,
+    "git_push": false,
+    "network_egress": false,
+    "delete_outside_worktree": false,
+    "exec_deploy_scripts": false
+  },
+  "worktree_root": "/tmp/advisor-loop-example-run",
+  "on_violation": "halt-escalate"
+}
