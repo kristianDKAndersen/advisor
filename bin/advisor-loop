@@ -1,0 +1,206 @@
+#!/usr/bin/env bun
+// bin/advisor-loop — CLI front door for the resumable builder+critic round loop.
+// See advisor-loop-design.md sections 3 (autonomy levels) and 5 (bounds). This
+// file only parses flags, resolves the bar, initializes round_state, and
+// delegates to lib/loop-driver.js runLoop — it owns no round/critic/gate logic.
+//
+// Usage:
+//   bin/advisor-loop --goal "<text>" [--bar-type <type>] [--bar-ref <ref>]
+//     [--spec <file>] [--refine] [--max-rounds <n>] [--cost-ceiling <usd>]
+//     [--no-improve-k <n>] [--autonomy L1|L2|L3] [--gate <path>] [--agent <name>]
+//     [--repo-root <path>] [--output-dir <path>] [--run-id <id>] [--dry-run]
+//
+// Exit codes:
+//   0  success (dry-run plan printed, or the loop was handed to runLoop)
+//   1  usage error (no arguments, or missing required --goal)
+//   2  flag validation error (bad --autonomy value, unreadable --spec, or
+//      --bar-type without --bar-ref / vice versa outside the prior-round exception)
+//   6  no comparison bar could be declared (lib/loop-bar.js NoBarError; bin/tournament
+//      uses 0-5, so 6 is reserved for this loop's bar-declaration guardrail)
+
+const fs = require('fs');
+const path = require('path');
+const childProcess = require('child_process');
+const { resolveBar, NoBarError } = require('../lib/loop-bar');
+const { initRoundState } = require('../lib/round-state');
+const { runLoop } = require('../lib/loop-driver');
+
+const AUTONOMY_LEVELS = ['L1', 'L2', 'L3'];
+
+const USAGE = [
+  'Usage: bin/advisor-loop --goal "<text>" [--bar-type <type>] [--bar-ref <ref>]',
+  '  [--spec <file>] [--refine] [--max-rounds <n>] [--cost-ceiling <usd>]',
+  '  [--no-improve-k <n>] [--autonomy L1|L2|L3] [--gate <path>] [--agent <name>]',
+  '  [--repo-root <path>] [--output-dir <path>] [--run-id <id>] [--dry-run]',
+].join('\n');
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        out[k] = next;
+        i++;
+      } else {
+        out[k] = true;
+      }
+    }
+  }
+  return out;
+}
+
+class UsageError extends Error {
+  constructor(message, exitCode = 2) {
+    super(message);
+    this.exitCode = exitCode;
+  }
+}
+
+// Requirement 4 (fixing the caller-contract precedence hole): lib/loop-bar.js
+// requires BOTH barType and barRef to take the explicit path, so a lone
+// --bar-type would otherwise silently fall through to the spec-derived
+// acceptance-tests bar. Validated here, at the flag-parsing boundary, instead
+// of inside lib/loop-bar.js. prior-round is the one bar type that legitimately
+// takes its ref implicitly (from round 0's artifacts), so --bar-type
+// prior-round alone is valid and maps onto the --refine path.
+function validateBarFlags(flags) {
+  const barType = typeof flags['bar-type'] === 'string' ? flags['bar-type'] : undefined;
+  const barRef = typeof flags['bar-ref'] === 'string' ? flags['bar-ref'] : undefined;
+
+  if (barType && barRef === undefined) {
+    if (barType === 'prior-round') {
+      return { barType: undefined, barRef: undefined, refine: true };
+    }
+    throw new UsageError(
+      `--bar-type "${barType}" requires --bar-ref (the only exception is --bar-type prior-round)`,
+    );
+  }
+  if (!barType && barRef !== undefined) {
+    throw new UsageError('--bar-ref requires --bar-type');
+  }
+  return { barType, barRef, refine: Boolean(flags.refine) };
+}
+
+function loadSpecTestCommand(specPath) {
+  if (!specPath) return undefined;
+  const raw = fs.readFileSync(path.resolve(specPath), 'utf8').trim();
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.test_command) {
+      return { test_command: parsed.test_command };
+    }
+  } catch (_) {
+    // not JSON — treat the whole trimmed file as the test_command string
+  }
+  return raw ? { test_command: raw } : undefined;
+}
+
+function buildPlan(flags, bar, autonomyLevel) {
+  return {
+    goal: flags.goal,
+    bar,
+    autonomy_level: autonomyLevel,
+    max_rounds: flags['max-rounds'] ? parseInt(flags['max-rounds'], 10) : 5,
+    cost_ceiling_usd: flags['cost-ceiling'] ? parseFloat(flags['cost-ceiling']) : null,
+    no_improve_k: flags['no-improve-k'] ? parseInt(flags['no-improve-k'], 10) : 2,
+    agent: typeof flags.agent === 'string' ? flags.agent : 'coder',
+    safety_gate_path: typeof flags.gate === 'string' ? flags.gate : null,
+  };
+}
+
+function headSha(repoRoot) {
+  return childProcess.execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+}
+
+// Returns the process exit code. Never calls process.exit itself, so it can
+// be driven directly in tests without spawning a subprocess.
+async function main(argv, options = {}) {
+  const { runLoopFn = runLoop, stdout = process.stdout, stderr = process.stderr } = options;
+  const flags = parseArgs(argv);
+
+  if (Object.keys(flags).length === 0 || typeof flags.goal !== 'string' || !flags.goal) {
+    stderr.write(USAGE + '\n');
+    return 1;
+  }
+
+  let barFlags;
+  try {
+    barFlags = validateBarFlags(flags);
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    stderr.write(`[advisor-loop] error: ${e.message}\n`);
+    return e.exitCode;
+  }
+
+  const autonomyLevel = typeof flags.autonomy === 'string' ? flags.autonomy : 'L2';
+  if (!AUTONOMY_LEVELS.includes(autonomyLevel)) {
+    stderr.write(`[advisor-loop] error: --autonomy must be one of ${AUTONOMY_LEVELS.join('|')}\n`);
+    return 2;
+  }
+
+  let spec;
+  try {
+    spec = loadSpecTestCommand(typeof flags.spec === 'string' ? flags.spec : undefined);
+  } catch (e) {
+    stderr.write(`[advisor-loop] error: failed to read --spec: ${e.message}\n`);
+    return 2;
+  }
+
+  let bar;
+  try {
+    bar = resolveBar({
+      barType: barFlags.barType,
+      barRef: barFlags.barRef,
+      spec,
+      refine: barFlags.refine,
+      priorRoundArtifacts: options.priorRoundArtifacts,
+    });
+  } catch (e) {
+    if (!(e instanceof NoBarError)) throw e;
+    stderr.write(`[advisor-loop] error: ${e.message}\n`);
+    return e.exitCode;
+  }
+
+  const plan = buildPlan(flags, bar, autonomyLevel);
+  const repoRoot = typeof flags['repo-root'] === 'string' ? path.resolve(flags['repo-root']) : process.cwd();
+  const runId = typeof flags['run-id'] === 'string' && flags['run-id']
+    ? flags['run-id']
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const outputDir = typeof flags['output-dir'] === 'string'
+    ? path.resolve(flags['output-dir'])
+    : path.join(repoRoot, '.advisor-loop', runId);
+
+  const state = initRoundState(outputDir, {
+    schema_version: '1',
+    run_id: runId,
+    goal: flags.goal,
+    bar,
+    head_sha: headSha(repoRoot),
+    test_command: spec && spec.test_command ? spec.test_command : null,
+    safety_gate_path: plan.safety_gate_path,
+    max_rounds: plan.max_rounds,
+    cost_ceiling_usd: plan.cost_ceiling_usd,
+    no_improve_k: plan.no_improve_k,
+    autonomy_level: autonomyLevel,
+  });
+
+  if (flags['dry-run']) {
+    stdout.write(JSON.stringify(plan, null, 2) + '\n');
+    return 0;
+  }
+
+  await runLoopFn(state, { outputDir, repoRoot });
+  return 0;
+}
+
+module.exports = { main, parseArgs, validateBarFlags, buildPlan, loadSpecTestCommand, USAGE };
+
+if (require.main === module) {
+  main(process.argv.slice(2)).then((code) => process.exit(code)).catch((e) => {
+    process.stderr.write(`[advisor-loop] fatal: ${e.message}\n`);
+    process.exit(1);
+  });
+}

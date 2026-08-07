@@ -295,3 +295,102 @@ test('runLoop drives rounds over stubbed dependencies to a won terminal status',
   expect(finalState.status).toBe('won');
   expect(finalState.rounds.length).toBe(2);
 });
+
+// ---------------------------------------------------------------------------
+// 11. Critic's blind overall_pass cannot survive a requirement-7 downgrade.
+test('driver overrides scores.overall_pass to false when the winner is downgraded to bar', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { bar: { type: 'acceptance-tests', ref: 'npm test' }, test_command: 'npm test' });
+  const opts = permissiveOptions(outputDir, {
+    randomFn: () => 0, // candidateLabel = 'A'
+    runTestCommandFn: () => ({ passed: false, exit_code: 1, output_tail: 'RED: 2 failing' }),
+    spawnCriticFn: async () => ({
+      sid: 'critic-1',
+      outputDir: '/tmp/critic-out',
+      scores: {
+        ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: 'still missing x' },
+        overall_pass: true, // critic is blind and confidently wrong
+        pattern_consistency: 0.9,
+        completeness: 0.8,
+        rationale: 'A looked better to me',
+      },
+    }),
+  });
+  const { round } = await runRound(state, opts);
+  expect(round.ab_verdict.winner).toBe('bar');
+  expect(round.scores.overall_pass).toBe(false);
+});
+
+// ---------------------------------------------------------------------------
+// 12. Three poisoned-but-downgraded rounds escalate instead of spinning to max_rounds.
+test('three consecutive downgraded rounds with critic overall_pass:true still trip the no-improvement breaker', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, {
+    bar: { type: 'acceptance-tests', ref: 'npm test' },
+    test_command: 'npm test',
+    max_rounds: 20,
+    no_improve_k: 3,
+  });
+  const opts = permissiveOptions(outputDir, {
+    randomFn: () => 0,
+    runTestCommandFn: () => ({ passed: false, exit_code: 1, output_tail: 'RED' }),
+    spawnCriticFn: async () => ({
+      sid: 'critic-1',
+      outputDir: '/tmp/critic-out',
+      scores: {
+        ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: 'same gap every round' },
+        overall_pass: true,
+      },
+    }),
+  });
+  let decision;
+  for (let i = 0; i < 3; i++) {
+    ({ decision } = await runRound(state, opts));
+  }
+  expect(decision.status).toBe('escalated');
+  expect(decision.action).toBe('escalate');
+  expect(decision.escalation.reason).toBe('no-improvement');
+});
+
+// ---------------------------------------------------------------------------
+// 13. A tie with no critic-supplied gap still leaves a non-empty single_biggest_gap.
+test('a tie verdict with an empty critic gap yields a non-empty single_biggest_gap', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir);
+  const opts = permissiveOptions(outputDir, {
+    spawnCriticFn: async () => ({
+      sid: 'critic-1',
+      outputDir: '/tmp/critic-out',
+      scores: { ab_verdict: { winner: 'tie', margin: 'none', single_biggest_gap: '' } },
+    }),
+  });
+  const { round } = await runRound(state, opts);
+  expect(round.ab_verdict.winner).toBe('tie');
+  expect(round.single_biggest_gap).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// 14. Non-overall_pass score fields from the critic survive untouched.
+test('critic score fields other than overall_pass are left untouched by the driver', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { bar: { type: 'acceptance-tests', ref: 'npm test' }, test_command: 'npm test' });
+  const opts = permissiveOptions(outputDir, {
+    randomFn: () => 0,
+    runTestCommandFn: () => ({ passed: false, exit_code: 1, output_tail: 'RED' }),
+    spawnCriticFn: async () => ({
+      sid: 'critic-1',
+      outputDir: '/tmp/critic-out',
+      scores: {
+        ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: 'gap' },
+        overall_pass: true,
+        pattern_consistency: 0.9,
+        completeness: 0.8,
+        rationale: 'A looked better to me',
+      },
+    }),
+  });
+  const { round } = await runRound(state, opts);
+  expect(round.scores.pattern_consistency).toBe(0.9);
+  expect(round.scores.completeness).toBe(0.8);
+  expect(round.scores.rationale).toBe('A looked better to me');
+});
