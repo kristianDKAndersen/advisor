@@ -6,16 +6,20 @@
 //
 // Usage:
 //   bin/advisor-loop --goal "<text>" [--task <text>] [--bar-type <type>] [--bar-ref <ref>]
-//     [--spec <file>] [--refine] [--max-rounds <n>] [--cost-ceiling <usd>]
-//     [--no-improve-k <n>] [--autonomy L1|L2|L3] [--gate <path>] [--agent <name>]
-//     [--repo-root <path>] [--output-dir <path>] [--run-id <id>] [--dry-run]
+//     [--spec <file>] [--refine --bar-ref <existing-artifact>] [--max-rounds <n>]
+//     [--cost-ceiling <usd>] [--no-improve-k <n>] [--autonomy L1|L2|L3] [--gate <path>]
+//     [--agent <name>] [--repo-root <path>] [--output-dir <path>] [--run-id <id>] [--dry-run]
+//   --refine requires --bar-ref (the artifact being refined); resolves to a
+//   prior-round bar seeded with that artifact. --bar-type prior-round --bar-ref
+//   <ref> resolves identically.
 //
 // Exit codes:
 //   0  success (dry-run plan printed, or the loop was handed to runLoop)
 //   1  usage error (no arguments, or missing required --goal)
 //   2  flag validation error (bad --autonomy value, unreadable --spec,
-//      --bar-type without --bar-ref / vice versa outside the prior-round
-//      exception, or an unrecognized --flag)
+//      --bar-type without --bar-ref / vice versa, --refine or
+//      --bar-type prior-round without --bar-ref, a --bar-ref path that
+//      does not exist, or an unrecognized --flag)
 //   3  safety gate file (default or explicit --gate) does not exist on disk
 //   6  no comparison bar could be declared (lib/loop-bar.js NoBarError; bin/tournament
 //      uses 0-5, so 6 is reserved for this loop's bar-declaration guardrail)
@@ -38,7 +42,7 @@ const ALLOWED_FLAGS = new Set([
 
 const USAGE = [
   'Usage: bin/advisor-loop --goal "<text>" [--task <text>] [--bar-type <type>] [--bar-ref <ref>]',
-  '  [--spec <file>] [--refine] [--max-rounds <n>] [--cost-ceiling <usd>]',
+  '  [--spec <file>] [--refine --bar-ref <ref>] [--max-rounds <n>] [--cost-ceiling <usd>]',
   '  [--no-improve-k <n>] [--autonomy L1|L2|L3] [--gate <path>] [--agent <name>]',
   '  [--repo-root <path>] [--output-dir <path>] [--run-id <id>] [--dry-run]',
 ].join('\n');
@@ -76,25 +80,37 @@ class UsageError extends Error {
 // requires BOTH barType and barRef to take the explicit path, so a lone
 // --bar-type would otherwise silently fall through to the spec-derived
 // acceptance-tests bar. Validated here, at the flag-parsing boundary, instead
-// of inside lib/loop-bar.js. prior-round is the one bar type that legitimately
-// takes its ref implicitly (from round 0's artifacts), so --bar-type
-// prior-round alone is valid and maps onto the --refine path.
+// of inside lib/loop-bar.js.
+//
+// --refine means "refine an artifact the operator already has" — so the
+// artifact path must be supplied via --bar-ref; there is no round-0 to seed
+// it from implicitly at CLI-invocation time. --refine and --bar-type
+// prior-round therefore both require --bar-ref and both resolve to the same
+// bar: { type: 'prior-round', ref: <bar-ref> }, passed straight to resolveBar
+// as an explicit barType+barRef pair (its case-1 branch), so lib/loop-bar.js
+// needs no change.
 function validateBarFlags(flags) {
   const barType = typeof flags['bar-type'] === 'string' ? flags['bar-type'] : undefined;
   const barRef = typeof flags['bar-ref'] === 'string' ? flags['bar-ref'] : undefined;
+  const refine = Boolean(flags.refine);
 
-  if (barType && barRef === undefined) {
-    if (barType === 'prior-round') {
-      return { barType: undefined, barRef: undefined, refine: true };
+  if ((refine || barType === 'prior-round') && barRef === undefined) {
+    throw new UsageError('--refine requires --bar-ref (the path to the artifact being refined)');
+  }
+  if (refine || barType === 'prior-round') {
+    const resolvedRef = path.resolve(barRef);
+    if (!fs.existsSync(resolvedRef)) {
+      throw new UsageError(`--bar-ref path not found: ${barRef}`);
     }
-    throw new UsageError(
-      `--bar-type "${barType}" requires --bar-ref (the only exception is --bar-type prior-round)`,
-    );
+    return { barType: 'prior-round', barRef, refine: true };
+  }
+  if (barType && barRef === undefined) {
+    throw new UsageError(`--bar-type "${barType}" requires --bar-ref`);
   }
   if (!barType && barRef !== undefined) {
     throw new UsageError('--bar-ref requires --bar-type');
   }
-  return { barType, barRef, refine: Boolean(flags.refine) };
+  return { barType, barRef, refine };
 }
 
 function loadSpecTestCommand(specPath) {

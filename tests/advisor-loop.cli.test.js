@@ -45,10 +45,11 @@ test('no bar inputs at all exits 6 with a stderr message', () => {
   expect(res.stderr).toContain('no comparison bar could be declared');
 });
 
-test('--refine without round-0 artifacts exits 6', () => {
+test('--refine without --bar-ref exits 2 naming --bar-ref', () => {
   const res = runCli(['--goal', 'do the thing', '--refine']);
-  expect(res.status).toBe(6);
-  expect(res.stderr).toContain('no comparison bar could be declared');
+  expect(res.status).toBe(2);
+  expect(res.stderr).toContain('--bar-ref');
+  expect(res.stderr).not.toContain('no comparison bar could be declared');
 });
 
 // ── 4. precedence hole fix ───────────────────────────────────────────────
@@ -66,14 +67,73 @@ test('--bar-ref without --bar-type is rejected', () => {
   expect(res.stderr).toContain('--bar-ref requires --bar-type');
 });
 
-test('--bar-type prior-round without --bar-ref is the documented exception (falls through to refine path, not rejected)', () => {
+test('--bar-type prior-round without --bar-ref exits 2 naming --bar-ref', () => {
   const res = runCli(['--goal', 'do the thing', '--bar-type', 'prior-round']);
-  // Not rejected at the flag-validation boundary — it proceeds to resolveBar's
-  // refine path, which (with no round-0 artifacts available) exits 6, not the
-  // flag-validation error.
-  expect(res.status).toBe(6);
-  expect(res.stderr).not.toContain('requires --bar-ref');
-  expect(res.stderr).toContain('no comparison bar could be declared');
+  expect(res.status).toBe(2);
+  expect(res.stderr).toContain('--bar-ref');
+  expect(res.stderr).not.toContain('no comparison bar could be declared');
+});
+
+// ── 4b. --refine / --bar-type prior-round seeded from --bar-ref ──────────
+
+test('--refine --bar-ref <existing artifact> resolves to a prior-round bar seeded with that path', async () => {
+  const artifactPath = path.join(os.tmpdir(), `advisor-loop-artifact-${Date.now()}.txt`);
+  fs.writeFileSync(artifactPath, 'artifact\n');
+  const repoRoot = makeTmpRepo();
+  let plan;
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--refine', '--bar-ref', artifactPath,
+        '--repo-root', repoRoot, '--dry-run'],
+      { stdout: { write: (s) => { plan = JSON.parse(s); } }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    expect(plan.bar).toEqual({ type: 'prior-round', ref: artifactPath });
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(artifactPath, { force: true });
+  }
+});
+
+test('--bar-type prior-round --bar-ref <existing artifact> resolves identically', async () => {
+  const artifactPath = path.join(os.tmpdir(), `advisor-loop-artifact-${Date.now()}-b.txt`);
+  fs.writeFileSync(artifactPath, 'artifact\n');
+  const repoRoot = makeTmpRepo();
+  let plan;
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'prior-round', '--bar-ref', artifactPath,
+        '--repo-root', repoRoot, '--dry-run'],
+      { stdout: { write: (s) => { plan = JSON.parse(s); } }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    expect(plan.bar).toEqual({ type: 'prior-round', ref: artifactPath });
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(artifactPath, { force: true });
+  }
+});
+
+test('--refine --bar-ref <nonexistent path> exits 2 naming the path', () => {
+  const missingPath = '/tmp/advisor-loop-does-not-exist-xyz.txt';
+  const res = runCli(['--goal', 'do the thing', '--refine', '--bar-ref', missingPath]);
+  expect(res.status).toBe(2);
+  expect(res.stderr).toContain(missingPath);
+});
+
+test('--refine --bar-ref <existing artifact> --dry-run exits 0 and creates no state file', () => {
+  const artifactPath = path.join(os.tmpdir(), `advisor-loop-artifact-${Date.now()}-c.txt`);
+  fs.writeFileSync(artifactPath, 'artifact\n');
+  const repoRoot = makeTmpRepo();
+  try {
+    const res = runCli(['--goal', 'do the thing', '--refine', '--bar-ref', artifactPath,
+      '--repo-root', repoRoot, '--dry-run']);
+    expect(res.status).toBe(0);
+    expect(fs.existsSync(path.join(repoRoot, '.advisor-loop'))).toBe(false);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(artifactPath, { force: true });
+  }
 });
 
 // ── 5. state init and autonomy persistence ───────────────────────────────
