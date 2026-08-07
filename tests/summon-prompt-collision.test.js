@@ -13,9 +13,11 @@
 // updated from the .advisor-root-prompt.md / preservedPath contract to the new
 // .advisor-preserved / preserved-list contract for that reason.
 //
-// The rule is case-DIFFERENCE only: a tracked file in the EXACT casing the overlay
-// writes (e.g. `.claude/settings.json`) is intended, pre-existing overwrite
-// behaviour and is deliberately NOT preserved.
+// The rule fires on ANY collision, case-differing or exact: a tracked file at
+// the SAME path the overlay writes (e.g. `.claude/settings.json`) is preserved
+// too — the overlay still wins at its own path, but the repo's own version
+// becomes recoverable under .advisor-preserved instead of being silently
+// destroyed.
 
 import { test, expect, afterEach } from 'bun:test';
 import os from 'os';
@@ -146,23 +148,28 @@ test('collision: nested case-difference preserved under .advisor-preserved with 
   expect(ret.preserved[0].trackedPath).toBe('docs/readme.md');
 });
 
-// REQUIREMENT — EXACT casing is NOT preserved. The repo tracks
-// `.claude/settings.json`; the overlay writes `.claude/settings.json` at the same
-// exact path. This is intended, pre-existing overwrite behaviour (a repo shipping
-// its own file) and MUST NOT trigger preservation, or we change behaviour for
-// every repo that legitimately ships its own tracked file. No CLAUDE.md collision
-// here (repo tracks no claude.md), so the whole overlay must be inert.
-test('exact casing: a same-casing tracked file the overlay writes is NOT preserved', () => {
+// REQUIREMENT — EXACT casing IS preserved. The repo tracks
+// `.claude/settings.json`; the overlay writes `.claude/settings.json` at the
+// same exact path. This collides just as surely as a case-fold accident — it's
+// simply not caused by filesystem case-insensitivity — so the repo's original
+// is preserved to .advisor-preserved/.claude/settings.json BEFORE the overlay
+// runs, and the overlay still wins at the live path (worker gets its own
+// settings). No CLAUDE.md collision here (repo tracks no claude.md).
+test('exact casing: a same-casing tracked file collision IS preserved, overlay still wins', () => {
   const { repo, dest, agentSrc } = scaffold(
     { '.claude/settings.json': 'REPO SETTINGS\n', 'README.md': '# r\n' },
     { 'CLAUDE.md': 'ROLE\n', '.claude/settings.json': 'CODER SETTINGS\n' }
   );
   const { ret } = captureStderr(() => overlayAgentFiles(agentSrc, dest, repo));
-  // Nothing preserved: no .advisor-preserved dir, empty list, no collision claim.
-  expect(fs.existsSync(path.join(dest, '.advisor-preserved'))).toBe(false);
-  expect(ret.collision).toBe(false);
-  expect(ret.preserved).toEqual([]);
-  // Pre-existing behaviour is unchanged: the overlay's settings won.
+  const preserved = path.join(dest, '.advisor-preserved', '.claude', 'settings.json');
+  expect(fs.existsSync(preserved)).toBe(true);
+  expect(fs.readFileSync(preserved, 'utf8')).toBe('REPO SETTINGS\n');
+  expect(ret.collision).toBe(true);
+  expect(ret.preserved).toHaveLength(1);
+  expect(ret.preserved[0].trackedPath).toBe('.claude/settings.json');
+  expect(ret.preserved[0].overlayPath).toBe('.claude/settings.json');
+  expect(ret.preserved[0].preservedPath).toBe(preserved);
+  // Overlay still wins at the live path: the worker gets its own settings.
   expect(fs.readFileSync(path.join(dest, '.claude/settings.json'), 'utf8')).toBe('CODER SETTINGS\n');
 });
 
