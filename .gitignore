@@ -20,6 +20,27 @@ venv/
 #  to target repos; include here so this template repo is also covered)
 .advisor-output/
 
+# ── Vault data — never commit ─────────────────────────────────────────────
+# Each user builds their own vault as they use the advisor; only the code that
+# manages a vault belongs in this repo. The default root is ~/.advisor/vault,
+# outside any checkout — but vaultRoot() is `process.env.ADVISOR_VAULT ||
+# ~/.advisor/vault`, so ADVISOR_VAULT can point *inside* a working copy (an
+# easy thing to do while testing). These patterns make committing note content
+# or the SQLite index impossible rather than merely unlikely.
+#
+# Deliberately scoped under a `vault/` parent: bare `lessons/` or `sessions/`
+# would also swallow unrelated future repo directories with those names.
+.advisor/
+**/vault/.cache/
+**/vault/lessons/
+**/vault/synthesis/
+**/vault/sessions/
+**/vault/projects/
+**/vault/reminders/
+vault.db
+vault.db-wal
+vault.db-shm
+
 # ── Claude Code runtime artifacts ─────────────────────────────────────────
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
