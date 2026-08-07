@@ -102,13 +102,20 @@ function validateBarFlags(flags) {
     if (!fs.existsSync(resolvedRef)) {
       throw new UsageError(`--bar-ref path not found: ${barRef}`);
     }
-    return { barType: 'prior-round', barRef, refine: true };
+    return { barType: 'prior-round', barRef: resolvedRef, refine: true };
   }
   if (barType && barRef === undefined) {
     throw new UsageError(`--bar-type "${barType}" requires --bar-ref`);
   }
   if (!barType && barRef !== undefined) {
     throw new UsageError('--bar-ref requires --bar-type');
+  }
+  // external-reference's ref is a filesystem path (the artifact being compared
+  // against) so it gets the same resolve-to-absolute treatment as prior-round.
+  // acceptance-tests' ref is a shell test command and metric's ref is a
+  // threshold descriptor — neither is a path, so path.resolve would corrupt them.
+  if (barType === 'external-reference' && barRef !== undefined) {
+    return { barType, barRef: path.resolve(barRef), refine };
   }
   return { barType, barRef, refine };
 }

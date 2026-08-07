@@ -136,6 +136,94 @@ test('--refine --bar-ref <existing artifact> --dry-run exits 0 and creates no st
   }
 });
 
+// ── 4c. relative --bar-ref is persisted as a resolved absolute path ─────
+
+test('a relative --bar-ref for prior-round is persisted as the resolved absolute path, still pointing at the same file', async () => {
+  const cwd = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-cwd-'));
+  fs.writeFileSync(path.join(cwd, 'artifact.txt'), 'artifact content\n');
+  const repoRoot = makeTmpRepo();
+  const priorCwd = process.cwd();
+  let plan;
+  try {
+    process.chdir(cwd);
+    const code = await main(
+      ['--goal', 'do the thing', '--refine', '--bar-ref', 'artifact.txt',
+        '--repo-root', repoRoot, '--dry-run'],
+      { stdout: { write: (s) => { plan = JSON.parse(s); } }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    expect(plan.bar.ref).not.toBe('artifact.txt');
+    expect(plan.bar.ref).toBe(path.join(cwd, 'artifact.txt'));
+    expect(fs.readFileSync(plan.bar.ref, 'utf8')).toBe('artifact content\n');
+  } finally {
+    process.chdir(priorCwd);
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('a relative --bar-type external-reference --bar-ref is persisted as the resolved absolute path', async () => {
+  const cwd = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-cwd-'));
+  fs.writeFileSync(path.join(cwd, 'ref.png'), 'binary-ish content\n');
+  const repoRoot = makeTmpRepo();
+  const priorCwd = process.cwd();
+  let plan;
+  try {
+    process.chdir(cwd);
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'external-reference', '--bar-ref', 'ref.png',
+        '--repo-root', repoRoot, '--dry-run'],
+      { stdout: { write: (s) => { plan = JSON.parse(s); } }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    expect(plan.bar.ref).not.toBe('ref.png');
+    expect(plan.bar.ref).toBe(path.join(cwd, 'ref.png'));
+    expect(fs.readFileSync(plan.bar.ref, 'utf8')).toBe('binary-ish content\n');
+  } finally {
+    process.chdir(priorCwd);
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('an acceptance-tests bar ref (a shell command) is left byte-exact, not path-resolved', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const testCommand = 'bun test ./relative/dir';
+  let plan;
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'acceptance-tests', '--bar-ref', testCommand,
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--dry-run'],
+      { stdout: { write: (s) => { plan = JSON.parse(s); } }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    expect(plan.bar).toEqual({ type: 'acceptance-tests', ref: testCommand });
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('a metric bar ref (a threshold descriptor) is left byte-exact, not path-resolved', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const metricRef = 'coverage >= 0.8';
+  let plan;
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'metric', '--bar-ref', metricRef,
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--dry-run'],
+      { stdout: { write: (s) => { plan = JSON.parse(s); } }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    expect(plan.bar).toEqual({ type: 'metric', ref: metricRef });
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
 // ── 5. state init and autonomy persistence ───────────────────────────────
 
 test('autonomy_level defaults to L2 and is persisted to round_state.json', async () => {
