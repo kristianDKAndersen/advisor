@@ -219,6 +219,60 @@ describe('classifySessionDir', () => {
     expect(v.transient).toBe(null);
   });
 
+  test('unparseable body from wrapper does not classify clean-result and defaults to deterministic', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { ts: 1, type: 'result', from: 'wrapper', seq: 3, body: 'not json {{{' },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).not.toBe('clean-result');
+    expect(v.transient).toBe(false);
+    expect(v.evidence).toMatch(/unparseable/);
+  });
+
+  test('unparseable body from a real agent name does not classify clean-result and defaults to deterministic', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: 'not json {{{' },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).not.toBe('clean-result');
+    expect(v.transient).toBe(false);
+    expect(v.evidence).toMatch(/unparseable/);
+  });
+
+  test('body parsing to a non-object primitive (bare JSON string) does not classify clean-result', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: JSON.stringify('just a string') },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).not.toBe('clean-result');
+    expect(v.transient).toBe(false);
+    expect(v.evidence).toMatch(/unparseable/);
+  });
+
+  test('body parsing to a non-object primitive (bare number) does not classify clean-result', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: '42' },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).not.toBe('clean-result');
+    expect(v.transient).toBe(false);
+    expect(v.evidence).toMatch(/unparseable/);
+  });
+
+  test('REGRESSION: valid string body with verdict=complete still classifies clean-result with transient null', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: JSON.stringify({ summary: 'Applied all fixes', verdict: 'complete', paths: [] }) },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('clean-result');
+    expect(v.transient).toBe(null);
+  });
+
   test('unrecognised/empty session directory defaults to transient:false with explanatory evidence', () => {
     const dir = makeSessionDir();
     const v = classifySessionDir(dir);
