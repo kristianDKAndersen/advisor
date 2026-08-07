@@ -24,7 +24,7 @@ describe('classifySessionDir', () => {
     const dir = makeSessionDir();
     writeTmuxLog(dir, 'some boot lines\nCommand failed: tmux pipe-pane -t %3\nmore lines\n');
     writeOutbox(dir, [
-      { seq: 1, type: 'result', from: 'wrapper', body: { summary: 'worker exited without result (exit_code=unknown); reason=pane-died', verdict: 'blocked', paths: [] } },
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=pane-died', verdict: 'blocked', paths: [] }) },
     ]);
     const v = classifySessionDir(dir);
     expect(v.category).toBe('pane-death');
@@ -36,7 +36,7 @@ describe('classifySessionDir', () => {
   test('DETERMINISTIC pane-death: exit_code=137 (SIGKILL/OOM)', () => {
     const dir = makeSessionDir();
     writeOutbox(dir, [
-      { seq: 1, type: 'result', from: 'wrapper', body: { summary: 'worker exited without result (exit_code=137, signal=SIGKILL); reason=pane-died', verdict: 'blocked', paths: [] } },
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=137, signal=SIGKILL); reason=pane-died', verdict: 'blocked', paths: [] }) },
     ]);
     const v = classifySessionDir(dir);
     expect(v.category).toBe('pane-death');
@@ -47,7 +47,7 @@ describe('classifySessionDir', () => {
   test('exit_code=143 (SIGTERM) is resolved by accompanying reason, not treated as a bare crash', () => {
     const dir = makeSessionDir();
     writeOutbox(dir, [
-      { seq: 1, type: 'result', from: 'wrapper', body: { summary: 'worker exited without result (exit_code=143); reason=timeout', verdict: 'blocked', paths: [] } },
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=143); reason=timeout', verdict: 'blocked', paths: [] }) },
     ]);
     const v = classifySessionDir(dir);
     expect(v.category).toBe('hit-timeout');
@@ -57,7 +57,7 @@ describe('classifySessionDir', () => {
   test('hit-timeout: reason=timeout in outbox', () => {
     const dir = makeSessionDir();
     writeOutbox(dir, [
-      { seq: 1, type: 'result', from: 'wrapper', body: { summary: 'worker exited without result (exit_code=unknown); reason=timeout', verdict: 'blocked', paths: [] } },
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=timeout', verdict: 'blocked', paths: [] }) },
     ]);
     const v = classifySessionDir(dir);
     expect(v.category).toBe('hit-timeout');
@@ -118,7 +118,7 @@ describe('classifySessionDir', () => {
     const dir = makeSessionDir();
     writeOutbox(dir, [
       { seq: 1, type: 'progress', from: 'coder', body: 'starting' },
-      { seq: 2, type: 'result', from: 'coder', body: { summary: 'Applied all fixes', verdict: 'complete', paths: ['/x/changes.md'] } },
+      { seq: 2, type: 'result', from: 'coder', body: JSON.stringify({ summary: 'Applied all fixes', verdict: 'complete', paths: ['/x/changes.md'] }) },
     ]);
     const v = classifySessionDir(dir);
     expect(v.category).toBe('clean-result');
@@ -128,7 +128,7 @@ describe('classifySessionDir', () => {
   test('clean-result: genuine result verdict=partial', () => {
     const dir = makeSessionDir();
     writeOutbox(dir, [
-      { seq: 1, type: 'result', from: 'coder', body: { summary: 'Applied 3/5 fixes', verdict: 'partial', paths: [] } },
+      { seq: 1, type: 'result', from: 'coder', body: JSON.stringify({ summary: 'Applied 3/5 fixes', verdict: 'partial', paths: [] }) },
     ]);
     const v = classifySessionDir(dir);
     expect(v.category).toBe('clean-result');
@@ -139,7 +139,7 @@ describe('classifySessionDir', () => {
     const dir = makeSessionDir();
     writeOutbox(dir, [
       { seq: 1, type: 'progress', from: 'coder', body: 'starting' },
-      { seq: 2, type: 'result', from: 'coder', body: { summary: 'Cannot satisfy spec assertion X', verdict: 'blocked', paths: [] } },
+      { seq: 2, type: 'result', from: 'coder', body: JSON.stringify({ summary: 'Cannot satisfy spec assertion X', verdict: 'blocked', paths: [] }) },
     ]);
     const v = classifySessionDir(dir);
     expect(v.category).toBe('blocked');
@@ -149,8 +149,70 @@ describe('classifySessionDir', () => {
   test('genuine result arriving after a racey synthetic no-op-success marker wins (last-result semantics)', () => {
     const dir = makeSessionDir();
     writeOutbox(dir, [
-      { seq: 1, type: 'result', from: 'wrapper', body: { summary: 'worker exited without result (exit_code=unknown); reason=no-op-success', verdict: 'blocked', paths: [] } },
-      { seq: 2, type: 'result', from: 'coder', body: { summary: 'Applied all fixes', verdict: 'complete', paths: [] } },
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=no-op-success', verdict: 'blocked', paths: [] }) },
+      { seq: 2, type: 'result', from: 'coder', body: JSON.stringify({ summary: 'Applied all fixes', verdict: 'complete', paths: [] }) },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('clean-result');
+    expect(v.transient).toBe(null);
+  });
+
+  test('REGRESSION: string body (real on-disk shape) with reason=timeout classifies hit-timeout, not clean-result', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=timeout', verdict: 'blocked', paths: [] }) },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('hit-timeout');
+    expect(v.transient).toBe(false);
+  });
+
+  test('REGRESSION: string body carrying reason=pane-died with exit_code=137 classifies deterministic pane-death', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=137, signal=SIGKILL); reason=pane-died', verdict: 'blocked', paths: [] }) },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.transient).toBe(false);
+  });
+
+  test('REGRESSION: genuine worker result with string body and verdict=blocked classifies blocked, not clean-result', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: JSON.stringify({ summary: 'Cannot satisfy spec assertion X', verdict: 'blocked', paths: [] }) },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('blocked');
+    expect(v.transient).toBe(null);
+  });
+
+  test('REGRESSION: genuine worker result with string body and verdict=complete classifies clean-result', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: JSON.stringify({ summary: 'Applied all fixes', verdict: 'complete', paths: [] }) },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('clean-result');
+    expect(v.transient).toBe(null);
+  });
+
+  test('REGRESSION: unparseable/garbage string body does not throw and defaults to deterministic with evidence', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: '{not valid json' },
+    ]);
+    let v;
+    expect(() => { v = classifySessionDir(dir); }).not.toThrow();
+    expect(v.transient).not.toBe(true);
+    expect(typeof v.evidence).toBe('string');
+    expect(v.evidence.length).toBeGreaterThan(0);
+  });
+
+  test('OBJECT body still works (parser stays tolerant of both shapes)', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: { summary: 'Applied all fixes', verdict: 'complete', paths: [] } },
     ]);
     const v = classifySessionDir(dir);
     expect(v.category).toBe('clean-result');
@@ -171,7 +233,7 @@ describe('classifyPaneDeath adapter (lib/loop-termination.js options.classifyPan
     const dir = makeSessionDir();
     writeTmuxLog(dir, 'Command failed: tmux pipe-pane -t %3\n');
     writeOutbox(dir, [
-      { seq: 1, type: 'result', from: 'wrapper', body: { summary: 'worker exited without result (exit_code=unknown); reason=pane-died', verdict: 'blocked', paths: [] } },
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=pane-died', verdict: 'blocked', paths: [] }) },
     ]);
     expect(classifyPaneDeath({ session_dir: dir })).toBe('transient');
   });
@@ -179,7 +241,7 @@ describe('classifyPaneDeath adapter (lib/loop-termination.js options.classifyPan
   test('returns "deterministic" for a round pointing at exit_code=137', () => {
     const dir = makeSessionDir();
     writeOutbox(dir, [
-      { seq: 1, type: 'result', from: 'wrapper', body: { summary: 'worker exited without result (exit_code=137, signal=SIGKILL); reason=pane-died', verdict: 'blocked', paths: [] } },
+      { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=137, signal=SIGKILL); reason=pane-died', verdict: 'blocked', paths: [] }) },
     ]);
     expect(classifyPaneDeath({ session_dir: dir })).toBe('deterministic');
   });
