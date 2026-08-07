@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const { initRoundState, readRoundState } = require('../lib/round-state');
 const { runRound, runLoop } = require('../lib/loop-driver');
+const { checkGate } = require('../lib/safety-gate');
 const session = require('../lib/session');
 
 function tmpOutputDir() {
@@ -517,4 +518,110 @@ test('a worker with a result envelope keeps the driver-derived failure_category 
   expect(round.failure_category).toBe('blocked');
   expect(decision.action).toBe('escalate');
   expect(decision.escalation.reason).toBe('blocked');
+});
+
+// ---------------------------------------------------------------------------
+// 19. The placeholder worktree_root is replaced with the round's real worktree path.
+test('a placeholder worktree_root in the loaded gate config is replaced with the round worktree path', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir);
+  const seenConfigs = [];
+  const opts = permissiveOptions(outputDir, {
+    loadGateConfigFn: () => ({
+      path_denylist: [],
+      action_allowlist: { worktree_write: true, git_commit: true },
+      worktree_root: 'REPLACE_ME_worktree_root_per_run',
+    }),
+    checkGateFn: (cfg) => {
+      seenConfigs.push(cfg.worktree_root);
+      return { allowed: true };
+    },
+    spawnCriticFn: async () => ({
+      sid: 'critic-1',
+      outputDir: '/tmp/critic-out',
+      scores: { ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: '' } },
+    }),
+  });
+  await runRound(state, opts);
+  expect(seenConfigs.length).toBeGreaterThan(0);
+  for (const root of seenConfigs) {
+    expect(root).toBe('/tmp/wt-fixed');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 20. An operator-specified, non-placeholder worktree_root is preserved.
+test('an operator-specified non-placeholder worktree_root is not overridden', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir);
+  const seenConfigs = [];
+  const opts = permissiveOptions(outputDir, {
+    loadGateConfigFn: () => ({
+      path_denylist: [],
+      action_allowlist: { worktree_write: true, git_commit: true },
+      worktree_root: '/operator/pinned/root',
+    }),
+    checkGateFn: (cfg) => {
+      seenConfigs.push(cfg.worktree_root);
+      return { allowed: true };
+    },
+    spawnCriticFn: async () => ({
+      sid: 'critic-1',
+      outputDir: '/tmp/critic-out',
+      scores: { ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: '' } },
+    }),
+  });
+  await runRound(state, opts);
+  expect(seenConfigs.length).toBeGreaterThan(0);
+  for (const root of seenConfigs) {
+    expect(root).toBe('/operator/pinned/root');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 21. A real containment check permits a file inside the round's worktree.
+test('a file inside the round worktree is permitted by the now-real containment check', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir);
+  let capturedConfig = null;
+  const opts = permissiveOptions(outputDir, {
+    loadGateConfigFn: () => ({
+      path_denylist: [],
+      action_allowlist: { worktree_write: true, git_commit: true },
+      worktree_root: 'REPLACE_ME_worktree_root_per_run',
+    }),
+    filesChangedFn: () => ['/tmp/wt-fixed/src/a.js'],
+    checkGateFn: (cfg, files, action) => {
+      capturedConfig = cfg;
+      return checkGate(cfg, files, action);
+    },
+    spawnCriticFn: async () => ({
+      sid: 'critic-1',
+      outputDir: '/tmp/critic-out',
+      scores: { ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: '' } },
+    }),
+  });
+  const { decision } = await runRound(state, opts);
+  expect(capturedConfig.worktree_root).toBe('/tmp/wt-fixed');
+  expect(decision.status).not.toBe('gate_violation');
+});
+
+// ---------------------------------------------------------------------------
+// 22. A real containment check refuses a path escaping the round's worktree.
+test('a path escaping the round worktree is refused with reason outside_worktree', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir);
+  const opts = permissiveOptions(outputDir, {
+    loadGateConfigFn: () => ({
+      path_denylist: [],
+      action_allowlist: { worktree_write: true, git_commit: true },
+      worktree_root: 'REPLACE_ME_worktree_root_per_run',
+    }),
+    filesChangedFn: () => ['/etc/passwd'],
+    checkGateFn: (cfg, files, action) => checkGate(cfg, files, action),
+  });
+  const { decision } = await runRound(state, opts);
+  expect(decision.status).toBe('gate_violation');
+  expect(decision.escalation.detail.reason).toBe('outside_worktree');
+  expect(decision.escalation.detail.path).toBe('/etc/passwd');
 });

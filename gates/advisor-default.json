@@ -15,6 +15,7 @@
     ".advisor-preserved/**"
   ],
   "action_allowlist": {
+    "worktree_write": true,
     "git_commit": false,
     "git_push": false,
     "network_egress": false,

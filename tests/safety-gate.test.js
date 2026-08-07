@@ -141,3 +141,63 @@ test('advisor-default gate does not over-broadly deny ordinary source or test pa
   const testPath = checkGate(defaultGate, ['tests/x.test.js'], null);
   expect(testPath).toEqual({ allowed: true });
 });
+
+// The loop driver's two checkGateFn call sites (lib/loop-driver.js ~296 and
+// ~393) pass 'worktree_write' and 'git_commit'. worktree_write is the normal,
+// intended, non-destructive case (writing inside the ephemeral worktree the
+// loop already isolates); it must be allowed. Every irreversible or
+// outward-facing action must stay denied.
+
+test('advisor-default gate allows worktree_write on an ordinary in-worktree path', () => {
+  const result = checkGate(defaultGate, ['lib/foo.js'], 'worktree_write');
+  expect(result).toEqual({ allowed: true });
+});
+
+test('advisor-default gate still denies git_commit', () => {
+  const result = checkGate(defaultGate, ['lib/foo.js'], 'git_commit');
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('action_not_allowlisted');
+  expect(result.action).toBe('git_commit');
+});
+
+test('advisor-default gate still denies git_push', () => {
+  const result = checkGate(defaultGate, ['lib/foo.js'], 'git_push');
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('action_not_allowlisted');
+  expect(result.action).toBe('git_push');
+});
+
+test('advisor-default gate still denies network_egress', () => {
+  const result = checkGate(defaultGate, ['lib/foo.js'], 'network_egress');
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('action_not_allowlisted');
+  expect(result.action).toBe('network_egress');
+});
+
+test('advisor-default gate still denies delete_outside_worktree', () => {
+  const result = checkGate(defaultGate, ['lib/foo.js'], 'delete_outside_worktree');
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('action_not_allowlisted');
+  expect(result.action).toBe('delete_outside_worktree');
+});
+
+test('advisor-default gate still denies exec_deploy_scripts', () => {
+  const result = checkGate(defaultGate, ['lib/foo.js'], 'exec_deploy_scripts');
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('action_not_allowlisted');
+  expect(result.action).toBe('exec_deploy_scripts');
+});
+
+test('advisor-default gate denies an invented action not present in the allowlist at all (deny-by-default survives the fix)', () => {
+  const result = checkGate(defaultGate, ['lib/foo.js'], 'exec_rm_rf');
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('action_not_allowlisted');
+  expect(result.action).toBe('exec_rm_rf');
+});
+
+test('advisor-default gate: worktree_write does not bypass path_denylist', () => {
+  const result = checkGate(defaultGate, ['claude.md'], 'worktree_write');
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('path_denylist');
+  expect(result.matched).toBe('claude.md');
+});
