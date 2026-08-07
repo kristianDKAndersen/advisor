@@ -153,12 +153,14 @@ test('--dry-run exits 0, prints the plan, creates no worktree, and never calls r
 test('non-dry-run invocation delegates to runLoop exactly once with the initialized state', async () => {
   const repoRoot = makeTmpRepo();
   const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const gateFile = path.join(outputDir, 'stub-gate.json');
+  fs.writeFileSync(gateFile, '{}');
   let callCount = 0;
   let receivedState = null;
   try {
     const code = await main(
       ['--goal', 'do the thing', '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
-        '--repo-root', repoRoot, '--output-dir', outputDir],
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile],
       {
         runLoopFn: async (state) => { callCount++; receivedState = state; },
         stdout: { write: () => {} },
@@ -183,4 +185,122 @@ test('bin/advisor-loop source contains no round loop, critic, or gate logic of i
   expect(src).not.toContain('checkGate');
   expect(src).not.toContain('loop-critic');
   expect(src).not.toContain('decide(');
+});
+
+// ── FIX 1: --dry-run must not write state ────────────────────────────────
+
+test('--dry-run with no --output-dir leaves no round_state.json or run directory under cwd (RED before fix, GREEN after)', () => {
+  const repoRoot = makeTmpRepo();
+  try {
+    const res = childProcess.spawnSync('bun', [CLI, '--goal', 'do the thing',
+      '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png', '--dry-run'],
+      { encoding: 'utf8', cwd: repoRoot });
+    expect(res.status).toBe(0);
+    expect(fs.existsSync(path.join(repoRoot, '.advisor-loop'))).toBe(false);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+// ── FIX 2: default gate ──────────────────────────────────────────────────
+
+const DEFAULT_GATE_PATH = path.resolve(__dirname, '..', 'gates', 'advisor-default.json');
+
+test('default gate path is recorded in round_state when --gate is omitted (asserts PATH only, not file contents)', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--dry-run'],
+      { stdout: { write: () => {} }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.safety_gate_path).toBe(DEFAULT_GATE_PATH);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('an explicit --gate overrides the default and is recorded in round_state', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const gateFile = path.join(outputDir, 'my-gate.json');
+  fs.writeFileSync(gateFile, '{}');
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile, '--dry-run'],
+      { stdout: { write: () => {} }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.safety_gate_path).toBe(gateFile);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('a missing --gate file produces a non-zero exit naming the expected path', async () => {
+  const missingPath = path.join(os.tmpdir(), 'advisor-loop-does-not-exist-gate.json');
+  const stderrChunks = [];
+  const code = await main(
+    ['--goal', 'do the thing', '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+      '--gate', missingPath, '--dry-run'],
+    { stdout: { write: () => {} }, stderr: { write: (s) => stderrChunks.push(s) } },
+  );
+  expect(code).not.toBe(0);
+  expect(stderrChunks.join('')).toContain(missingPath);
+});
+
+// ── FIX 3: --task flag + strict flag allowlist ───────────────────────────
+
+test('unrecognized flag exits 2 naming the offending flag', async () => {
+  const stderrChunks = [];
+  const code = await main(
+    ['--goal', 'do the thing', '--taskk', 'oops', '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png'],
+    { stdout: { write: () => {} }, stderr: { write: (s) => stderrChunks.push(s) } },
+  );
+  expect(code).toBe(2);
+  expect(stderrChunks.join('')).toContain('--taskk');
+});
+
+test('--task text reaches the round-0 builder brief', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const gateFile = path.join(outputDir, 'stub-gate.json');
+  fs.writeFileSync(gateFile, '{}');
+  let receivedState = null;
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--task', 'OBJECTIVE: fix the widget\nSCOPE: widget.js only',
+        '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile],
+      {
+        runLoopFn: async (state) => { receivedState = state; },
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+      },
+    );
+    expect(code).toBe(0);
+    expect(receivedState.task).toBe('OBJECTIVE: fix the widget\nSCOPE: widget.js only');
+    const { buildBuilderBrief } = require('../lib/loop-driver');
+    const brief = buildBuilderBrief(receivedState, null, '/tmp/worktree');
+    expect(brief.task).toContain('OBJECTIVE: fix the widget');
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('round 1 brief contains both the original task text and the prior round gap', () => {
+  const { buildBuilderBrief } = require('../lib/loop-driver');
+  const state = { goal: 'do the thing', task: 'ORIGINAL BRIEF TEXT' };
+  const priorRound = { single_biggest_gap: 'the gap from round one', files_changed: ['src/gap-file.js'], test_state: {} };
+  const brief = buildBuilderBrief(state, priorRound, '/tmp/worktree');
+  expect(brief.task).toContain('ORIGINAL BRIEF TEXT');
+  expect(brief.task).toContain('the gap from round one');
 });

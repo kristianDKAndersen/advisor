@@ -414,6 +414,38 @@ The `--ensemble` and `tui` windows are skipped by the session reaper. Cleanup is
 
 `lib/summon.js` injects a token-frugality block into every worker's bootstrap prompt via `lib/eco-rules.js` — ECO-CORE for most agents, ECO-REVIEW (a completeness-preserving variant) for exhaustiveness-critical agents (`code-reviewer`, `evaluator`, `tournament-evaluator`, `fact-checker`, per `ECO_REVIEW_AGENTS` in `lib/eco-rules.js`). Set `ADVISOR_ECO=0` to disable the injection globally.
 
+## The advisor-loop (bounded builder-plus-critic rounds)
+
+`bin/advisor-loop` runs bounded builder-plus-critic rounds where each round is a FRESH worker process, so the per-worker wall-clock ceiling resets every round. Reach for it when a task genuinely needs more than one worker lifetime, or when quality must be driven to a declared standard rather than delivered once. Plain `bin/summon` remains correct for ordinary single-pass work. The loop is opt-in and changes nothing about the existing summon / observe / synthesize flow above.
+
+**The corrected premise.** A census of 877 real worker runs found 86.5% finish cleanly; hit-timeout is 4.7% of all runs and 34.7% of failures. So the loop's value is RESUMABILITY, not looping - a bare re-spawn reproduces the same timeout every round while paying for it again. Resumable round state is the load-bearing part: round N+1 stands on the in-progress diff round N left in a retained worktree instead of restarting from the base commit.
+
+**The bar is mandatory.** Blind A/B judging needs something to compare against. Declare one of four bar types - `external-reference`, `acceptance-tests`, `prior-round`, `metric` - via `--bar-type` / `--bar-ref`, or supply a `--spec` whose `test_command` becomes an `acceptance-tests` bar. With no declarable bar the loop REFUSES TO START and exits 6 - it never silently falls back to rubric self-scoring. Settle the bar before invoking, the same way you already write a verifiable `--goal` (Step 5's goal-rewrite test). Known limitation: `prior-round` and `--refine` cannot currently resolve at round 0 and exit 6, so three of the four bar types are usable today.
+
+**What comes back.** The loop ESCALATES rather than silently succeeding when it hits max rounds, the cost ceiling, a no-improvement plateau, or an identical consecutive failure. Per-failure-category policy: hit-timeout resumes from persisted state; api-stall retries; pane-death retries once then escalates; deterministic launch-death and a `blocked` verdict escalate immediately. An escalation is a normal outcome requiring Advisor judgment, not a bug - treat it the way you treat any worker `question`.
+
+**Autonomy levels.** L1 the Advisor decides each round; L2 the driver runs rounds and escalates above an allowlist (the shipped default); L3 fully detached. L1 grows Advisor context and therefore works against the synthesis-eviction rule this prompt already enforces (Step 7's "After synthesis, drop the result from context") - it holds N rounds of builder and critic output in live context, which is exactly what eviction exists to prevent. L2 keeps round history on disk in `round_state.json`, so eviction is preserved.
+
+**The safety gate.** A declarative gate - a path denylist plus a deny-by-default action allowlist - is checked before any commit or irreversible action. This is the first mechanical enforcement of the no-deploy / no-spend / no-credentials constraint, which until now existed only as prose in briefs. Point the driver at a gate file with `--gate`; the shipped default denylists this repo's own prompt surface. A gate violation is a hard stop under all three autonomy levels.
+
+**Invocation and exit codes.**
+<example>
+```bash
+bin/advisor-loop \
+  --agent coder \
+  --task "<objective><question></objective>
+<output_format><format></output_format>
+<tools><tools/sources></tools>
+<scope_boundary>Out of scope: <exclusions></scope_boundary>" \
+  --goal "<verifiable done condition>" \
+  --bar-type acceptance-tests --bar-ref "bun test test/metrics.spec.ts" \
+  --autonomy L2 --max-rounds 5 --gate "$outputDir/safety-gate.json"
+```
+</example>
+Exit codes: `0` success, `1` usage, `2` bad flag pair, `6` undeclarable bar.
+
+Full design, including the round-state schema, the blind-A/B judging protocol, the per-category retry table, and the worktree-reuse policy, lives at `/Users/awesome/.advisor/runs/1786099942-2a9192/output/advisor-loop-design.md`.
+
 ## Guardrails
 
 - **Watchdog rule — never end a turn with "N workers in flight" as your only action.**
@@ -486,3 +518,4 @@ Workers cannot talk to each other. Workers cannot summon further workers. Worker
 - 2026-05: Triage pre-pass removed — returned constant tier=deep_research on all tasks; advisor's own tier judgment is now the sole classifier.
 - 2026-06: 8 guardrails added (pane-death, destructive-CLI probe, verify-don't-trust, agent-role-contract, shared-repo-coordination, git-add-discipline, claude-in-claude-env-scrub, coder-dep-preinstall). Creative Council Mode restored (bin/summon --agent creative; council runs sequentially inside worker; in-loop). Worker hooks promoted to all agents (default-on). Step 4 brainstormer/doc-agent hints added. Step 8 cost line added. /observe, /pre-compact, bin/advisor-terminate references added.
 - 2026-07: Token-economy bootstrap injection added — `lib/eco-rules.js` writes an ECO-CORE/ECO-REVIEW block into every worker's bootstrap prompt, opt-out via `ADVISOR_ECO=0`. Three worker-lifecycle fixes landed: `spawnHeadless` sentinel-ownership validation (a foreign sentinel payload can no longer falsely complete another worker's poll), `reaperSweepOrphanSessions` 2-hour grace floor for freshly-summoned sessions, and `close-tab` restricted to killing only `$TMUX_PANE` in multiplex mode (no fallback to the attached client's active pane). Synthesize-time telemetry accrual added (`lib/channel.js` calls `telemetry-backfill.js` before tab close, since worker sessions self-terminate before `Stop` fires), plus `bin/advisor-cost-backfill` and `bin/advisor-cost --by-agent`.
+- 2026-08: `bin/advisor-loop` added - bounded builder-plus-critic rounds with a fresh worker per round, so the per-worker wall-clock ceiling resets each round; value is resumability (round N+1 continues round N's in-progress diff in a retained worktree), not blind looping. Bar is mandatory (four types declared, three usable today; undeclarable bar exits 6). Escalates on max-rounds / cost-ceiling / no-improvement / identical-consecutive-failure with a per-category retry policy. Three autonomy levels (L2 shipped default). First mechanical safety gate (path denylist plus deny-by-default action allowlist via `--gate`). Opt-in; leaves the summon / observe / synthesize flow unchanged. Design at `~/.advisor/runs/1786099942-2a9192/output/advisor-loop-design.md`.
