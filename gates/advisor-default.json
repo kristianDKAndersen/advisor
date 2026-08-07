@@ -20,6 +20,6 @@
     "delete_outside_worktree": false,
     "exec_deploy_scripts": false
   },
-  "worktree_root": "/tmp/advisor-loop-example-run",
+  "worktree_root": "REPLACE_ME_worktree_root_per_run",
   "on_violation": "halt-escalate"
 }

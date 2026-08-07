@@ -67,3 +67,56 @@ test('violation is a structured object, never a bare boolean', () => {
   expect(result).not.toBe(false);
   expect(result.allowed).toBe(false);
 });
+
+// gates/advisor-default.json is the shipped default gate. It is loaded here
+// (not copied) so the real file is under test. Its worktree_root is a
+// placeholder ("REPLACE_ME_worktree_root_per_run") meant to be overridden
+// per run by the loop driver; these tests pass files_changed only (no
+// action) so the placeholder never participates in the outside_worktree
+// check.
+const defaultGatePath = path.join(__dirname, '..', 'gates', 'advisor-default.json');
+const defaultGate = loadGateConfig(defaultGatePath);
+
+test('advisor-default gate documents worktree_root as a placeholder to override per run', () => {
+  expect(defaultGate.worktree_root).toBe('REPLACE_ME_worktree_root_per_run');
+});
+
+test('advisor-default gate denies lowercase claude.md (the tracked root prompt)', () => {
+  const result = checkGate(defaultGate, ['claude.md'], null);
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('path_denylist');
+  expect(result.matched).toBe('claude.md');
+});
+
+test('advisor-default gate denies uppercase CLAUDE.md (macOS case-insensitive collision with claude.md)', () => {
+  const result = checkGate(defaultGate, ['CLAUDE.md'], null);
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('path_denylist');
+  expect(result.matched).toBe('CLAUDE.md');
+});
+
+test('advisor-default gate denies a path under spawns/', () => {
+  const result = checkGate(defaultGate, ['spawns/coder/CLAUDE.md'], null);
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('path_denylist');
+  expect(result.matched).toBe('spawns/**');
+});
+
+test('advisor-default gate denies a path under .claude/', () => {
+  const result = checkGate(defaultGate, ['.claude/settings.json'], null);
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('path_denylist');
+  expect(result.matched).toBe('.claude/**');
+});
+
+test('advisor-default gate denies a path under gates/ (a loop cannot rewrite its own gate)', () => {
+  const result = checkGate(defaultGate, ['gates/advisor-default.json'], null);
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('path_denylist');
+  expect(result.matched).toBe('gates/**');
+});
+
+test('advisor-default gate still allows a normal source path', () => {
+  const result = checkGate(defaultGate, ['lib/foo.js'], null);
+  expect(result).toEqual({ allowed: true });
+});
