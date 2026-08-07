@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const { initRoundState, readRoundState } = require('../lib/round-state');
 const { runRound, runLoop } = require('../lib/loop-driver');
+const session = require('../lib/session');
 
 function tmpOutputDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'loop-driver-test-'));
@@ -229,14 +230,24 @@ test('autonomy_level defaults to L2 when unspecified, and escalations surface a 
 
 // ---------------------------------------------------------------------------
 // 9. Resume, not restart, on hit-timeout.
+// UPDATED (failure-classifier wiring): status:'terminated' has no result
+// envelope, so failure_category now comes from classifySessionDir, not from
+// the driver's coarse status guess. sessionDirFn is stubbed to a fixture
+// carrying genuine hit-timeout evidence (tmux-runner.log) so this test keeps
+// exercising a real timeout rather than an empty/missing session dir, which
+// the classifier would default to 'launch-death' (its conservative default
+// for no evidence at all) and flip this test's expected action to escalate.
 test('resume round reuses the existing worktree_path instead of creating a new one', async () => {
   const outputDir = tmpOutputDir();
   const state = baseInit(outputDir, { max_rounds: 10 });
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loop-driver-fixture-'));
+  fs.writeFileSync(path.join(fixtureDir, 'tmux-runner.log'), 'spawnHeadless timed out after 1200000ms\n');
   const wtCalls = [];
   const opts = permissiveOptions(outputDir, {
     runParallelFn: async () => ({
       workers: [{ sid: 'builder-1', status: 'terminated', verdict: null, paths: [], summary: '' }], // maps to hit-timeout
     }),
+    sessionDirFn: () => fixtureDir,
     getOrCreateWorktreeFn: (repoRoot, wtOpts) => {
       wtCalls.push(wtOpts.worktreePath || null);
       const p = wtOpts.worktreePath || '/tmp/wt-round0';
@@ -393,4 +404,117 @@ test('critic score fields other than overall_pass are left untouched by the driv
   expect(round.scores.pattern_consistency).toBe(0.9);
   expect(round.scores.completeness).toBe(0.8);
   expect(round.scores.rationale).toBe('A looked better to me');
+});
+
+// ---------------------------------------------------------------------------
+// 15. session_dir wiring (design §10 open-decision-4).
+test('roundRecord.session_dir is populated from the worker sid via session.sessionDir', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir);
+  const opts = permissiveOptions(outputDir, {
+    spawnCriticFn: async () => ({
+      sid: 'critic-1',
+      outputDir: '/tmp/critic-out',
+      scores: { ab_verdict: { winner: 'tie', margin: 'none', single_biggest_gap: '' } },
+    }),
+  });
+  const { round } = await runRound(state, opts);
+  expect(round.session_dir).toBe(session.sessionDir('builder-1'));
+});
+
+// ---------------------------------------------------------------------------
+// 16. decide() actually consults the injected classifyPaneDeath adapter.
+test('a stubbed classifyPaneDeath returning transient causes decide() to retry, where the unstubbed wired default (unresolvable session_dir) escalates', async () => {
+  const outputDir = tmpOutputDir();
+  const stateTransient = baseInit(outputDir, { max_rounds: 10 });
+  const transientOpts = permissiveOptions(outputDir, {
+    runParallelFn: async () => ({
+      workers: [{ sid: 'builder-1', status: 'terminated', verdict: null, paths: [], summary: '' }],
+    }),
+    classifySessionDirFn: () => ({ category: 'pane-death', transient: false, evidence: 'stub' }),
+    classifyPaneDeathFn: () => 'transient',
+    spawnCriticFn: async () => ({ sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { ab_verdict: null } }),
+  });
+  const { round: roundTransient, decision: decisionTransient } = await runRound(stateTransient, transientOpts);
+  expect(roundTransient.failure_category).toBe('pane-death');
+  expect(decisionTransient.action).toBe('retry');
+
+  const outputDir2 = tmpOutputDir();
+  const stateDefault = baseInit(outputDir2, { max_rounds: 10 });
+  const defaultOpts = permissiveOptions(outputDir2, {
+    runParallelFn: async () => ({
+      workers: [{ sid: 'builder-nonexistent-xyz', status: 'terminated', verdict: null, paths: [], summary: '' }],
+    }),
+    classifySessionDirFn: () => ({ category: 'pane-death', transient: false, evidence: 'stub' }),
+    spawnCriticFn: async () => ({ sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { ab_verdict: null } }),
+  });
+  const { decision: decisionDefault } = await runRound(stateDefault, defaultOpts);
+  expect(decisionDefault.action).toBe('escalate');
+});
+
+// ---------------------------------------------------------------------------
+// 17. No result envelope: failure_category comes from the classifier, not the driver's guess.
+test('a worker with no result envelope gets failure_category hit-timeout from a fixture session dir', async () => {
+  const outputDir = tmpOutputDir();
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loop-driver-fixture-'));
+  fs.writeFileSync(path.join(fixtureDir, 'tmux-runner.log'), 'spawnHeadless timed out after 1200000ms\n');
+  const state = baseInit(outputDir, { max_rounds: 10 });
+  const opts = permissiveOptions(outputDir, {
+    // driver's own classifyFailure would guess 'launch-death' for status:'error'
+    runParallelFn: async () => ({
+      workers: [{ sid: 'builder-1', status: 'error', verdict: null, paths: [], summary: '' }],
+    }),
+    sessionDirFn: () => fixtureDir,
+    spawnCriticFn: async () => ({ sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { ab_verdict: null } }),
+  });
+  const { round, decision } = await runRound(state, opts);
+  expect(round.session_dir).toBe(fixtureDir);
+  expect(round.failure_category).toBe('hit-timeout');
+  expect(decision.action).toBe('resume');
+});
+
+test('a worker with no result envelope gets failure_category pane-death from a fixture session dir', async () => {
+  const outputDir = tmpOutputDir();
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loop-driver-fixture-'));
+  fs.mkdirSync(path.join(fixtureDir, 'channel'), { recursive: true });
+  fs.writeFileSync(
+    path.join(fixtureDir, 'channel', 'outbox.jsonl'),
+    JSON.stringify({
+      type: 'result',
+      from: 'wrapper',
+      body: JSON.stringify({ verdict: 'blocked', summary: 'worker exited without result (exit_code=137); reason=pane-died' }),
+    }) + '\n'
+  );
+  const state = baseInit(outputDir, { max_rounds: 10 });
+  const opts = permissiveOptions(outputDir, {
+    // driver's own classifyFailure would guess 'hit-timeout' for status:'terminated'
+    runParallelFn: async () => ({
+      workers: [{ sid: 'builder-1', status: 'terminated', verdict: null, paths: [], summary: '' }],
+    }),
+    sessionDirFn: () => fixtureDir,
+    classifyPaneDeathFn: () => 'deterministic',
+    spawnCriticFn: async () => ({ sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { ab_verdict: null } }),
+  });
+  const { round, decision } = await runRound(state, opts);
+  expect(round.session_dir).toBe(fixtureDir);
+  expect(round.failure_category).toBe('pane-death');
+  expect(decision.action).toBe('escalate');
+});
+
+// ---------------------------------------------------------------------------
+// 18. Result envelope: the driver's own derivation is never overridden.
+test('a worker with a result envelope keeps the driver-derived failure_category even when the classifier disagrees', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { max_rounds: 10 });
+  const opts = permissiveOptions(outputDir, {
+    runParallelFn: async () => ({
+      workers: [{ sid: 'builder-1', status: 'result', verdict: 'blocked', paths: [], summary: 'x' }],
+    }),
+    classifySessionDirFn: () => ({ category: 'clean-result', transient: null, evidence: 'stub-disagrees' }),
+    spawnCriticFn: async () => ({ sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { ab_verdict: null } }),
+  });
+  const { round, decision } = await runRound(state, opts);
+  expect(round.failure_category).toBe('blocked');
+  expect(decision.action).toBe('escalate');
+  expect(decision.escalation.reason).toBe('blocked');
 });
