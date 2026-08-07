@@ -135,6 +135,51 @@ test('identical consecutive failures escalate instead of retrying a third time',
   expect(result.escalation.reason).toBe('identical-consecutive-failure');
 });
 
+test('same category, same non-empty files, different output_tail continues (no false-positive escalation on legitimate progress)', () => {
+  const state = makeState({
+    max_rounds: 10,
+    no_improve_k: 5,
+    current_round: 2,
+    rounds: [
+      makeRound(1, { failure_category: 'api-stall', files_changed: ['lib/foo.js'], test_state: { passed: false, exit_code: 1, output_tail: '3 failing' } }),
+      makeRound(2, { failure_category: 'api-stall', files_changed: ['lib/foo.js'], test_state: { passed: false, exit_code: 1, output_tail: '1 failing' } }),
+    ],
+  });
+  const result = decide(state);
+  expect(result.status).not.toBe('escalated');
+  expect(result.status).toBe('continue');
+});
+
+test('same category, both rounds with empty files_changed still escalates', () => {
+  const state = makeState({
+    max_rounds: 10,
+    no_improve_k: 5,
+    current_round: 2,
+    rounds: [
+      makeRound(1, { failure_category: 'api-stall', files_changed: [], test_state: { passed: false, exit_code: 1, output_tail: '3 failing' } }),
+      makeRound(2, { failure_category: 'api-stall', files_changed: [], test_state: { passed: false, exit_code: 1, output_tail: '1 failing' } }),
+    ],
+  });
+  const result = decide(state);
+  expect(result.status).toBe('escalated');
+  expect(result.escalation.reason).toBe('identical-consecutive-failure');
+});
+
+test('same category, non-empty files, byte-identical output_tail still escalates', () => {
+  const state = makeState({
+    max_rounds: 10,
+    no_improve_k: 5,
+    current_round: 2,
+    rounds: [
+      makeRound(1, { failure_category: 'api-stall', files_changed: ['lib/foo.js'], test_state: { passed: false, exit_code: 1, output_tail: 'same-tail' } }),
+      makeRound(2, { failure_category: 'api-stall', files_changed: ['lib/foo.js'], test_state: { passed: false, exit_code: 1, output_tail: 'same-tail' } }),
+    ],
+  });
+  const result = decide(state);
+  expect(result.status).toBe('escalated');
+  expect(result.escalation.reason).toBe('identical-consecutive-failure');
+});
+
 // --- Per-category retry policy ---
 
 test('hit-timeout resumes from round state rather than restarting', () => {
