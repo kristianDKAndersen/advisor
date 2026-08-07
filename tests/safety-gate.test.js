@@ -120,3 +120,24 @@ test('advisor-default gate still allows a normal source path', () => {
   const result = checkGate(defaultGate, ['lib/foo.js'], null);
   expect(result).toEqual({ allowed: true });
 });
+
+test('advisor-default gate denies a top-level .advisor-preserved file (a preserved copy of the repo\'s own prompt)', () => {
+  const result = checkGate(defaultGate, ['.advisor-preserved/claude.md'], null);
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('path_denylist');
+  expect(result.matched).toBe('.advisor-preserved/**');
+});
+
+test('advisor-default gate denies a nested path under .advisor-preserved/', () => {
+  const result = checkGate(defaultGate, ['.advisor-preserved/.claude/settings.json'], null);
+  expect(result.allowed).toBe(false);
+  expect(result.reason).toBe('path_denylist');
+  expect(result.matched).toBe('.advisor-preserved/**');
+});
+
+test('advisor-default gate does not over-broadly deny ordinary source or test paths', () => {
+  const src = checkGate(defaultGate, ['lib/foo.js'], null);
+  expect(src).toEqual({ allowed: true });
+  const testPath = checkGate(defaultGate, ['tests/x.test.js'], null);
+  expect(testPath).toEqual({ allowed: true });
+});

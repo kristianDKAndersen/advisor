@@ -11,7 +11,8 @@
     "CLAUDE.md",
     "spawns/**",
     ".claude/**",
-    "gates/**"
+    "gates/**",
+    ".advisor-preserved/**"
   ],
   "action_allowlist": {
     "git_commit": false,
