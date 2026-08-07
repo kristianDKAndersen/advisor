@@ -127,6 +127,38 @@ test('noImprovementInLastK returns false once a round passes', () => {
   expect(noImprovementInLastK(state, 2)).toBe(false);
 });
 
+test('noImprovementInLastK treats ab_verdict.winner=="candidate" as passed even with no scores object', () => {
+  const state = initRoundState(outputDir, initFields);
+  const losing = makeRound(0, 'gap A', false);
+  const winningNoScores = {
+    ...makeRound(1, 'gap A', false),
+    ab_verdict: { winner: 'candidate', margin: 'clear', single_biggest_gap: '' },
+    scores: null,
+  };
+  appendRound(outputDir, state, losing);
+  appendRound(outputDir, state, winningNoScores);
+  expect(noImprovementInLastK(state, 2)).toBe(false);
+});
+
+test('noImprovementInLastK treats scores.overall_pass==true as passed even with no ab_verdict', () => {
+  const state = initRoundState(outputDir, initFields);
+  const losing = makeRound(0, 'gap A', false);
+  const passingNoAbVerdict = {
+    ...makeRound(1, 'gap A', true),
+    ab_verdict: null,
+  };
+  appendRound(outputDir, state, losing);
+  appendRound(outputDir, state, passingNoAbVerdict);
+  expect(noImprovementInLastK(state, 2)).toBe(false);
+});
+
+test('noImprovementInLastK still fires the breaker when K rounds all lose with the identical gap', () => {
+  const state = initRoundState(outputDir, initFields);
+  appendRound(outputDir, state, makeRound(0, 'gap A', false));
+  appendRound(outputDir, state, makeRound(1, 'gap A', false));
+  expect(noImprovementInLastK(state, 2)).toBe(true);
+});
+
 test('writeRoundState overwrites the file atomically leaving no .tmp residue', () => {
   const state = initRoundState(outputDir, initFields);
   state.current_round = 3;
