@@ -237,7 +237,9 @@ async function main(argv, options = {}) {
     goal: flags.goal,
     bar,
     head_sha: headSha(repoRoot),
-    test_command: spec && spec.test_command ? spec.test_command : null,
+    test_command: spec && spec.test_command
+      ? spec.test_command
+      : (bar.type === 'acceptance-tests' ? bar.ref : null),
     safety_gate_path: plan.safety_gate_path,
     max_rounds: plan.max_rounds,
     cost_ceiling_usd: plan.cost_ceiling_usd,

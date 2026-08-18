@@ -301,3 +301,39 @@ test('decide does not mutate the input state', () => {
   decide(state);
   expect(state).toEqual(snapshot);
 });
+
+// --- max_rounds N executes exactly N rounds (round-counting, catches off-by-one) ---
+//
+// state.current_round holds the 0-based index of the round that JUST
+// finished when decide() is consulted (lib/loop-driver.js calls decide()
+// before incrementing current_round). So "max_rounds N" must read as
+// exhausted once current_round reaches N-1, not N.
+
+for (const maxRounds of [1, 2, 3]) {
+  test(`max_rounds ${maxRounds}: continues for every round index before the last`, () => {
+    for (let index = 0; index < maxRounds - 1; index++) {
+      const state = makeState({
+        max_rounds: maxRounds,
+        current_round: index,
+        cost_ceiling_usd: null,
+        rounds: [makeRound(index)],
+      });
+      const result = decide(state);
+      expect(result.status).toBe('continue');
+    }
+  });
+
+  test(`max_rounds ${maxRounds}: exhausted exactly at round index ${maxRounds - 1}, never won`, () => {
+    const lastIndex = maxRounds - 1;
+    const state = makeState({
+      max_rounds: maxRounds,
+      current_round: lastIndex,
+      cost_ceiling_usd: null,
+      rounds: [makeRound(lastIndex)],
+    });
+    const result = decide(state);
+    expect(result.status).toBe('exhausted');
+    expect(result.status).not.toBe('won');
+    expect(result.escalation.reason).toBe('max-rounds');
+  });
+}

@@ -224,6 +224,101 @@ test('a metric bar ref (a threshold descriptor) is left byte-exact, not path-res
   }
 });
 
+// ── 4d. test_command defaulted from an acceptance-tests bar ref ─────────
+
+test('an acceptance-tests bar with no --spec defaults state.test_command to the bar ref', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const testCommand = 'bun test ./relative/dir';
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'acceptance-tests', '--bar-ref', testCommand,
+        '--repo-root', repoRoot, '--output-dir', outputDir],
+      {
+        runLoopFn: async () => {},
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+      },
+    );
+    expect(code).toBe(0);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.test_command).toBe(testCommand);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('an explicit --spec test_command wins over an acceptance-tests bar ref', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const specPath = path.join(outputDir, 'spec.json');
+  fs.writeFileSync(specPath, JSON.stringify({ test_command: 'bun test ./spec/dir' }));
+  const barCommand = 'bun test ./relative/dir';
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'acceptance-tests', '--bar-ref', barCommand,
+        '--spec', specPath, '--repo-root', repoRoot, '--output-dir', outputDir],
+      {
+        runLoopFn: async () => {},
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+      },
+    );
+    expect(code).toBe(0);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.test_command).toBe('bun test ./spec/dir');
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('a metric bar ref (a threshold descriptor) is never assigned to state.test_command', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const metricRef = 'coverage >= 0.8';
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'metric', '--bar-ref', metricRef,
+        '--repo-root', repoRoot, '--output-dir', outputDir],
+      {
+        runLoopFn: async () => {},
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+      },
+    );
+    expect(code).toBe(0);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.test_command).toBe(null);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('an external-reference bar ref (a filesystem path) is never assigned to state.test_command', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir],
+      {
+        runLoopFn: async () => {},
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+      },
+    );
+    expect(code).toBe(0);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.test_command).toBe(null);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
 // ── 5. state init and autonomy persistence ───────────────────────────────
 
 test('autonomy_level defaults to L2 and is persisted to round_state.json', async () => {

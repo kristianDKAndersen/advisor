@@ -287,6 +287,39 @@ test('round_state.json contains round N on disk immediately after round N comple
 });
 
 // ---------------------------------------------------------------------------
+// 11. Worktree path must be persisted to disk before the builder is spawned,
+// so a driver death mid-builder doesn't orphan the worktree on resume.
+test('worktree_path is persisted to round_state.json on disk before the builder is spawned', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { max_rounds: 10 });
+  let sawPersistedBeforeBuilder = false;
+  const opts = permissiveOptions(outputDir, {
+    getOrCreateWorktreeFn: () => ({ path: '/tmp/wt-pre-persist', created: true }),
+    runParallelFn: async () => {
+      const onDisk = readRoundState(outputDir);
+      sawPersistedBeforeBuilder = onDisk.worktree_path === '/tmp/wt-pre-persist';
+      return {
+        workers: [{ sid: 'builder-1', status: 'result', verdict: 'partial', paths: [], summary: 'x' }],
+      };
+    },
+  });
+  await runRound(state, opts);
+  expect(sawPersistedBeforeBuilder).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// 12. End-of-round persistence still happens (regression guard alongside 11).
+test('round_state.json still carries the completed round after the early persist', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { max_rounds: 10 });
+  const opts = permissiveOptions(outputDir);
+  await runRound(state, opts);
+  const persisted = readRoundState(outputDir);
+  expect(persisted.rounds.length).toBe(1);
+  expect(persisted.worktree_path).toBe(state.worktree_path);
+});
+
+// ---------------------------------------------------------------------------
 // Integration: runLoop drives multiple rounds over stubs to a terminal state.
 test('runLoop drives rounds over stubbed dependencies to a won terminal status', async () => {
   const outputDir = tmpOutputDir();
