@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { initRoundState, readRoundState } = require('../lib/round-state');
-const { runRound, runLoop } = require('../lib/loop-driver');
+const { runRound, runLoop, defaultSpawnCritic, buildBuilderBrief, CRITIC_TOOL_BUDGET } = require('../lib/loop-driver');
 const { checkGate } = require('../lib/safety-gate');
 const session = require('../lib/session');
 
@@ -777,4 +777,46 @@ test('a critic question message ends the round immediately with an escalation ca
   expect(finalState.status).toBe('escalated');
   expect(finalState.escalation.reason).toBe('critic-question');
   expect(finalState.escalation.message).toContain('Artifact B is not a real path');
+});
+
+// ── critic tool budget (independent-verification affordability) ────────────
+
+test('defaultSpawnCritic spawns bin/summon with --tool-budget followed by CRITIC_TOOL_BUDGET', async () => {
+  let capturedArgs = null;
+  const execFileSyncFn = (bin, args) => {
+    capturedArgs = args;
+    return JSON.stringify({ sid: 'critic-1', outbox: '/tmp/critic-outbox', outputDir: '/tmp/critic-out' });
+  };
+  const pollUntilTerminalFn = async () => ({ type: 'result' });
+  await defaultSpawnCritic(
+    { agent: 'loop-critic', task: 'judge this', goal: 'judge it well' },
+    { execFileSyncFn, pollUntilTerminalFn }
+  );
+  expect(capturedArgs).not.toBeNull();
+  const idx = capturedArgs.indexOf('--tool-budget');
+  expect(idx).toBeGreaterThan(-1);
+  expect(capturedArgs[idx + 1]).toBe(String(CRITIC_TOOL_BUDGET));
+});
+
+test('defaultSpawnCritic honours an injected toolBudget override', async () => {
+  let capturedArgs = null;
+  const execFileSyncFn = (bin, args) => {
+    capturedArgs = args;
+    return JSON.stringify({ sid: 'critic-1', outbox: '/tmp/critic-outbox', outputDir: '/tmp/critic-out' });
+  };
+  const pollUntilTerminalFn = async () => ({ type: 'result' });
+  await defaultSpawnCritic(
+    { agent: 'loop-critic', task: 'judge this', goal: 'judge it well' },
+    { execFileSyncFn, pollUntilTerminalFn, toolBudget: 99 }
+  );
+  const idx = capturedArgs.indexOf('--tool-budget');
+  expect(capturedArgs[idx + 1]).toBe('99');
+});
+
+test('buildBuilderBrief does not carry a tool budget (only the critic spawn path is widened)', () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir);
+  const brief = buildBuilderBrief(state, null, '/tmp/some-worktree');
+  expect(brief.toolBudget).toBeUndefined();
+  expect(Object.prototype.hasOwnProperty.call(brief, 'toolBudget')).toBe(false);
 });
