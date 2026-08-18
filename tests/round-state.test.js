@@ -166,3 +166,30 @@ test('writeRoundState overwrites the file atomically leaving no .tmp residue', (
   expect(fs.existsSync(stateFilePath(outputDir) + '.tmp')).toBe(false);
   expect(readRoundState(outputDir).current_round).toBe(3);
 });
+
+test('initRoundState persists fields.agent when supplied and readRoundState returns it', () => {
+  const state = initRoundState(outputDir, { ...initFields, agent: 'reviewer' });
+  expect(state.agent).toBe('reviewer');
+  expect(readRoundState(outputDir).agent).toBe('reviewer');
+});
+
+test('initRoundState defaults agent to "coder" when fields.agent is not supplied', () => {
+  const state = initRoundState(outputDir, initFields);
+  expect(state.agent).toBe('coder');
+  expect(readRoundState(outputDir).agent).toBe('coder');
+});
+
+test('validateRoundState accepts a state with no agent key (pre-existing round_state.json files remain resumable)', () => {
+  const state = initRoundState(outputDir, initFields);
+  delete state.agent;
+  const result = validateRoundState(state);
+  expect(result.valid).toBe(true);
+  expect(result.errors).toEqual([]);
+});
+
+test('agent survives a write-then-read round-trip after appendRound mutates the state', () => {
+  const state = initRoundState(outputDir, { ...initFields, agent: 'reviewer' });
+  appendRound(outputDir, state, makeRound(0, 'gap A', false));
+  writeRoundState(outputDir, state);
+  expect(readRoundState(outputDir).agent).toBe('reviewer');
+});
