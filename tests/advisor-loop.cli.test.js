@@ -452,3 +452,76 @@ test('round 1 brief contains both the original task text and the prior round gap
   expect(brief.task).toContain('ORIGINAL BRIEF TEXT');
   expect(brief.task).toContain('the gap from round one');
 });
+
+// ── --agent wiring ────────────────────────────────────────────────────────
+
+test('--agent <name> is persisted in round_state.json', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const gateFile = path.join(outputDir, 'stub-gate.json');
+  fs.writeFileSync(gateFile, '{}');
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--agent', 'custom-builder',
+        '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile, '--dry-run'],
+      { stdout: { write: () => {} }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.agent).toBe('custom-builder');
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('--agent <name> reaches the builder brief produced by buildBuilderBrief', () => {
+  const { buildBuilderBrief } = require('../lib/loop-driver');
+  const state = { goal: 'do the thing', task: 'TASK TEXT', agent: 'custom-builder' };
+  const brief = buildBuilderBrief(state, null, '/tmp/worktree');
+  expect(brief.agent).toBe('custom-builder');
+});
+
+test('omitting --agent still yields coder in round_state.json and the builder brief', async () => {
+  const { buildBuilderBrief } = require('../lib/loop-driver');
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const gateFile = path.join(outputDir, 'stub-gate.json');
+  fs.writeFileSync(gateFile, '{}');
+  try {
+    const code = await main(
+      ['--goal', 'do the thing',
+        '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile, '--dry-run'],
+      { stdout: { write: () => {} }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.agent).toBe('coder');
+    const brief = buildBuilderBrief(state, null, '/tmp/worktree');
+    expect(brief.agent).toBe('coder');
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('an unrecognized --agent name is not rejected by the CLI itself', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const gateFile = path.join(outputDir, 'stub-gate.json');
+  fs.writeFileSync(gateFile, '{}');
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--agent', 'totally-unknown-agent-xyz',
+        '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile, '--dry-run'],
+      { stdout: { write: () => {} }, stderr: { write: () => {} } },
+    );
+    expect(code).toBe(0);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});

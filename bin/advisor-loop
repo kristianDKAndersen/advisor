@@ -243,6 +243,7 @@ async function main(argv, options = {}) {
     cost_ceiling_usd: plan.cost_ceiling_usd,
     no_improve_k: plan.no_improve_k,
     autonomy_level: autonomyLevel,
+    agent: plan.agent,
   };
 
   // Requirement (dry-run has no side effects): only touch disk here if the
