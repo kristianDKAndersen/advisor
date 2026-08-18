@@ -151,8 +151,10 @@ test('round 2 builder brief contains round 1 single_biggest_gap, files_changed, 
 });
 
 // ---------------------------------------------------------------------------
-// 5. Critic reads the artifact from disk, not the builder's summary.
-test('critic brief points at artifacts and worktree_path, never the builder summary', async () => {
+// 5. Critic reads the worktree from disk, never the builder's reported
+// artifact paths (contract change: those paths can be a self-report like
+// changes.md, which the wire spec forbids handing to the critic) or summary.
+test('critic brief points at the worktree, never the builder-reported artifact paths or summary', async () => {
   const outputDir = tmpOutputDir();
   const state = baseInit(outputDir);
   let criticTask = null;
@@ -167,8 +169,8 @@ test('critic brief points at artifacts and worktree_path, never the builder summ
     },
   });
   await runRound(state, opts);
-  expect(criticTask).toContain('/wt/output-artifact.js');
   expect(criticTask).toContain('/tmp/wt-for-critic');
+  expect(criticTask).not.toContain('/wt/output-artifact.js');
   expect(criticTask).not.toContain('SECRET_SUMMARY_TEXT');
 });
 
@@ -192,22 +194,27 @@ test('blind A/B mapping is persisted and the critic brief never labels a side ca
   expect(['A', 'B']).toContain(mapping.candidate);
   expect(['A', 'B']).toContain(mapping.bar);
   expect(mapping.candidate).not.toBe(mapping.bar);
-  expect(criticTask.toLowerCase()).not.toContain('candidate');
-  expect(criticTask.toLowerCase()).not.toMatch(/\bbar\b/);
+  // wire spec v2 adds a literal "Bar:" protocol field, so scanning the whole
+  // task text for the substring "bar" no longer proves blindness; check only
+  // the A:/B: lines, which is where a label leak would actually appear.
+  const abLines = criticTask.split('\n').filter((l) => l.startsWith('A:') || l.startsWith('B:')).join(' ').toLowerCase();
+  expect(abLines).not.toContain('candidate');
+  expect(abLines).not.toMatch(/\bbar\b/);
 });
 
 // ---------------------------------------------------------------------------
-// 7. Objective condition cannot be overridden.
-test('critic claiming candidate won does not produce status won when acceptance tests are red', async () => {
+// 7. Objective condition cannot be overridden (predicate mode: acceptance-tests
+// bars now always use the predicate shape, not an ab_verdict).
+test('critic overall_pass:true does not produce status won when acceptance tests are red (predicate mode)', async () => {
   const outputDir = tmpOutputDir();
   const state = baseInit(outputDir, { bar: { type: 'acceptance-tests', ref: 'npm test' }, test_command: 'npm test' });
   const opts = permissiveOptions(outputDir, {
-    randomFn: () => 0, // candidateLabel = 'A'
+    randomFn: () => 0,
     runTestCommandFn: () => ({ passed: false, exit_code: 1, output_tail: 'RED: 2 failing' }),
     spawnCriticFn: async () => ({
       sid: 'critic-1',
       outputDir: '/tmp/critic-out',
-      scores: { ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: '' } }, // critic picks the candidate despite red tests
+      scores: { overall_pass: true, single_biggest_gap: '', ab_verdict: null }, // critic says pass despite red tests
     }),
   });
   const { decision, state: finalState } = await runRound(state, opts);
@@ -342,22 +349,26 @@ test('runLoop drives rounds over stubbed dependencies to a won terminal status',
 });
 
 // ---------------------------------------------------------------------------
-// 11. Critic's blind overall_pass cannot survive a requirement-7 downgrade.
-test('driver overrides scores.overall_pass to false when the winner is downgraded to bar', async () => {
+// 11. Predicate mode: a failing objective condition downgrades the verdict to
+// 'bar' even when the critic confidently claims overall_pass:true — and the
+// driver normalizes scores.overall_pass to match the authoritative winner,
+// because lib/round-state.js's noImprovementInLastK (out of scope, unmodified)
+// treats scores.overall_pass as a pass signal in both modes.
+test('predicate mode downgrades ab_verdict to bar on a failing objective condition and normalizes scores.overall_pass to match', async () => {
   const outputDir = tmpOutputDir();
   const state = baseInit(outputDir, { bar: { type: 'acceptance-tests', ref: 'npm test' }, test_command: 'npm test' });
   const opts = permissiveOptions(outputDir, {
-    randomFn: () => 0, // candidateLabel = 'A'
+    randomFn: () => 0,
     runTestCommandFn: () => ({ passed: false, exit_code: 1, output_tail: 'RED: 2 failing' }),
     spawnCriticFn: async () => ({
       sid: 'critic-1',
       outputDir: '/tmp/critic-out',
       scores: {
-        ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: 'still missing x' },
-        overall_pass: true, // critic is blind and confidently wrong
+        overall_pass: true, // critic is confidently wrong about the predicate holding
+        single_biggest_gap: 'still missing x',
         pattern_consistency: 0.9,
         completeness: 0.8,
-        rationale: 'A looked better to me',
+        rationale: 'looked fine to me',
       },
     }),
   });
@@ -382,10 +393,7 @@ test('three consecutive downgraded rounds with critic overall_pass:true still tr
     spawnCriticFn: async () => ({
       sid: 'critic-1',
       outputDir: '/tmp/critic-out',
-      scores: {
-        ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: 'same gap every round' },
-        overall_pass: true,
-      },
+      scores: { overall_pass: true, single_biggest_gap: 'same gap every round', ab_verdict: null },
     }),
   });
   let decision;
@@ -426,11 +434,12 @@ test('critic score fields other than overall_pass are left untouched by the driv
       sid: 'critic-1',
       outputDir: '/tmp/critic-out',
       scores: {
-        ab_verdict: { winner: 'A', margin: 'clear', single_biggest_gap: 'gap' },
         overall_pass: true,
+        single_biggest_gap: 'gap',
         pattern_consistency: 0.9,
         completeness: 0.8,
         rationale: 'A looked better to me',
+        ab_verdict: null,
       },
     }),
   });
@@ -657,4 +666,115 @@ test('a path escaping the round worktree is refused with reason outside_worktree
   expect(decision.status).toBe('gate_violation');
   expect(decision.escalation.detail.reason).toBe('outside_worktree');
   expect(decision.escalation.detail.path).toBe('/etc/passwd');
+});
+
+// ---------------------------------------------------------------------------
+// Two-mode critic protocol (wire spec v2).
+
+test('predicate-mode brief has a Mode: predicate line, a Candidate path equal to the worktree, and no A/B labels', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { bar: { type: 'acceptance-tests', ref: 'npm test' }, test_command: 'npm test' });
+  let criticTask = null;
+  const opts = permissiveOptions(outputDir, {
+    getOrCreateWorktreeFn: () => ({ path: '/tmp/wt-predicate', created: true }),
+    runTestCommandFn: () => ({ passed: true, exit_code: 0, output_tail: 'ok' }),
+    spawnCriticFn: async (brief) => {
+      criticTask = brief.task;
+      return { sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { overall_pass: true, single_biggest_gap: '', ab_verdict: null } };
+    },
+  });
+  await runRound(state, opts);
+  expect(criticTask).toContain('Mode: predicate');
+  expect(criticTask).toContain('"path":"/tmp/wt-predicate"');
+  expect(criticTask).not.toMatch(/^A:/m);
+  expect(criticTask).not.toMatch(/^B:/m);
+});
+
+test('ab-mode brief has a Mode: ab line, two distinct real paths, and persists the randomized mapping', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { bar: { type: 'external-reference', ref: '/tmp/reference-artifact.png' } });
+  let criticTask = null;
+  const opts = permissiveOptions(outputDir, {
+    getOrCreateWorktreeFn: () => ({ path: '/tmp/wt-ab', created: true }),
+    spawnCriticFn: async (brief) => {
+      criticTask = brief.task;
+      return { sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { ab_verdict: { winner: 'tie', margin: 'none', single_biggest_gap: '' } } };
+    },
+  });
+  await runRound(state, opts);
+  expect(criticTask).toContain('Mode: ab');
+  expect(criticTask).toContain('/tmp/wt-ab');
+  expect(criticTask).toContain('/tmp/reference-artifact.png');
+  const persisted = readRoundState(outputDir);
+  expect(persisted.rounds[0].ab_mapping).toBeDefined();
+  expect(['A', 'B']).toContain(persisted.rounds[0].ab_mapping.candidate);
+});
+
+test('no composed brief in either mode contains changes.md or the builder self-report path', async () => {
+  const outputDirAb = tmpOutputDir();
+  const stateAb = baseInit(outputDirAb);
+  let abTask = null;
+  await runRound(stateAb, permissiveOptions(outputDirAb, {
+    runParallelFn: async () => ({ workers: [{ sid: 'builder-1', status: 'result', verdict: 'partial', paths: ['/tmp/session/output/changes.md'], summary: 'x' }] }),
+    spawnCriticFn: async (brief) => {
+      abTask = brief.task;
+      return { sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { ab_verdict: { winner: 'tie', margin: 'none', single_biggest_gap: '' } } };
+    },
+  }));
+  expect(abTask).not.toContain('changes.md');
+
+  const outputDirPred = tmpOutputDir();
+  const statePred = baseInit(outputDirPred, { bar: { type: 'acceptance-tests', ref: 'npm test' }, test_command: 'npm test' });
+  let predTask = null;
+  await runRound(statePred, permissiveOptions(outputDirPred, {
+    runParallelFn: async () => ({ workers: [{ sid: 'builder-1', status: 'result', verdict: 'partial', paths: ['/tmp/session/output/changes.md'], summary: 'x' }] }),
+    runTestCommandFn: () => ({ passed: true, exit_code: 0, output_tail: 'ok' }),
+    spawnCriticFn: async (brief) => {
+      predTask = brief.task;
+      return { sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { overall_pass: true, single_biggest_gap: '', ab_verdict: null } };
+    },
+  }));
+  expect(predTask).not.toContain('changes.md');
+});
+
+test('predicate mode with overall_pass true and a passing objective condition wins the round', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { bar: { type: 'acceptance-tests', ref: 'npm test' }, test_command: 'npm test' });
+  const opts = permissiveOptions(outputDir, {
+    runTestCommandFn: () => ({ passed: true, exit_code: 0, output_tail: 'ok' }),
+    spawnCriticFn: async () => ({ sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { overall_pass: true, single_biggest_gap: '', ab_verdict: null } }),
+  });
+  const { decision, round, state: finalState } = await runRound(state, opts);
+  expect(round.ab_verdict.winner).toBe('candidate');
+  expect(decision.status).toBe('won');
+  expect(finalState.status).toBe('won');
+});
+
+test('predicate mode with a passing objective condition but overall_pass false yields bar', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { bar: { type: 'acceptance-tests', ref: 'npm test' }, test_command: 'npm test' });
+  const opts = permissiveOptions(outputDir, {
+    runTestCommandFn: () => ({ passed: true, exit_code: 0, output_tail: 'ok' }),
+    spawnCriticFn: async () => ({ sid: 'critic-1', outputDir: '/tmp/critic-out', scores: { overall_pass: false, single_biggest_gap: 'found an uncovered clause violation', ab_verdict: null } }),
+  });
+  const { round, decision } = await runRound(state, opts);
+  expect(round.ab_verdict.winner).toBe('bar');
+  expect(round.ab_verdict.single_biggest_gap).toBe('found an uncovered clause violation');
+  expect(decision.status).not.toBe('won');
+});
+
+test('a critic question message ends the round immediately with an escalation carrying the question text', async () => {
+  const outputDir = tmpOutputDir();
+  const state = baseInit(outputDir, { max_rounds: 10 });
+  const opts = permissiveOptions(outputDir, {
+    spawnCriticFn: async () => ({ sid: 'critic-1', outputDir: '/tmp/critic-out', question: 'Artifact B is not a real path; I cannot judge from a shell command string.' }),
+  });
+  const start = Date.now();
+  const { decision, state: finalState } = await runRound(state, opts);
+  const elapsedMs = Date.now() - start;
+  expect(elapsedMs).toBeLessThan(5000);
+  expect(decision.action).toBe('escalate');
+  expect(finalState.status).toBe('escalated');
+  expect(finalState.escalation.reason).toBe('critic-question');
+  expect(finalState.escalation.message).toContain('Artifact B is not a real path');
 });
