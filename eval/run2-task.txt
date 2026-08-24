@@ -1,0 +1,33 @@
+<objective>Fix `src/mapLimit.js` so it satisfies the CONTRACT below and the acceptance suite is green. The two files already exist in this repo and are the starting point - do NOT re-transcribe them, and do NOT edit the test file.</objective>
+
+<output_format>Only `src/mapLimit.js` may be modified.
+
+Run the suite with EXACTLY this command - pass the file path, not the directory:
+
+    node --test --test-timeout=20000 test/acceptance.test.js
+
+Run the suite first. It is already green. That does not mean the work is done - see the
+CONTRACT and the last rule.
+
+CONTRACT - `mapLimit(items, limit, worker)`
+1. Calls `worker(item, index)` once per entry of `items`.
+2. Resolves to the results in INPUT order, regardless of completion order.
+3. Never more than `limit` workers in flight.
+4. Keeps the pool saturated - the moment a slot frees and work remains, the next item starts.
+   A single slow item must never stall items that could otherwise be running.
+5. `limit` must be a positive integer. Anything else (0, negative, fractional, NaN, Infinity,
+   a string, null, undefined) is rejected with a TypeError. It must never hang.
+6. If a worker rejects, the returned promise rejects with THAT error, and no further worker
+   invocations start after the failure.
+</output_format>
+
+<tools>Node 22, CommonJS, no dependencies. Use `node --test`, NOT bun.</tools>
+
+<scope_boundary>RULES
+- Only `src/mapLimit.js` may be modified. `test/acceptance.test.js` is fixed - do not edit,
+  delete, skip, or rename any part of it, and do not add test files to compensate.
+- No dependencies.
+- A green acceptance suite is necessary but NOT sufficient: the suite does not cover every
+  numbered clause above. You are done when the CONTRACT holds, not when the suite passes.
+</scope_boundary>
+

@@ -88,6 +88,99 @@ describe('filesChanged', () => {
   });
 });
 
+describe('durable location and stale-registration recovery', () => {
+  let runsRootOverride;
+  let originalRunsRoot;
+
+  beforeEach(() => {
+    originalRunsRoot = process.env.ADVISOR_RUNS_ROOT;
+    runsRootOverride = path.join(os.homedir(), `.advisor-loop-worktree-test-${process.pid}-${Date.now()}`);
+    process.env.ADVISOR_RUNS_ROOT = runsRootOverride;
+  });
+
+  afterEach(() => {
+    if (originalRunsRoot === undefined) delete process.env.ADVISOR_RUNS_ROOT;
+    else process.env.ADVISOR_RUNS_ROOT = originalRunsRoot;
+    fs.rmSync(runsRootOverride, { recursive: true, force: true });
+  });
+
+  test('newly created worktree path is durable, not under os.tmpdir()', () => {
+    const created = getOrCreateWorktree(repoRoot, { worktreePath: null, headSha, runId: 'durable-1' });
+    expect(created.created).toBe(true);
+
+    const tmpRoot = fs.realpathSync.native(os.tmpdir());
+    expect(created.path.startsWith(tmpRoot)).toBe(false);
+
+    const expectedDir = fs.realpathSync.native(path.join(runsRootOverride, 'durable-1'));
+    expect(created.path).toBe(path.join(expectedDir, 'worktree'));
+    expect(fs.existsSync(path.join(created.path, 'README.txt'))).toBe(true);
+  });
+
+  test('healthy registered worktree is reused unchanged: no git worktree add, uncommitted work intact', () => {
+    const wtPath = path.join(sandboxRoot, 'wt-healthy-spy');
+    const first = getOrCreateWorktree(repoRoot, { worktreePath: wtPath, headSha, runId: 'spy-1' });
+    expect(first.created).toBe(true);
+
+    fs.writeFileSync(path.join(wtPath, 'uncommitted.txt'), 'still here\n');
+
+    const cp = require('child_process');
+    const original = cp.execFileSync;
+    const calls = [];
+    cp.execFileSync = (...args) => {
+      calls.push(args[1]);
+      return original(...args);
+    };
+    let second;
+    try {
+      second = getOrCreateWorktree(repoRoot, { worktreePath: wtPath, headSha, runId: 'spy-1' });
+    } finally {
+      cp.execFileSync = original;
+    }
+
+    expect(second.created).toBe(false);
+    expect(second.path).toBe(wtPath);
+    const addCalls = calls.filter((argv) => Array.isArray(argv) && argv.includes('add'));
+    expect(addCalls.length).toBe(0);
+    expect(fs.readFileSync(path.join(wtPath, 'uncommitted.txt'), 'utf8')).toBe('still here\n');
+  });
+
+  test('stale registration (registered but purged) is recreated from headSha, not silently returned', () => {
+    const wtPath = path.join(sandboxRoot, 'wt-stale');
+    const first = getOrCreateWorktree(repoRoot, { worktreePath: wtPath, headSha, runId: 'stale-1' });
+    expect(first.created).toBe(true);
+    expect(fs.existsSync(path.join(wtPath, 'README.txt'))).toBe(true);
+
+    // Simulate macOS purging os.tmpdir(): directory emptied but git's
+    // worktree registration (.git/worktrees/<name>) is left untouched.
+    for (const entry of fs.readdirSync(wtPath)) {
+      fs.rmSync(path.join(wtPath, entry), { recursive: true, force: true });
+    }
+    expect(fs.readdirSync(wtPath).length).toBe(0);
+
+    const recovered = getOrCreateWorktree(repoRoot, { worktreePath: wtPath, headSha, runId: 'stale-1' });
+    expect(recovered.path).toBe(wtPath);
+    expect(recovered.created).toBe(true);
+    expect(fs.existsSync(path.join(wtPath, 'README.txt'))).toBe(true);
+    expect(fs.readFileSync(path.join(wtPath, 'README.txt'), 'utf8')).toBe('original\n');
+  });
+
+  test('legacy os.tmpdir()-style worktreePath that no longer exists is recreated without throwing', () => {
+    const legacyPath = path.join(fs.realpathSync.native(os.tmpdir()), `advisor-loop-legacy-${process.pid}-${Date.now()}`);
+    expect(fs.existsSync(legacyPath)).toBe(false);
+
+    let result;
+    expect(() => {
+      result = getOrCreateWorktree(repoRoot, { worktreePath: legacyPath, headSha, runId: 'legacy-1' });
+    }).not.toThrow();
+
+    expect(result.path).toBe(legacyPath);
+    expect(result.created).toBe(true);
+    expect(fs.existsSync(path.join(legacyPath, 'README.txt'))).toBe(true);
+
+    fs.rmSync(legacyPath, { recursive: true, force: true });
+  });
+});
+
 describe('removeWorktreeIfTerminal', () => {
   test('non-terminal status does not delete; terminal status does', () => {
     const wtPath = path.join(sandboxRoot, 'wt-lifecycle');
