@@ -37,6 +37,12 @@ test('ECO-REVIEW present for a mapped review agent, ECO-CORE absent', () => {
   expect(out).not.toContain('## ECO-CORE');
 });
 
+test('ECO-REVIEW present for loop-critic, ECO-CORE absent', () => {
+  const out = composeBootstrapPrompt(argsFor('loop-critic'));
+  expect(out).toContain(ECO_REVIEW_BLOCK);
+  expect(out).not.toContain('## ECO-CORE');
+});
+
 test('ADVISOR_ECO=0 yields neither ECO-CORE nor ECO-REVIEW', () => {
   process.env.ADVISOR_ECO = '0';
   const coderOut = composeBootstrapPrompt(argsFor('coder'));

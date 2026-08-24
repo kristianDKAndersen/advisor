@@ -1,0 +1,288 @@
+#!/usr/bin/env bun
+// bin/advisor-loop — CLI front door for the resumable builder+critic round loop.
+// See advisor-loop-design.md sections 3 (autonomy levels) and 5 (bounds). This
+// file only parses flags, resolves the bar, initializes round_state, and
+// delegates to lib/loop-driver.js runLoop — it owns no round/critic/gate logic.
+//
+// Usage:
+//   bin/advisor-loop --goal "<text>" [--task <text>] [--bar-type <type>] [--bar-ref <ref>]
+//     [--spec <file>] [--refine --bar-ref <existing-artifact>] [--max-rounds <n>]
+//     [--cost-ceiling <usd>] [--no-improve-k <n>] [--autonomy L1|L2|L3] [--gate <path>]
+//     [--agent <name>] [--repo-root <path>] [--output-dir <path>] [--run-id <id>] [--dry-run]
+//   --refine requires --bar-ref (the artifact being refined); resolves to a
+//   prior-round bar seeded with that artifact. --bar-type prior-round --bar-ref
+//   <ref> resolves identically.
+//
+// Exit codes:
+//   0  success (dry-run plan printed, or the loop was handed to runLoop)
+//   1  usage error (no arguments, or missing required --goal)
+//   2  flag validation error (bad --autonomy value, unreadable --spec,
+//      --bar-type without --bar-ref / vice versa, --refine or
+//      --bar-type prior-round without --bar-ref, a --bar-ref path that
+//      does not exist, or an unrecognized --flag)
+//   3  safety gate file (default or explicit --gate) does not exist on disk
+//   6  no comparison bar could be declared (lib/loop-bar.js NoBarError; bin/tournament
+//      uses 0-5, so 6 is reserved for this loop's bar-declaration guardrail)
+
+const fs = require('fs');
+const path = require('path');
+const childProcess = require('child_process');
+const { resolveBar, NoBarError } = require('../lib/loop-bar');
+const { initRoundState, writeRoundState } = require('../lib/round-state');
+const { runLoop } = require('../lib/loop-driver');
+
+const AUTONOMY_LEVELS = ['L1', 'L2', 'L3'];
+const DEFAULT_GATE_PATH = path.join(__dirname, '..', 'gates', 'advisor-default.json');
+
+const ALLOWED_FLAGS = new Set([
+  'goal', 'task', 'bar-type', 'bar-ref', 'spec', 'refine', 'max-rounds',
+  'cost-ceiling', 'no-improve-k', 'autonomy', 'gate', 'agent',
+  'repo-root', 'output-dir', 'run-id', 'dry-run',
+]);
+
+const USAGE = [
+  'Usage: bin/advisor-loop --goal "<text>" [--task <text>] [--bar-type <type>] [--bar-ref <ref>]',
+  '  [--spec <file>] [--refine --bar-ref <ref>] [--max-rounds <n>] [--cost-ceiling <usd>]',
+  '  [--no-improve-k <n>] [--autonomy L1|L2|L3] [--gate <path>] [--agent <name>]',
+  '  [--repo-root <path>] [--output-dir <path>] [--run-id <id>] [--dry-run]',
+].join('\n');
+
+function findUnknownFlag(flags) {
+  return Object.keys(flags).find((k) => !ALLOWED_FLAGS.has(k));
+}
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        out[k] = next;
+        i++;
+      } else {
+        out[k] = true;
+      }
+    }
+  }
+  return out;
+}
+
+class UsageError extends Error {
+  constructor(message, exitCode = 2) {
+    super(message);
+    this.exitCode = exitCode;
+  }
+}
+
+// Requirement 4 (fixing the caller-contract precedence hole): lib/loop-bar.js
+// requires BOTH barType and barRef to take the explicit path, so a lone
+// --bar-type would otherwise silently fall through to the spec-derived
+// acceptance-tests bar. Validated here, at the flag-parsing boundary, instead
+// of inside lib/loop-bar.js.
+//
+// --refine means "refine an artifact the operator already has" — so the
+// artifact path must be supplied via --bar-ref; there is no round-0 to seed
+// it from implicitly at CLI-invocation time. --refine and --bar-type
+// prior-round therefore both require --bar-ref and both resolve to the same
+// bar: { type: 'prior-round', ref: <bar-ref> }, passed straight to resolveBar
+// as an explicit barType+barRef pair (its case-1 branch), so lib/loop-bar.js
+// needs no change.
+function validateBarFlags(flags) {
+  const barType = typeof flags['bar-type'] === 'string' ? flags['bar-type'] : undefined;
+  const barRef = typeof flags['bar-ref'] === 'string' ? flags['bar-ref'] : undefined;
+  const refine = Boolean(flags.refine);
+
+  if ((refine || barType === 'prior-round') && barRef === undefined) {
+    throw new UsageError('--refine requires --bar-ref (the path to the artifact being refined)');
+  }
+  if (refine || barType === 'prior-round') {
+    const resolvedRef = path.resolve(barRef);
+    if (!fs.existsSync(resolvedRef)) {
+      throw new UsageError(`--bar-ref path not found: ${barRef}`);
+    }
+    return { barType: 'prior-round', barRef: resolvedRef, refine: true };
+  }
+  if (barType && barRef === undefined) {
+    throw new UsageError(`--bar-type "${barType}" requires --bar-ref`);
+  }
+  if (!barType && barRef !== undefined) {
+    throw new UsageError('--bar-ref requires --bar-type');
+  }
+  // external-reference's ref is a filesystem path (the artifact being compared
+  // against) so it gets the same resolve-to-absolute treatment as prior-round.
+  // acceptance-tests' ref is a shell test command and metric's ref is a
+  // threshold descriptor — neither is a path, so path.resolve would corrupt them.
+  if (barType === 'external-reference' && barRef !== undefined) {
+    return { barType, barRef: path.resolve(barRef), refine };
+  }
+  return { barType, barRef, refine };
+}
+
+function loadSpecTestCommand(specPath) {
+  if (!specPath) return undefined;
+  const raw = fs.readFileSync(path.resolve(specPath), 'utf8').trim();
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.test_command) {
+      return { test_command: parsed.test_command };
+    }
+  } catch (_) {
+    // not JSON — treat the whole trimmed file as the test_command string
+  }
+  return raw ? { test_command: raw } : undefined;
+}
+
+function buildPlan(flags, bar, autonomyLevel, gatePath) {
+  return {
+    goal: flags.goal,
+    bar,
+    autonomy_level: autonomyLevel,
+    max_rounds: flags['max-rounds'] ? parseInt(flags['max-rounds'], 10) : 5,
+    cost_ceiling_usd: flags['cost-ceiling'] ? parseFloat(flags['cost-ceiling']) : null,
+    no_improve_k: flags['no-improve-k'] ? parseInt(flags['no-improve-k'], 10) : 2,
+    agent: typeof flags.agent === 'string' ? flags.agent : 'coder',
+    safety_gate_path: gatePath,
+  };
+}
+
+function headSha(repoRoot) {
+  return childProcess.execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+}
+
+// Returns the process exit code. Never calls process.exit itself, so it can
+// be driven directly in tests without spawning a subprocess.
+async function main(argv, options = {}) {
+  const { runLoopFn = runLoop, stdout = process.stdout, stderr = process.stderr } = options;
+  const flags = parseArgs(argv);
+
+  const unknownFlag = findUnknownFlag(flags);
+  if (unknownFlag) {
+    stderr.write(`[advisor-loop] error: unrecognized flag --${unknownFlag}\n`);
+    return 2;
+  }
+
+  if (Object.keys(flags).length === 0 || typeof flags.goal !== 'string' || !flags.goal) {
+    stderr.write(USAGE + '\n');
+    return 1;
+  }
+
+  let barFlags;
+  try {
+    barFlags = validateBarFlags(flags);
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    stderr.write(`[advisor-loop] error: ${e.message}\n`);
+    return e.exitCode;
+  }
+
+  const autonomyLevel = typeof flags.autonomy === 'string' ? flags.autonomy : 'L2';
+  if (!AUTONOMY_LEVELS.includes(autonomyLevel)) {
+    stderr.write(`[advisor-loop] error: --autonomy must be one of ${AUTONOMY_LEVELS.join('|')}\n`);
+    return 2;
+  }
+
+  let spec;
+  try {
+    spec = loadSpecTestCommand(typeof flags.spec === 'string' ? flags.spec : undefined);
+  } catch (e) {
+    stderr.write(`[advisor-loop] error: failed to read --spec: ${e.message}\n`);
+    return 2;
+  }
+
+  let bar;
+  try {
+    bar = resolveBar({
+      barType: barFlags.barType,
+      barRef: barFlags.barRef,
+      spec,
+      refine: barFlags.refine,
+      priorRoundArtifacts: options.priorRoundArtifacts,
+    });
+  } catch (e) {
+    if (!(e instanceof NoBarError)) throw e;
+    stderr.write(`[advisor-loop] error: ${e.message}\n`);
+    return e.exitCode;
+  }
+
+  // Requirement (default gate): an explicit --gate is checked for existence
+  // immediately (dry-run or not) so a typo'd path fails fast. The default
+  // gate is only enforced right before a real run, so a dry-run preview
+  // still works in a checkout where gates/advisor-default.json isn't built
+  // yet — it just records the path it WOULD use.
+  const gateIsExplicit = typeof flags.gate === 'string';
+  const gatePath = gateIsExplicit ? path.resolve(flags.gate) : DEFAULT_GATE_PATH;
+  const mustCheckGateNow = gateIsExplicit || !flags['dry-run'];
+  if (mustCheckGateNow && !fs.existsSync(gatePath)) {
+    stderr.write(`[advisor-loop] error: safety gate file not found at ${gatePath}\n`);
+    return 3;
+  }
+
+  const plan = buildPlan(flags, bar, autonomyLevel, gatePath);
+  const repoRoot = typeof flags['repo-root'] === 'string' ? path.resolve(flags['repo-root']) : process.cwd();
+  const runId = typeof flags['run-id'] === 'string' && flags['run-id']
+    ? flags['run-id']
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const outputDirExplicit = typeof flags['output-dir'] === 'string';
+  const outputDir = outputDirExplicit
+    ? path.resolve(flags['output-dir'])
+    : path.join(repoRoot, '.advisor-loop', runId);
+
+  const task = typeof flags.task === 'string' && flags.task ? flags.task : undefined;
+
+  const stateFields = {
+    schema_version: '1',
+    run_id: runId,
+    goal: flags.goal,
+    bar,
+    head_sha: headSha(repoRoot),
+    test_command: spec && spec.test_command
+      ? spec.test_command
+      : (bar.type === 'acceptance-tests' ? bar.ref : null),
+    safety_gate_path: plan.safety_gate_path,
+    max_rounds: plan.max_rounds,
+    cost_ceiling_usd: plan.cost_ceiling_usd,
+    no_improve_k: plan.no_improve_k,
+    autonomy_level: autonomyLevel,
+    agent: plan.agent,
+  };
+
+  // Requirement (dry-run has no side effects): only touch disk here if the
+  // caller explicitly asked for an --output-dir (an opt-in write target) or
+  // this is a real run. A bare --dry-run with no --output-dir must leave no
+  // round_state.json and no run directory behind under the caller's cwd.
+  if (flags['dry-run']) {
+    stdout.write(JSON.stringify(plan, null, 2) + '\n');
+    if (outputDirExplicit) {
+      const dryState = initRoundState(outputDir, stateFields);
+      if (task) {
+        dryState.task = task;
+        writeRoundState(outputDir, dryState);
+      }
+    }
+    return 0;
+  }
+
+  if (!task) {
+    stderr.write('[advisor-loop] warning: no --task given; the builder will receive only --goal with no structured brief\n');
+  }
+
+  const state = initRoundState(outputDir, stateFields);
+  if (task) {
+    state.task = task;
+    writeRoundState(outputDir, state);
+  }
+
+  await runLoopFn(state, { outputDir, repoRoot });
+  return 0;
+}
+
+module.exports = { main, parseArgs, validateBarFlags, buildPlan, loadSpecTestCommand, USAGE };
+
+if (require.main === module) {
+  main(process.argv.slice(2)).then((code) => process.exit(code)).catch((e) => {
+    process.stderr.write(`[advisor-loop] fatal: ${e.message}\n`);
+    process.exit(1);
+  });
+}

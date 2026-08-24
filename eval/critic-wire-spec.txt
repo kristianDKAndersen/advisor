@@ -1,0 +1,60 @@
+=== CRITIC WIRE FORMAT v2 (authoritative; the Advisor owns this protocol) ===
+
+Two judging MODES, selected by bar.type. This replaces the previous
+one-size-fits-all blind A/B, which could not work for predicate bars: A/B needs
+two artifacts, but an acceptance-tests ref is a shell command and a metric ref is
+a threshold descriptor - neither is a file, so there was never anything to put in
+the B slot. The old driver papered over that by pasting the ref into B as prose.
+
+MODE "predicate"  <- bar.type is 'acceptance-tests' or 'metric'
+The brief the driver sends, exactly these lines:
+    Bar: {"type":"<acceptance-tests|metric>","ref":<ref>,"goal":"<goal text>"}
+    Mode: predicate
+    Candidate: {"path":"<absolute worktree path>"}
+There is NO A and NO B. One candidate; the bar is a predicate it either satisfies
+or does not.
+The critic must: evaluate the predicate against Candidate.path (for
+acceptance-tests, run the ref as a shell command with that path as cwd; for
+metric, measure the named metric there), AND additionally verify any contract
+clauses stated in the goal that the predicate itself does not cover - reading the
+source on disk. It writes scores.json with:
+    overall_pass        true ONLY IF the predicate holds AND no blocking clause
+                        violation was found
+    single_biggest_gap  one sentence; empty string only when overall_pass is true
+    ab_verdict          null in predicate mode
+Blindness does not apply in predicate mode - there is nothing to be blind about.
+
+MODE "ab"  <- bar.type is 'external-reference' or 'prior-round'
+The brief the driver sends, exactly these lines:
+    Bar: {"type":"<external-reference|prior-round>","ref":"<absolute path>","goal":"<goal text>"}
+    Mode: ab
+    A: {"path":"<absolute path>"}
+    B: {"path":"<absolute path>"}
+Unchanged from today's behaviour: two real artifact paths, mapping randomized and
+withheld, critic reports the LABEL it prefers ("A", "B" or "tie"), never
+"candidate" or "bar". ab_verdict is populated; overall_pass advisory only.
+
+HARD RULE FOR BOTH MODES - never send a builder self-report as an artifact.
+Candidate.path / A.path / B.path must point at real code or artifact locations on
+disk. The builder's changes.md is a SELF-REPORT and the critic contract forbids
+judging from it; the driver must not hand it over. Use the worktree path.
+
+DRIVER-SIDE VERDICT MAPPING (keeps lib/loop-termination.js pure and UNCHANGED -
+its wonRound() checks ab_verdict.winner === 'candidate', so the driver adapts):
+  predicate mode: if scores.overall_pass === true AND checkObjectiveCondition(bar,
+                  roundRecord) is also true, set
+                  roundRecord.ab_verdict = {winner:'candidate', margin:'clear',
+                                            single_biggest_gap:''}
+                  otherwise set winner:'bar' carrying the critic's gap.
+                  Both conditions required: the critic's judgement never overrides
+                  a failing objective condition, and a passing objective condition
+                  never overrides the critic finding an uncovered-clause violation.
+  ab mode:        unchanged - mapAbVerdict() translates the label via the stored
+                  randomized mapping.
+
+CRITIC `question` HANDLING (defect 18): the critic contract instructs the critic to
+send a `question` and halt when its inputs are unusable. The driver currently polls
+for `result` only, with a 30-minute timeout, so that is a guaranteed 30-minute
+stall. The driver must treat a `question` from the critic as terminal for the round
+and escalate immediately, carrying the question text into the escalation. Never
+wait it out.
