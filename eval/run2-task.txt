@@ -17,8 +17,9 @@ CONTRACT - `mapLimit(items, limit, worker)`
    A single slow item must never stall items that could otherwise be running.
 5. `limit` must be a positive integer. Anything else (0, negative, fractional, NaN, Infinity,
    a string, null, undefined) is rejected with a TypeError. It must never hang.
-6. If a worker rejects, the returned promise rejects with THAT error, and no further worker
-   invocations start after the failure.
+6. If a worker rejects, the returned promise rejects with THAT error without waiting for any
+   already-in-flight worker to settle — a still-pending sibling must never delay or prevent the
+   rejection — and no further worker invocations start after the failure.
 </output_format>
 
 <tools>Node 22, CommonJS, no dependencies. Use `node --test`, NOT bun.</tools>

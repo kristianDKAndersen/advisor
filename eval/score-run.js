@@ -82,33 +82,60 @@ const acceptance = parseNodeTestCounts(`${acceptanceRun.stdout || ''}\n${accepta
 // 3. HELD-OUT -- run against the worktree's src without writing the held-out
 // file into the worktree: symlink src/ into a scratch dir and copy the
 // pristine held-out test next to it, so its relative require resolves.
+//
+// Each of H1/H2/H3 is run in its OWN node --test invocation (--test-name-pattern
+// isolates it), each with its own timeout. A hanging test triggers node's
+// internal --test-timeout, which cancels ONLY that invocation -- it can no
+// longer wedge the process before later held-out tests get a chance to run.
+const HELDOUT_TEST_TIMEOUT_MS = 20000
+const HELDOUT_SPAWN_TIMEOUT_MS = 25000
+
+function runHeldoutOne(tmpDir, testId) {
+  return spawnSync(
+    process.execPath,
+    ['--test', `--test-timeout=${HELDOUT_TEST_TIMEOUT_MS}`, `--test-name-pattern=${testId}`, 'test/heldout.test.js'],
+    {
+      cwd: tmpDir,
+      encoding: 'utf8',
+      timeout: HELDOUT_SPAWN_TIMEOUT_MS,
+    },
+  )
+}
+
+// Outcomes are 'pass' | 'fail' | 'hang' | 'missing'. 'hang' covers both node's
+// own '# cancelled N' report (the test's --test-timeout fired) and the
+// backstop case where our wall-clock spawnSync timeout had to kill the
+// process outright -- either way the test never produced a real result, and
+// that must never be silently merged into 'fail'.
+function classifyHeldoutRun(run) {
+  if (run.signal) return 'hang'
+  const text = `${run.stdout || ''}\n${run.stderr || ''}`
+  const cancelledMatch = text.match(/^# cancelled (\d+)/m)
+  const failMatch = text.match(/^# fail (\d+)/m)
+  const passMatch = text.match(/^# pass (\d+)/m)
+  if (cancelledMatch && Number(cancelledMatch[1]) > 0) return 'hang'
+  if (failMatch && Number(failMatch[1]) > 0) return 'fail'
+  if (passMatch && Number(passMatch[1]) > 0) return 'pass'
+  return 'missing'
+}
+
 function runHeldout(wt) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalloop-heldout-'))
   try {
     fs.mkdirSync(path.join(tmpDir, 'test'))
     fs.symlinkSync(path.join(wt, 'src'), path.join(tmpDir, 'src'), 'dir')
     fs.copyFileSync(HELDOUT_SRC, path.join(tmpDir, 'test', 'heldout.test.js'))
-    return spawnSync(process.execPath, ['--test', '--test-timeout=20000', 'test/heldout.test.js'], {
-      cwd: tmpDir,
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-    })
+    const out = {}
+    for (const testId of ['H1', 'H2', 'H3']) {
+      out[testId] = classifyHeldoutRun(runHeldoutOne(tmpDir, testId))
+    }
+    return out
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 
-function parseHeldoutResults(text) {
-  const out = { H1: 'missing', H2: 'missing', H3: 'missing' }
-  for (const line of text.split('\n')) {
-    const m = line.match(/^(ok|not ok) \d+ - (H[123])\b/)
-    if (m) out[m[2]] = m[1] === 'ok' ? 'pass' : 'fail'
-  }
-  return out
-}
-
-const heldoutRun = runHeldout(worktree)
-const heldout = parseHeldoutResults(`${heldoutRun.stdout || ''}\n${heldoutRun.stderr || ''}`)
+const heldout = runHeldout(worktree)
 
 // 4. CONTRACT
 const contractRun = spawnSync(process.execPath, [CONTRACT_SCRIPT, worktree], {
@@ -165,7 +192,11 @@ function rubricRow(acceptanceCounts, heldoutResults, gateInfo) {
     return { row: 'gate decision unavailable - no round_state.json provided', verdict: 'unknown' }
   }
 
-  const heldoutFail = ['H1', 'H2', 'H3'].filter((k) => heldoutResults[k] === 'fail')
+  // A hang is not a pass either: the test never confirmed the behaviour it
+  // guards, so it counts toward "held-out red" the same as a genuine fail.
+  // A 'missing' result (name pattern matched nothing, e.g. a renamed test)
+  // is left out of both buckets -- it is neither a confirmed red nor green.
+  const heldoutFail = ['H1', 'H2', 'H3'].filter((k) => heldoutResults[k] === 'fail' || heldoutResults[k] === 'hang')
   const acceptanceGreen = accFail === 0
   const heldoutGreen = heldoutFail.length === 0
 

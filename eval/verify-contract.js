@@ -48,6 +48,42 @@ function probeClause5(lim) {
   }
 }
 
+const CLAUSE6_FAILFAST_TIMEOUT_MS = 2000
+
+function probeClause6FailFast() {
+  // Constructs the case the in-process c6 checks below cannot: a worker
+  // rejects while a sibling is still pending and will NEVER settle. A
+  // fail-fast implementation rejects promptly without waiting on the
+  // sibling, so this subprocess exits quickly. A deferred-rejection
+  // implementation (e.g. Promise.all over per-slot runner loops) blocks
+  // forever on the never-settling sibling, so the subprocess hangs and is
+  // killed by spawnSync's timeout - reported as HANG, same as clause 5.
+  const snippet = `
+    const { mapLimit } = require(${JSON.stringify(src)})
+    ;(async () => {
+      try {
+        await mapLimit([0,1], 2, async (item, i) => {
+          if (i === 0) {
+            await new Promise(r => setTimeout(r, 10))
+            throw new Error('boom-failfast')
+          }
+          return new Promise(() => {}) // sibling: never settles
+        })
+        console.log(JSON.stringify({ outcome: 'resolved(no error)' }))
+      } catch (e) {
+        console.log(JSON.stringify({ outcome: 'rejected', message: e.message }))
+      }
+    })()
+  `
+  const run = spawnSync(process.execPath, ['-e', snippet], { timeout: CLAUSE6_FAILFAST_TIMEOUT_MS, encoding: 'utf8' })
+  if (run.signal || run.error) return { outcome: 'HANG' }
+  try {
+    return JSON.parse((run.stdout || '').trim())
+  } catch (e) {
+    return { outcome: 'Other:ParseError' }
+  }
+}
+
 ;(async () => {
   // Clause 5: invalid limits -> TypeError, no hang. Each limit is probed in its
   // own subprocess (spawnSync + timeout) so a candidate that spins in an
@@ -67,6 +103,8 @@ function probeClause5(lim) {
   await new Promise(r=>setTimeout(r,60))
   log('c6 same error identity', caught===err, String(caught && caught.message))
   log('c6 no starts after failure', Math.max(...calls)<=2 && calls.length<=3, 'calls='+JSON.stringify(calls))
+  const c6ff = probeClause6FailFast()
+  log('c6 fail-fast (rejects without waiting for a still-pending sibling)', c6ff.outcome === 'rejected' && c6ff.message === 'boom-failfast', JSON.stringify(c6ff))
   // Clause 1: worker called exactly once per entry
   const seen = new Map()
   await mapLimit([...Array(20).keys()], 4, async (item,i)=>{ seen.set(i,(seen.get(i)||0)+1); return i })
