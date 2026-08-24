@@ -74,3 +74,26 @@ test('H3 an invalid limit is rejected, and never hangs', () => {
     assert.equal(outcome, 'TypeError', `limit=${limit} should reject with a TypeError, got ${outcome}`)
   }
 })
+
+// H4 — contract clause 6, same-microtask-drain race. Every worker here settles
+// within one microtask drain (no setTimeout anywhere), so a candidate that sets
+// its failure flag in an outer .catch() instead of synchronously at the throw
+// site lets a sibling resuming from its own await start an extra item before
+// the flag is visible. Guarded with a race against a timer so a pathological
+// candidate cannot wedge the suite.
+test('H4 no extra item starts within the same microtask drain after a same-tick rejection', async () => {
+  const started = []
+  const guard = new Promise((_, reject) => setTimeout(() => reject(new Error('H4 timed out — mapLimit hung')), 2000))
+  const run = (async () => {
+    try {
+      await mapLimit([0, 1, 2, 3, 4, 5, 6, 7], 2, async (item, i) => {
+        started.push(i)
+        if (i === 0) throw new Error('boom')
+        return i
+      })
+    } catch (e) { /* expected */ }
+  })()
+  await Promise.race([run, guard])
+  const extra = started.filter((i) => i > 1).length
+  assert.equal(extra, 0, 'a sibling started an extra item after the failure: started=' + JSON.stringify(started))
+})

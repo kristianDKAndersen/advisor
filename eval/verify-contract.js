@@ -84,6 +84,28 @@ function probeClause6FailFast() {
   }
 }
 
+// Clause 6: same-microtask-drain race. Every worker here settles within one
+// microtask drain (no setTimeout anywhere), so a candidate that sets its
+// failure flag in an outer .catch() instead of synchronously at the throw
+// site lets a sibling resuming from its own await start an extra item before
+// the flag is visible. Guarded with a race against a timer so a pathological
+// candidate cannot wedge this process.
+async function probeClause6Microtask() {
+  const started = []
+  const guard = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 2000))
+  try {
+    await Promise.race([
+      mapLimit([0, 1, 2, 3, 4, 5, 6, 7], 2, async (item, i) => {
+        started.push(i)
+        if (i === 0) throw new Error('boom')
+        return i
+      }),
+      guard,
+    ])
+  } catch (e) { /* expected: boom, or TIMEOUT on a wedged candidate */ }
+  return started
+}
+
 ;(async () => {
   // Clause 5: invalid limits -> TypeError, no hang. Each limit is probed in its
   // own subprocess (spawnSync + timeout) so a candidate that spins in an
@@ -105,6 +127,9 @@ function probeClause6FailFast() {
   log('c6 no starts after failure', Math.max(...calls)<=2 && calls.length<=3, 'calls='+JSON.stringify(calls))
   const c6ff = probeClause6FailFast()
   log('c6 fail-fast (rejects without waiting for a still-pending sibling)', c6ff.outcome === 'rejected' && c6ff.message === 'boom-failfast', JSON.stringify(c6ff))
+  const c6mt = await probeClause6Microtask()
+  const c6mtExtra = c6mt.filter((i) => i > 1).length
+  log('c6 no extra item within same microtask drain after same-tick rejection', c6mtExtra === 0, 'started=' + JSON.stringify(c6mt))
   // Clause 1: worker called exactly once per entry
   const seen = new Map()
   await mapLimit([...Array(20).keys()], 4, async (item,i)=>{ seen.set(i,(seen.get(i)||0)+1); return i })

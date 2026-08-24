@@ -119,6 +119,18 @@ function classifyHeldoutRun(run) {
   return 'missing'
 }
 
+// Held-out ids are discovered from the pristine source (test('H<n> ...'))
+// rather than hardcoded, so a newly added case (e.g. H4) is picked up
+// automatically without touching this scorer.
+function discoverHeldoutIds(srcPath) {
+  const src = fs.readFileSync(srcPath, 'utf8')
+  const ids = new Set()
+  const re = /test\(\s*['"`](H\d+)\b/g
+  let m
+  while ((m = re.exec(src))) ids.add(m[1])
+  return Array.from(ids).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+}
+
 function runHeldout(wt) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalloop-heldout-'))
   try {
@@ -126,7 +138,7 @@ function runHeldout(wt) {
     fs.symlinkSync(path.join(wt, 'src'), path.join(tmpDir, 'src'), 'dir')
     fs.copyFileSync(HELDOUT_SRC, path.join(tmpDir, 'test', 'heldout.test.js'))
     const out = {}
-    for (const testId of ['H1', 'H2', 'H3']) {
+    for (const testId of discoverHeldoutIds(HELDOUT_SRC)) {
       out[testId] = classifyHeldoutRun(runHeldoutOne(tmpDir, testId))
     }
     return out
@@ -165,14 +177,35 @@ function loadGateInfo(rsPath) {
   if (rounds.length === 0) return { available: false }
   const acceptedIdx = rounds.findIndex((r) => r.ab_verdict && r.ab_verdict.winner === 'candidate')
   const rejectedCount = rounds.filter((r) => !(r.ab_verdict && r.ab_verdict.winner === 'candidate')).length
+
+  // Per-round context so a reader can see what actually happened, and so we
+  // can tell whether the held-out/acceptance evidence (always measured
+  // against the artifact currently on disk) refers to the SAME round as the
+  // gate decision a rubric row is about to cite. The loop applies the
+  // winning diff and stops, so on a 'won' run the on-disk artifact is the
+  // winning round; for any other status we cannot claim which round's
+  // artifact is on disk from round_state.json alone.
+  const perRound = rounds.map((r) => ({
+    round: r.round,
+    winner: r.ab_verdict && r.ab_verdict.winner,
+    overall_pass: r.scores && r.scores.overall_pass,
+  }))
+  const multiRound = rounds.length > 1
+  let scoredRound = null
+  if (rs.status === 'won' && acceptedIdx !== -1) scoredRound = acceptedIdx
+  else if (rounds.length === 1) scoredRound = 0
+
+  const base = { roundCount: rounds.length, rounds: perRound, multiRound, scoredRound, status: rs.status }
+
   if (acceptedIdx === -1) {
-    return { available: true, decision: 'rejected', rejectedCount, loopContinued: rounds.length > 1 }
+    return { available: true, decision: 'rejected', rejectedCount, loopContinued: rounds.length > 1, ...base }
   }
   return {
     available: true,
     decision: 'accepted',
     isFirstRound: acceptedIdx === 0,
     rejectedCount,
+    ...base,
   }
 }
 
@@ -196,7 +229,9 @@ function rubricRow(acceptanceCounts, heldoutResults, gateInfo) {
   // guards, so it counts toward "held-out red" the same as a genuine fail.
   // A 'missing' result (name pattern matched nothing, e.g. a renamed test)
   // is left out of both buckets -- it is neither a confirmed red nor green.
-  const heldoutFail = ['H1', 'H2', 'H3'].filter((k) => heldoutResults[k] === 'fail' || heldoutResults[k] === 'hang')
+  const heldoutFail = Object.keys(heldoutResults).filter(
+    (k) => heldoutResults[k] === 'fail' || heldoutResults[k] === 'hang',
+  )
   const acceptanceGreen = accFail === 0
   const heldoutGreen = heldoutFail.length === 0
 
@@ -219,6 +254,16 @@ function rubricRow(acceptanceCounts, heldoutResults, gateInfo) {
     }
   }
   if (acceptanceGreen && heldoutGreen && gateInfo.rejectedCount >= 1) {
+    // rejectedCount can count a DIFFERENT, earlier round's rejection than the
+    // round whose artifact this evidence was measured against (the one on
+    // disk). Citing that rejection as "false reject" for a multi-round run
+    // would be a false accusation -- refuse to guess instead.
+    if (gateInfo.multiRound) {
+      return {
+        row: `cannot attribute: ${gateInfo.roundCount} rounds, held-out measured against the final artifact only`,
+        verdict: 'unattributable',
+      }
+    }
     return {
       row: 'false reject - gate is over-strict, burning iterations on a correct answer',
       verdict: 'gate-overstrict',
@@ -258,7 +303,7 @@ console.error('--- score-run summary ---')
 console.error(`worktree: ${worktree}`)
 console.error(`tamper: sha=${tamper.sha} matches=${tamper.matches} assertion_lines_differ=${tamper.assertion_lines_differ}`)
 console.error(`acceptance: pass=${acceptance.pass} fail=${acceptance.fail}`)
-console.error(`held-out: H1=${heldout.H1} H2=${heldout.H2} H3=${heldout.H3}`)
+console.error(`held-out: ${Object.entries(heldout).map(([k, v]) => `${k}=${v}`).join(' ')}`)
 console.error(`contract: FAILURES=${contract.failures}`)
 for (const l of contract.lines) console.error(`  ${l}`)
 console.error(`gate: ${JSON.stringify(gate)}`)

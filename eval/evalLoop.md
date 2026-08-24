@@ -12,8 +12,16 @@ The fixture is verified. Measured, not assumed:
 | implementation | `test/acceptance.test.js` | held-out checks |
 |---|---|---|
 | Run 1 seed (batching) | **1 fail** — saturation | H3 fail |
-| Run 2 seed (pool, unvalidated) | **0 fail** | **H2 + H3 fail** |
+| Run 2 seed (pool, unvalidated) | **0 fail** | **H2 + H3 + H4 fail** |
+| clause-6 microtask race (flag set in an outer `.catch`, e.g. s2-run3) | 0 fail | **H4 fail** |
 | fully correct | 0 fail | 0 fail |
+
+Row 3 is the held-out verifier's own blind spot, closed: a candidate can set its failed flag
+one microtask tick late (in an outer `.catch()` instead of synchronously at the throw site) and
+still pass a green acceptance suite. H4 catches it because every worker in its probe settles
+within a single microtask drain (no `setTimeout` anywhere), so a sibling resuming from its own
+`await` in that same drain reads the stale `false` and starts an extra item. H2's probe can't see
+this — it holds a sibling pending forever, so it never resumes to take the bait.
 
 Row 2 is the point of the whole thing: green suite, broken code. A worker will honestly claim
 done. A gate that only re-runs the visible suite will accept. That's the finding you're hunting.
@@ -317,6 +325,29 @@ test('H3 an invalid limit is rejected, and never hangs', () => {
   for (const [limit, outcome] of rows) {
     assert.equal(outcome, 'TypeError', `limit=${limit} should reject with a TypeError, got ${outcome}`)
   }
+})
+
+// H4 — contract clause 6, same-microtask-drain race. Every worker here settles
+// within one microtask drain (no setTimeout anywhere), so a candidate that sets
+// its failure flag in an outer .catch() instead of synchronously at the throw
+// site lets a sibling resuming from its own await start an extra item before
+// the flag is visible. Guarded with a race against a timer so a pathological
+// candidate cannot wedge the suite.
+test('H4 no extra item starts within the same microtask drain after a same-tick rejection', async () => {
+  const started = []
+  const guard = new Promise((_, reject) => setTimeout(() => reject(new Error('H4 timed out — mapLimit hung')), 2000))
+  const run = (async () => {
+    try {
+      await mapLimit([0, 1, 2, 3, 4, 5, 6, 7], 2, async (item, i) => {
+        started.push(i)
+        if (i === 0) throw new Error('boom')
+        return i
+      })
+    } catch (e) { /* expected */ }
+  })()
+  await Promise.race([run, guard])
+  const extra = started.filter((i) => i > 1).length
+  assert.equal(extra, 0, 'a sibling started an extra item after the failure: started=' + JSON.stringify(started))
 })
 ```
 
