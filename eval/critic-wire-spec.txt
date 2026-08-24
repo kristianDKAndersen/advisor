@@ -15,9 +15,10 @@ There is NO A and NO B. One candidate; the bar is a predicate it either satisfie
 or does not.
 The critic must: evaluate the predicate against Candidate.path (for
 acceptance-tests, run the ref as a shell command with that path as cwd; for
-metric, measure the named metric there), AND additionally verify any contract
-clauses stated in the goal that the predicate itself does not cover - reading the
-source on disk. It writes scores.json with:
+metric, measure the named metric there), AND additionally verify the contract
+clauses stated in the goal - reading the source on disk - enumerating every clause
+EXCEPT one whose entire content is the bar predicate itself (the exact enumeration
+scope is defined under CLAUSE VERIFICATION RULES below). It writes scores.json with:
     overall_pass        true ONLY IF the predicate holds AND every enumerated clause
                         in clause_verdicts carries verdict "holds" AND no clause is
                         "violated" AND no clause is "indeterminate" with blocking true
@@ -31,9 +32,29 @@ source on disk. It writes scores.json with:
 Blindness does not apply in predicate mode - there is nothing to be blind about.
 
 CLAUSE VERIFICATION RULES (predicate mode).
-Enumerate every clause stated in the goal and record one clause_verdicts row per
-clause. The critic contract at spawns/loop-critic/CLAUDE.md states the same rules to
-the critic; this is the protocol form.
+Enumerate the clauses stated in the goal and record one clause_verdicts row per
+enumerated clause. The critic contract at spawns/loop-critic/CLAUDE.md states the same
+rules to the critic; this is the protocol form.
+
+ENUMERATION SCOPE. Enumerate every clause stated in the goal EXCEPT a clause whose entire
+content is the bar predicate itself - for acceptance-tests, "the suite is green" / "the
+tests pass"; for metric, "the metric is above X". Such a clause is already settled by the
+predicate result that overall_pass and the rationale record; it gets no clause_verdicts
+row, and its absence is not a gap.
+A clause is predicate-restating ONLY when satisfying the predicate is logically identical
+to satisfying the clause. A clause that the suite merely EXERCISES, in whole or in part, is
+NOT predicate-restating: it is enumerated, R1 applies to it in full, and a green suite is
+therefore not evidence that it holds. From a goal of the shape "src/mapLimit.js satisfies
+all six CONTRACT clauses and the acceptance suite is green":
+  - "the acceptance suite is green" is predicate-restating - not enumerated, no row.
+  - "never more than `limit` workers in flight" is enumerated even though the suite has a
+    peak-concurrency test for it, because the suite tests one scenario while the clause
+    quantifies over all of them; a green suite still cannot support "holds" for it, only a
+    control-flow argument can.
+This does not weaken blocking. When a genuine correctness clause cannot be settled from
+control flow, blocking true is the correct outcome and the intended teeth of these rules,
+not an escape hatch. The only clause the enumeration scope removes from the gate is one the
+predicate has already settled; every other unsettled correctness clause still blocks.
 
 R1 EVIDENCE ASYMMETRY. A predicate run, a self-authored probe, or any third-party
    grader can only EXHIBIT a violation of a clause; a green result from any of them is

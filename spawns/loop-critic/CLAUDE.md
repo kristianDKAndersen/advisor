@@ -48,13 +48,22 @@ Evaluate the predicate against `Candidate.path`:
 - **`acceptance-tests`** - `ref` is a shell command. Run it with `Candidate.path` as cwd. The predicate holds iff the command exits 0 and all named cases are green.
 - **`metric`** - `ref` is `{"name":..., "op":..., "value":...}`. Measure the named metric against `Candidate.path` (using the command/method implied by `name`, or by reading a metric report file there). The predicate holds iff the measured value satisfies `op value`.
 
-Additionally, verify any contract clauses stated in `goal` that the predicate itself does not cover, by reading the source on disk at `Candidate.path`.
+Additionally, verify the contract clauses stated in `goal` by reading the source on disk at `Candidate.path`, enumerating every clause EXCEPT one whose entire content is the bar predicate itself (the exact enumeration scope is defined under "Clause verification" below).
 
 `overall_pass` is `true` ONLY IF the predicate holds AND every enumerated clause in `clause_verdicts` carries `verdict` "holds" AND no clause is "violated" AND no clause is "indeterminate" with `blocking` true (see "Clause verification" below). `ab_verdict` is `null`. `single_biggest_gap` is mandatory (one sentence naming the highest-value missing thing) whenever `overall_pass` is `false`, and when `overall_pass` is false it must name the `clause_verdicts` `id` it derives from; empty string only when `overall_pass` is `true`.
 
 ## Clause verification
 
-Whenever you verify contract clauses stated in `goal` (predicate mode), enumerate every clause and record one row per clause in `clause_verdicts`. These rules govern how a clause may be judged.
+Whenever you verify contract clauses stated in `goal` (predicate mode), enumerate the clauses and record one row per enumerated clause in `clause_verdicts`. These rules govern how a clause may be judged.
+
+**Enumeration scope.** Enumerate every clause stated in the goal EXCEPT a clause whose entire content is the bar predicate itself - for `acceptance-tests`, "the suite is green" / "the tests pass"; for `metric`, "the metric is above X". Such a clause is already settled by the predicate result that `overall_pass` and the `rationale` record; it gets no `clause_verdicts` row, and its absence is not a gap.
+
+A clause is predicate-restating ONLY when satisfying the predicate is logically identical to satisfying the clause. A clause that the suite merely EXERCISES, in whole or in part, is NOT predicate-restating: it is enumerated, R1 applies to it in full, and a green suite is therefore not evidence that it holds. From a goal of the shape "src/mapLimit.js satisfies all six CONTRACT clauses and the acceptance suite is green":
+
+- "the acceptance suite is green" is predicate-restating - not enumerated, no row.
+- "never more than `limit` workers in flight" is enumerated even though the suite has a peak-concurrency test for it, because the suite tests one scenario while the clause quantifies over all of them; a green suite still cannot support "holds" for it, only a control-flow argument can.
+
+This does not weaken `blocking`. When a genuine correctness clause cannot be settled from control flow, `blocking` true is the correct outcome and the intended teeth of these rules, not an escape hatch. The only clause the enumeration scope removes from the gate is one the predicate has already settled; every other unsettled correctness clause still blocks.
 
 **R1 - Evidence asymmetry.** A predicate run, a self-authored probe, or any third-party grader can only EXHIBIT a violation of a clause; a green result from any of them is never evidence that the clause holds. A probe that "sees nothing" may simply be blind to the defect it was aimed at. Record a clause as holding only on an argument from the source's own control flow at `Candidate.path` that names the specific scenario which would violate the clause and shows the code prevents it. "I ran a probe and saw nothing" is an unsettled clause (`verdict` "indeterminate"), not a satisfied one.
 
