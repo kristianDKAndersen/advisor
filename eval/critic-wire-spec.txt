@@ -18,11 +18,65 @@ acceptance-tests, run the ref as a shell command with that path as cwd; for
 metric, measure the named metric there), AND additionally verify any contract
 clauses stated in the goal that the predicate itself does not cover - reading the
 source on disk. It writes scores.json with:
-    overall_pass        true ONLY IF the predicate holds AND no blocking clause
-                        violation was found
-    single_biggest_gap  one sentence; empty string only when overall_pass is true
+    overall_pass        true ONLY IF the predicate holds AND every enumerated clause
+                        in clause_verdicts carries verdict "holds" AND no clause is
+                        "violated" AND no clause is "indeterminate" with blocking true
+    single_biggest_gap  one sentence; when overall_pass is false it names the
+                        clause_verdicts id it derives from; empty string only when
+                        overall_pass is true
+    clause_source       where the clause text came from (goal text, or a builder
+                        brief at <path>)
+    clause_verdicts     one row per clause enumerated from the goal (row shape below)
     ab_verdict          null in predicate mode
 Blindness does not apply in predicate mode - there is nothing to be blind about.
+
+CLAUSE VERIFICATION RULES (predicate mode).
+Enumerate every clause stated in the goal and record one clause_verdicts row per
+clause. The critic contract at spawns/loop-critic/CLAUDE.md states the same rules to
+the critic; this is the protocol form.
+
+R1 EVIDENCE ASYMMETRY. A predicate run, a self-authored probe, or any third-party
+   grader can only EXHIBIT a violation of a clause; a green result from any of them is
+   never evidence that the clause holds. A clause may be recorded as holding only on an
+   argument from the source's own control flow at Candidate.path that names the specific
+   scenario which would violate the clause and shows the code prevents it. "I ran a probe
+   and saw nothing" is an unsettled clause (verdict "indeterminate"), not a satisfied one.
+
+R2 TEMPORAL / ORDERING CLAUSES. For any clause of the form "no X occurs after Y", "at
+   most N concurrent", or otherwise constraining ordering, name the concrete interleaving
+   that would violate the clause and show the source prevents THAT interleaving. Stating
+   that a guard variable exists is insufficient: the argument must say WHEN the guard is
+   written relative to WHEN it is read - for example a synchronous throw site versus an
+   outer .catch(), or the same microtask drain versus a later macrotask turn. That
+   microtask/macrotask contrast is one named instance of the rule, not the rule itself;
+   every ordering clause needs the write-before-read argument in the units it cares about.
+
+R3 GRADER ACCESS. Sourcing clause TEXT from outside Candidate.path is allowed and often
+   necessary (for example reading a builder brief when the clauses are not in the
+   worktree); record where each clause's text came from in clause_source. Importing a
+   VERDICT from any test suite or grader not derived from the goal's clauses is prohibited
+   - explicitly including a repo's own contract prober or any held-out suite. Two reasons:
+   a green grader is exactly the false confidence R1 forbids, and reading a held-out
+   grader leaks its signal into single_biggest_gap, corrupting the next round.
+
+R4 CLAUSE_VERDICTS ROW SHAPE (additive array field on scores.json). Each row:
+    id            clause identifier as it appears in the goal or source text
+    clause_text   the clause as sourced, verbatim
+    verdict       one of "holds" | "violated" | "indeterminate"
+    evidence_kind one of "control-flow" | "probe-exhibited-violation" | "predicate-run"
+    evidence_ref  file:line, or the command plus the observed output that supports it
+    argument      one or two sentences; for a temporal clause this is the R2 interleaving
+                  argument
+   Constraints:
+    - verdict "holds" requires evidence_kind "control-flow". "predicate-run" and a green
+      probe can never support "holds" (this is R1 made structural).
+    - verdict "indeterminate" requires a reason field and a blocking boolean. blocking is
+      true when the clause is a correctness requirement the critic could not settle, and
+      false only when the clause is not source-checkable at all (for example subjective
+      wording); reason must say which and why.
+    - a clause resolved by choosing between competing readings requires an interpretation
+      field naming both readings and why one was chosen.
+   Also a top-level clause_source field recording where the clause text came from.
 
 MODE "ab"  <- bar.type is 'external-reference' or 'prior-round'
 The brief the driver sends, exactly these lines:
