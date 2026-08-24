@@ -11,7 +11,7 @@ Pre-flight for manual `/compact`. Run these steps in order before issuing `/comp
 
 ## Why this is needed
 
-The PreCompact hook in `.claude/settings.json` auto-commits a checkpoint (`git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"`) — but only for automatic compaction. **GH#13572: PreCompact does not fire on manual `/compact`.** Without this skill, manually issuing `/compact` discards unsaved session state. The Stop hook fires after every response, so it covers some of this path — but running this skill explicitly is the reliable guarantee.
+The PreCompact hook in `.claude/settings.json` auto-commits a checkpoint (`git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"`) — but only for automatic compaction. **GH#13572: PreCompact does not fire on manual `/compact`.** Without this skill, manually issuing `/compact` discards unsaved session state. No Stop hook covers this path — running `/pre-compact` explicitly is the reliable guarantee.
 
 ## Steps
 

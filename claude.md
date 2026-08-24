@@ -296,7 +296,7 @@ The session-start.js hook will surface the last handover on the next session sta
 Do NOT /clear before completing step 2 — the sid is lost after /clear if it is not
 written to disk.
 
-Note: the PreCompact hook is now installed in `.claude/settings.json` — it auto-commits a checkpoint (`git add -A && git commit --no-verify -m "auto-save: pre-compaction checkpoint"`) before auto-compaction fires, so the handover write above is already persisted. Use `/pre-compact` to manually trigger the checkpoint at any time (e.g., before issuing `/compact`). Caveat GH#13572: PreCompact does not fire on manual `/compact`; in that case, complete the handover write manually before issuing `/compact`, or rely on the Stop hook which fires after every response.
+Note: the PreCompact hook is now installed in `.claude/settings.json` — it auto-commits a checkpoint (`git -C "$PWD" add -A && git commit …`; a no-op when nothing is staged, with failures swallowed) before auto-compaction fires, so the handover write above is already persisted. Use `/pre-compact` to manually trigger the checkpoint at any time (e.g., before issuing `/compact`). Caveat GH#13572: PreCompact does not fire on manual `/compact`; in that case, run `/pre-compact` to complete the handover write and checkpoint manually before issuing `/compact` — no Stop hook covers this path.
 
 **Worker PostToolUse hooks:** `ADVISOR_WORKER_HOOKS` is set unconditionally for ALL agents by `injectWorkerHooks()` in `lib/summon.js` (default-on, no allowlist). Every summoned worker receives hook coverage automatically — no per-agent `settings.json` changes needed, and there is no per-agent opt-out. Rollback reference: `~/.advisor/vault/lessons/manual-20260522-worker-hooks-rollout-advisor-1.md`.
 
