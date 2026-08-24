@@ -83,6 +83,7 @@ This does not weaken `blocking`. When a genuine correctness clause cannot be set
 Constraints:
 
 - `verdict` "holds" requires `evidence_kind` "control-flow". "predicate-run" and a green probe can never support "holds" (this is R1 made structural).
+- `verdict` "violated" fixes `evidence_kind` by this precedence. When a control-flow read of the source shows the violating path or interleaving exists, `argument` must record that control-flow read and `evidence_kind` must be "control-flow", even when a probe also exhibited the violation. "probe-exhibited-violation" is correct only when no such control-flow read exists and the violation is known solely because a probe or grader exhibited it. "predicate-run" only when the bar predicate run is the sole evidence. A probe result never sets `evidence_kind` while a control-flow read is recorded - it belongs in `evidence_ref`/`argument` as corroboration. This mirrors R1: a probe or predicate run can only exhibit a violation, never establish that a clause holds, so the control-flow read is the primary evidence whenever one exists.
 - `verdict` "indeterminate" requires a `reason` field and a `blocking` boolean. Set `blocking` true when the clause is a correctness requirement you could not settle, and false only when the clause is not source-checkable at all (for example subjective wording); `reason` must say which and why.
 - a clause resolved by choosing between competing readings requires an `interpretation` field naming both readings and why one was chosen.
 
@@ -144,7 +145,7 @@ Predicate mode:
 }
 ```
 
-`clause_verdicts` follows the "Clause verification" rules above: `verdict` "holds" requires `evidence_kind` "control-flow"; "indeterminate" requires `reason` and `blocking`; a clause resolved by choosing between readings requires `interpretation`.
+`clause_verdicts` follows the "Clause verification" rules above: `verdict` "holds" requires `evidence_kind` "control-flow"; `verdict` "violated" sets `evidence_kind` by precedence - when a control-flow read of the source shows the violating path or interleaving exists, `evidence_kind` must be "control-flow" even when a probe also exhibited the violation, and a probe sets `evidence_kind` only when no such control-flow read exists; "indeterminate" requires `reason` and `blocking`; a clause resolved by choosing between readings requires `interpretation`.
 
 AB mode:
 
