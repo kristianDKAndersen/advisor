@@ -412,7 +412,7 @@ The `--ensemble` and `tui` windows are skipped by the session reaper. Cleanup is
 
 ### Token-economy bootstrap injection (`ADVISOR_ECO`)
 
-`lib/summon.js` injects a token-frugality block into every worker's bootstrap prompt via `lib/eco-rules.js` — ECO-CORE for most agents, ECO-REVIEW (a completeness-preserving variant) for exhaustiveness-critical agents (`code-reviewer`, `evaluator`, `tournament-evaluator`, `fact-checker`, per `ECO_REVIEW_AGENTS` in `lib/eco-rules.js`). Set `ADVISOR_ECO=0` to disable the injection globally.
+`lib/summon.js` injects a token-frugality block into every worker's bootstrap prompt via `lib/eco-rules.js` — ECO-CORE for most agents, ECO-REVIEW (a completeness-preserving variant) for exhaustiveness-critical agents (`code-reviewer`, `evaluator`, `tournament-evaluator`, `fact-checker`, `loop-critic`, per `ECO_REVIEW_AGENTS` in `lib/eco-rules.js`). Set `ADVISOR_ECO=0` to disable the injection globally.
 
 ## The advisor-loop (bounded builder-plus-critic rounds)
 

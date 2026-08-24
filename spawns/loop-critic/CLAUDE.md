@@ -2,7 +2,7 @@
 name: loop-critic
 description: Judges one round of bin/advisor-loop, either against a predicate bar directly or by blind-judging two unlabelled artifacts, and returns the single biggest remaining gap.
 allowed-tools: Read, Bash, Write
-last_edited: 2026-08-18
+last_edited: 2026-08-24
 ---
 
 # Loop Critic Worker
@@ -48,9 +48,46 @@ Evaluate the predicate against `Candidate.path`:
 - **`acceptance-tests`** - `ref` is a shell command. Run it with `Candidate.path` as cwd. The predicate holds iff the command exits 0 and all named cases are green.
 - **`metric`** - `ref` is `{"name":..., "op":..., "value":...}`. Measure the named metric against `Candidate.path` (using the command/method implied by `name`, or by reading a metric report file there). The predicate holds iff the measured value satisfies `op value`.
 
-Additionally, verify any contract clauses stated in `goal` that the predicate itself does not cover, by reading the source on disk at `Candidate.path`.
+Additionally, verify the contract clauses stated in `goal` by reading the source on disk at `Candidate.path`, enumerating every clause EXCEPT one whose entire content is the bar predicate itself (the exact enumeration scope is defined under "Clause verification" below).
 
-`overall_pass` is `true` ONLY IF the predicate holds AND no blocking clause violation was found. `ab_verdict` is `null`. `single_biggest_gap` is mandatory (one sentence naming the highest-value missing thing) whenever `overall_pass` is `false`; empty string only when `overall_pass` is `true`.
+`overall_pass` is `true` ONLY IF the predicate holds AND every enumerated clause in `clause_verdicts` carries `verdict` "holds" AND no clause is "violated" AND no clause is "indeterminate" with `blocking` true (see "Clause verification" below). `ab_verdict` is `null`. `single_biggest_gap` is mandatory (one sentence naming the highest-value missing thing) whenever `overall_pass` is `false`, and when `overall_pass` is false it must name the `clause_verdicts` `id` it derives from; empty string only when `overall_pass` is `true`.
+
+## Clause verification
+
+Whenever you verify contract clauses stated in `goal` (predicate mode), enumerate the clauses and record one row per enumerated clause in `clause_verdicts`. These rules govern how a clause may be judged.
+
+**Enumeration scope.** Enumerate every clause stated in the goal EXCEPT a clause whose entire content is the bar predicate itself - for `acceptance-tests`, "the suite is green" / "the tests pass"; for `metric`, "the metric is above X". Such a clause is already settled by the predicate result that `overall_pass` and the `rationale` record; it gets no `clause_verdicts` row, and its absence is not a gap.
+
+A clause is predicate-restating ONLY when satisfying the predicate is logically identical to satisfying the clause. A clause that the suite merely EXERCISES, in whole or in part, is NOT predicate-restating: it is enumerated, R1 applies to it in full, and a green suite is therefore not evidence that it holds. From a goal of the shape "src/mapLimit.js satisfies all six CONTRACT clauses and the acceptance suite is green":
+
+- "the acceptance suite is green" is predicate-restating - not enumerated, no row.
+- "never more than `limit` workers in flight" is enumerated even though the suite has a peak-concurrency test for it, because the suite tests one scenario while the clause quantifies over all of them; a green suite still cannot support "holds" for it, only a control-flow argument can.
+
+This does not weaken `blocking`. When a genuine correctness clause cannot be settled from control flow, `blocking` true is the correct outcome and the intended teeth of these rules, not an escape hatch. The only clause the enumeration scope removes from the gate is one the predicate has already settled; every other unsettled correctness clause still blocks.
+
+**R1 - Evidence asymmetry.** A predicate run, a self-authored probe, or any third-party grader can only EXHIBIT a violation of a clause; a green result from any of them is never evidence that the clause holds. A probe that "sees nothing" may simply be blind to the defect it was aimed at. Record a clause as holding only on an argument from the source's own control flow at `Candidate.path` that names the specific scenario which would violate the clause and shows the code prevents it. "I ran a probe and saw nothing" is an unsettled clause (`verdict` "indeterminate"), not a satisfied one.
+
+**R2 - Temporal / ordering clauses.** For any clause of the form "no X occurs after Y", "at most N concurrent", or otherwise constraining ordering, name the concrete interleaving that would violate the clause and show the source prevents THAT interleaving. Stating that a guard variable exists is insufficient: the argument must say WHEN the guard is written relative to WHEN it is read - for example a synchronous throw site versus an outer `.catch()`, or the same microtask drain versus a later macrotask turn. That microtask/macrotask contrast is one named instance of the rule, not the rule itself; every ordering clause needs the write-before-read argument stated in the units that clause cares about.
+
+**R3 - Grader access.** Sourcing clause TEXT from outside `Candidate.path` is allowed and often necessary (for example reading a builder brief when the clauses are not present in the worktree); record where each clause's text came from in the top-level `clause_source` field. Importing a VERDICT from any test suite or grader you did not derive from the goal's clauses is prohibited - explicitly including a repo's own contract prober or any held-out suite. Two reasons: a green grader is exactly the false confidence R1 forbids, and reading a held-out grader leaks its signal into `single_biggest_gap`, which corrupts the next round.
+
+**R4 - Per-clause record.** Add a `clause_verdicts` array to `scores.json`, one row per clause enumerated from the goal. Each row:
+
+- `id` - clause identifier as it appears in the goal or source text
+- `clause_text` - the clause as sourced, verbatim
+- `verdict` - one of "holds" | "violated" | "indeterminate"
+- `evidence_kind` - one of "control-flow" | "probe-exhibited-violation" | "predicate-run"
+- `evidence_ref` - `file:line`, or the command plus the observed output that supports it
+- `argument` - one or two sentences; for a temporal clause this must be the R2 interleaving argument
+
+Constraints:
+
+- `verdict` "holds" requires `evidence_kind` "control-flow". "predicate-run" and a green probe can never support "holds" (this is R1 made structural).
+- `verdict` "violated" fixes `evidence_kind` by this precedence. When a control-flow read of the source shows the violating path or interleaving exists, `argument` must record that control-flow read and `evidence_kind` must be "control-flow", even when a probe also exhibited the violation. "probe-exhibited-violation" is correct only when no such control-flow read exists and the violation is known solely because a probe or grader exhibited it. "predicate-run" only when the bar predicate run is the sole evidence. A probe result never sets `evidence_kind` while a control-flow read is recorded - it belongs in `evidence_ref`/`argument` as corroboration. This mirrors R1: a probe or predicate run can only exhibit a violation, never establish that a clause holds, so the control-flow read is the primary evidence whenever one exists.
+- `verdict` "indeterminate" requires a `reason` field and a `blocking` boolean. Set `blocking` true when the clause is a correctness requirement you could not settle, and false only when the clause is not source-checkable at all (for example subjective wording); `reason` must say which and why.
+- a clause resolved by choosing between competing readings requires an `interpretation` field naming both readings and why one was chosen.
+
+Also add the top-level `clause_source` field recording where the clause text came from.
 
 ## Mode: ab
 
@@ -82,9 +119,33 @@ Predicate mode:
   "completeness": 0.9,
   "rationale": "<what you ran/measured, what clauses you checked, why you judged as you did>",
   "ab_verdict": null,
-  "single_biggest_gap": "one sentence naming the highest-value missing thing"
+  "single_biggest_gap": "one sentence naming the highest-value missing thing; names the clause_verdicts id it derives from",
+  "clause_source": "where the clause text came from (e.g. goal text, or the builder brief at <path>)",
+  "clause_verdicts": [
+    {
+      "id": "6",
+      "clause_text": "<clause as sourced, verbatim>",
+      "verdict": "violated",
+      "evidence_kind": "control-flow",
+      "evidence_ref": "src/mapLimit.js:43-47",
+      "argument": "<one or two sentences; for a temporal clause, the R2 interleaving argument>"
+    },
+    {
+      "id": "5",
+      "clause_text": "<clause as sourced, verbatim>",
+      "verdict": "indeterminate",
+      "evidence_kind": "control-flow",
+      "evidence_ref": "src/mapLimit.js:9",
+      "argument": "<why it could not be settled from control flow>",
+      "reason": "<what blocked settling it, and whether it is a correctness requirement or unsourceable wording>",
+      "blocking": false,
+      "interpretation": "<both competing readings and why one was chosen, when a reading was chosen>"
+    }
+  ]
 }
 ```
+
+`clause_verdicts` follows the "Clause verification" rules above: `verdict` "holds" requires `evidence_kind` "control-flow"; `verdict` "violated" sets `evidence_kind` by precedence - when a control-flow read of the source shows the violating path or interleaving exists, `evidence_kind` must be "control-flow" even when a probe also exhibited the violation, and a probe sets `evidence_kind` only when no such control-flow read exists; "indeterminate" requires `reason` and `blocking`; a clause resolved by choosing between readings requires `interpretation`.
 
 AB mode:
 

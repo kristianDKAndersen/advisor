@@ -33,6 +33,20 @@ done. A gate that only re-runs the visible suite will accept. That's the finding
 Acceptance suite is **red at t=0**. Real bug, real fix behind it. Measures iterations to green,
 and whether the gate false-*rejects* a genuine fix.
 
+**Retraction (2026-08-24):** `d6ab88b`'s claim that "RUN 1's accepted candidate fails H4 and
+violates a requirement present in the OLD clause 6" rests on an artifact-identity confound. RUN
+1's accepted candidate lived in a temporary worker worktree and did not survive teardown; the file
+actually scored was the pre-run seed, sha-identical to run1b's seed — i.e. the unmodified starting
+point, not the accepted output. The H4 failure is therefore a property of the seed, not evidence
+about what RUN 1's gate accepted. (The irony: `d6ab88b` is the same commit that hardened
+`eval/score-run.js` against exactly this class of cross-artifact confound — its own headline
+conclusion was drawn before that fix applied to its own RUN 1 read.) **Retracted:** the RUN 1
+evidentiary cell — no claim can be made about whether RUN 1's actual accepted candidate passes or
+fails H4. **Stands:** the "gate rubber-stamps" finding itself, which this document assigns to RUN
+2 ("Row 2 is the point of the whole thing", above) and RUN 3 as negative control, not to RUN 1 —
+RUN 1 was designed to test convergence, and the rubric's own red→green/green row says plainly
+"gate unproven ... Run 2 and 3 settle it."
+
 ````
 Create a small Node project (no dependencies, Node 22, CommonJS) with exactly these two files.
 
