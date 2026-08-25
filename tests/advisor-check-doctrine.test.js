@@ -145,14 +145,31 @@ test('true positive: no-recursive-spawning without a recursion guard', () => {
   }
 });
 
-test('true positive: missing result contract', () => {
+test('warning-only: missing result contract exits 0 with a warning printed', () => {
   const root = makeFixtureRoot({ 'bad-c': BAD_C_NO_RESULT_CONTRACT });
   try {
     const { code, out } = run(root);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out);
+    expect(parsed.violations.length).toBe(1);
+    expect(parsed.violations[0].invariant).toBe('result-contract');
+    expect(parsed.violations[0].severity).toBe('warning');
+    expect(parsed.errors).toBe(0);
+    expect(parsed.warnings).toBe(1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('warning-only under --strict: missing result contract exits 1', () => {
+  const root = makeFixtureRoot({ 'bad-c': BAD_C_NO_RESULT_CONTRACT });
+  try {
+    const { code, out } = run(root, ['--strict']);
     expect(code).toBe(1);
-    const violations = JSON.parse(out).violations;
-    expect(violations.length).toBe(1);
-    expect(violations[0].invariant).toBe('result-contract');
+    const parsed = JSON.parse(out);
+    expect(parsed.violations.length).toBe(1);
+    expect(parsed.violations[0].severity).toBe('warning');
+    expect(parsed.strict).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -167,6 +184,26 @@ test('true positive: --agent reference with no matching spawns directory', () =>
     expect(violations.length).toBe(1);
     expect(violations[0].invariant).toBe('agent-name-resolution');
     expect(violations[0].detail).toMatch(/ghost-worker/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mixed errors and warnings: errors alone drive exit 1, --strict counts warnings too', () => {
+  const root = makeFixtureRoot({ 'bad-a': BAD_A_SELF_TERMINATE, 'bad-c': BAD_C_NO_RESULT_CONTRACT });
+  try {
+    const plain = run(root);
+    expect(plain.code).toBe(1);
+    const plainParsed = JSON.parse(plain.out);
+    expect(plainParsed.errors).toBe(1);
+    expect(plainParsed.warnings).toBe(1);
+
+    const strict = run(root, ['--strict']);
+    expect(strict.code).toBe(1);
+    const strictParsed = JSON.parse(strict.out);
+    expect(strictParsed.errors).toBe(1);
+    expect(strictParsed.warnings).toBe(1);
+    expect(strictParsed.strict).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -141,4 +141,21 @@ switch (cmd) {
     expect(Array.isArray(parsed.violations)).toBe(true);
     expect(parsed.violations.some((v) => v.subcommand === 'prune-fixtures')).toBe(true);
   });
+
+  test('--json scripts array length matches scanned count and names a known-dispatching script', () => {
+    const repoRoot = join(import.meta.dir, '..');
+    const result = run(['--root', repoRoot, '--json']);
+    const parsed = JSON.parse(result.stdout);
+    expect(Array.isArray(parsed.scripts)).toBe(true);
+    expect(parsed.scripts.length).toBe(parsed.scanned);
+    expect(parsed.scripts).toContain('bin/advisor-vault');
+  });
+
+  test('--list prints scanned scripts one per line', () => {
+    const root = makeRoot();
+    writeBinScript(root, 'bad-cli', UNGUARDED_PRUNE_CLI);
+
+    const result = run(['--root', root, '--list']);
+    expect(result.stdout).toContain('bin/bad-cli');
+  });
 });

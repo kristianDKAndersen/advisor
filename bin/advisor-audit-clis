@@ -14,7 +14,7 @@
 // clean.
 
 const { readdirSync, statSync, readFileSync } = require('node:fs');
-const { join, extname } = require('node:path');
+const { join, extname, relative } = require('node:path');
 
 const DESTRUCTIVE_VERBS = ['delete', 'prune', 'rebuild', 'purge', 'clean', 'reset', 'migrate'];
 
@@ -26,6 +26,7 @@ const MUTATE_RE = /\b(?:rmSync|unlinkSync|rmdirSync|fs\.rmSync|fs\.rm|fs\.unlink
 
 let root = process.cwd();
 let json = false;
+let list = false;
 
 const args = process.argv.slice(2);
 while (args.length > 0) {
@@ -37,9 +38,12 @@ while (args.length > 0) {
     case '--json':
       json = true;
       break;
+    case '--list':
+      list = true;
+      break;
     case '-h':
     case '--help':
-      console.log(`Usage: advisor-audit-clis [--root <path>] [--json]
+      console.log(`Usage: advisor-audit-clis [--root <path>] [--json] [--list]
 
 Walks <root>/bin/* and <root>/lib/*.js for subcommand-dispatching scripts.
 For every subcommand whose name contains a destructive verb
@@ -50,6 +54,7 @@ block.
 Flags:
   --root <path>   Root directory to scan (default: cwd)
   --json          Emit machine-readable JSON instead of text
+  --list          Print scanned scripts one per line (in addition to the summary)
 `);
       process.exit(0);
       break;
@@ -155,17 +160,24 @@ for (const filePath of findCandidateFiles(root)) {
   }
 }
 
+const scannedRel = scanned.map((p) => relative(root, p));
+
 if (json) {
-  console.log(JSON.stringify({ scanned: scanned.length, violations }));
-} else if (violations.length > 0) {
-  console.error(`advisor-audit-clis: ${violations.length} unguarded destructive subcommand(s):`);
-  for (const v of violations) {
-    console.error(
-      `  - ${v.file}:${v.line} subcommand '${v.subcommand}' mutates the filesystem at line ${v.mutateLine} with no preceding -h/--help or dry-run short-circuit`
-    );
-  }
+  console.log(JSON.stringify({ scanned: scanned.length, scripts: scannedRel, violations }));
 } else {
-  console.log(`advisor-audit-clis: ${scanned.length} dispatching script(s) scanned, 0 unguarded destructive subcommands.`);
+  if (list) {
+    for (const p of scannedRel) console.log(p);
+  }
+  if (violations.length > 0) {
+    console.error(`advisor-audit-clis: ${violations.length} unguarded destructive subcommand(s):`);
+    for (const v of violations) {
+      console.error(
+        `  - ${v.file}:${v.line} subcommand '${v.subcommand}' mutates the filesystem at line ${v.mutateLine} with no preceding -h/--help or dry-run short-circuit`
+      );
+    }
+  } else {
+    console.log(`advisor-audit-clis: ${scanned.length} dispatching script(s) scanned, 0 unguarded destructive subcommands.`);
+  }
 }
 
 process.exit(violations.length > 0 ? 1 : 0);

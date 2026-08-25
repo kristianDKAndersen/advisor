@@ -2,16 +2,23 @@
 // bin/advisor-check-doctrine — spawn-prompt doctrine drift checker.
 //
 // Usage:
-//   advisor-check-doctrine [<root>] [--root <path>] [--json]
+//   advisor-check-doctrine [<root>] [--root <path>] [--json] [--strict]
 //
 // Walks spawns/*/CLAUDE.md under <root> (default cwd) and asserts the
 // invariants the root advisor doctrine already declares:
-//   (a) no explicit contradiction of the self-terminate-after-result contract
+//   (a) no explicit contradiction of the self-terminate-after-result contract  [ERROR]
 //   (b) no Task()/spawn instruction without an accompanying no-further-
-//       recursion guard statement (workers cannot summon workers)
-//   (c) the file declares some result/deliverable-reporting contract
+//       recursion guard statement (workers cannot summon workers)             [ERROR]
+//   (c) the file declares some result/deliverable-reporting contract          [WARNING]
 //   (d) every `--agent <name>` reference resolves to a real spawns/<name>
-//       directory
+//       directory                                                             [ERROR]
+//
+// Two-tier severity, matching bin/advisor-check-freshness's house pattern:
+// contradictions (a, b, d) are hard failures (exit 1); a silent omission of
+// the result contract (c) is a warning (exit 0) since that contract is
+// centrally delivered by skills/worker-protocol/SKILL.md, which every worker
+// runs at session start (lib/summon.js) — silence there is not contradiction.
+// --strict promotes warnings to errors for a stricter gate.
 //
 // Does NOT check last_edited freshness — that is bin/advisor-check-freshness's
 // job; duplicating it here would just be two checkers disagreeing over time.
@@ -21,6 +28,7 @@ const { join, relative } = require('node:path');
 
 let root = process.cwd();
 let json = false;
+let strict = false;
 let rootFromFlag = false;
 
 const args = process.argv.slice(2);
@@ -34,24 +42,30 @@ while (args.length > 0) {
     case '--json':
       json = true;
       break;
+    case '--strict':
+      strict = true;
+      break;
     case '-h':
     case '--help':
-      console.log(`Usage: advisor-check-doctrine [<root>] [--root <path>] [--json]
+      console.log(`Usage: advisor-check-doctrine [<root>] [--root <path>] [--json] [--strict]
 
 Walks spawns/*/CLAUDE.md under <root> (default cwd) and asserts the
 invariants the root advisor doctrine already declares:
-  (a) self-terminate-after-result   — no explicit contradiction
+  (a) self-terminate-after-result   — no explicit contradiction        [ERROR]
   (b) no-recursive-spawning         — no Task()/spawn instruction lacking
-                                       an accompanying recursion guard
+                                       an accompanying recursion guard  [ERROR]
   (c) result-contract               — file declares how it reports/delivers
+                                       (omission only, not contradiction) [WARNING]
   (d) agent-name-resolution         — every --agent <name> reference
-                                       resolves to spawns/<name>/CLAUDE.md
+                                       resolves to spawns/<name>/CLAUDE.md [ERROR]
 
 Flags:
   --root <path>   Root directory to scan (default: cwd)
   --json          Emit machine-readable JSON instead of text
+  --strict        Promote warnings to errors (fail the gate on any finding)
 
-Exit codes: 0 = clean, 1 = one or more violations found.
+Exit codes: 0 = clean or warnings only (without --strict), 1 = one or more
+errors found (or one or more warnings found, with --strict).
 `);
       process.exit(0);
       break;
@@ -131,6 +145,7 @@ for (const { name, filePath } of targets) {
     violations.push({
       file: relPath,
       invariant: 'self-terminate-after-result',
+      severity: 'error',
       detail: 'file contains language contradicting the self-terminate-after-result contract (e.g. "stay alive", "do not exit after result")',
     });
   }
@@ -139,6 +154,7 @@ for (const { name, filePath } of targets) {
     violations.push({
       file: relPath,
       invariant: 'no-recursive-spawning',
+      severity: 'error',
       detail: 'file instructs a Task()/spawn call with no accompanying recursion-guard statement (workers cannot summon workers)',
     });
   }
@@ -147,7 +163,8 @@ for (const { name, filePath } of targets) {
     violations.push({
       file: relPath,
       invariant: 'result-contract',
-      detail: 'file never declares how it reports or delivers its result (no result/outbox/channel.js/report-path language found)',
+      severity: 'warning',
+      detail: 'file never declares how it reports or delivers its result (no result/outbox/channel.js/report-path language found) — this may be an omission, not a contradiction; the contract is centrally delivered by skills/worker-protocol/SKILL.md',
     });
   }
 
@@ -162,21 +179,32 @@ for (const { name, filePath } of targets) {
       violations.push({
         file: relPath,
         invariant: 'agent-name-resolution',
+        severity: 'error',
         detail: `references --agent ${agentName} which has no spawns/${agentName}/CLAUDE.md directory`,
       });
     }
   }
 }
 
+const errors = violations.filter((v) => v.severity === 'error');
+const warnings = violations.filter((v) => v.severity === 'warning');
+const failingCount = strict ? violations.length : errors.length;
+
 if (json) {
-  console.log(JSON.stringify({ checked: targets.length, violations }));
+  console.log(JSON.stringify({ checked: targets.length, violations, errors: errors.length, warnings: warnings.length, strict }));
 } else if (violations.length > 0) {
-  console.error(`advisor-check-doctrine: ${violations.length} violation(s) across ${targets.length} file(s) checked:`);
-  for (const v of violations) {
-    console.error(`  - [${v.invariant}] ${v.file}: ${v.detail}`);
+  console.error(`advisor-check-doctrine: ${errors.length} error(s), ${warnings.length} warning(s) across ${targets.length} file(s) checked:`);
+  for (const v of errors) {
+    console.error(`  - [ERROR] [${v.invariant}] ${v.file}: ${v.detail}`);
+  }
+  for (const v of warnings) {
+    console.error(`  - [WARNING] [${v.invariant}] ${v.file}: ${v.detail}`);
+  }
+  if (strict && warnings.length > 0) {
+    console.error(`--strict: promoting ${warnings.length} warning(s) to error(s).`);
   }
 } else {
   console.log(`advisor-check-doctrine: ${targets.length} file(s) checked, 0 violations.`);
 }
 
-process.exit(violations.length > 0 ? 1 : 0);
+process.exit(failingCount > 0 ? 1 : 0);
