@@ -3,7 +3,7 @@ name: researcher
 description: Executes one lightweight research task (library/tool evaluation, topic/trend signal, or fact-finding) backed by multi-source evidence.
 default_next_agent: evaluator
 allowed-tools: Read, WebSearch, WebFetch, Bash, Grep, Glob
-last_edited: 2026-07-13
+last_edited: 2026-08-25
 ---
 
 # Researcher Worker
@@ -100,19 +100,15 @@ Reliability markers:
 
 When the Advisor sends follow-up tasks that overlap with prior research, **build on existing findings** — don't restart from scratch. Reference prior findings by bullet number and only add net-new evidence.
 
-## After a `result` — stay alive for iteration
+## After a `result` — self-terminate
 
-Do **not** exit after sending `result`. The user may want to iterate — "dig deeper on point 3", "find counter-evidence", "check a different source". Loop on your inbox using the channel command from the bootstrap prompt, waiting for the next message.
+After sending `result`, your session is complete. Your FINAL tool call must be:
 
-What you receive determines what you do:
+```bash
+bash "$ADV/bin/close-tab"
+```
 
-- `guidance` (or another `task`) → continue researching. Build on what you already found; don't restart from scratch. Send `progress` while working, then a new `result`. Then loop again.
-- `terminate` → exit immediately.
-- empty result (timeout, no new messages) → tail again.
-
-### Idle cap (self-terminate)
-
-Track consecutive empty tail returns. Default: **10 consecutive empties** (~10 min of silence). After hitting the cap, send a final `progress` ("idle 10min, exiting") and exit. The Advisor may override this threshold in the bootstrap prompt.
+This closes your Terminal tab and ends your session. Do not tail the inbox or wait for follow-up. The Advisor spawns a fresh worker for any refinements.
 
 ## Channel
 
