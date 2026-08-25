@@ -13,6 +13,23 @@
 // exists in the advisor cwd but a worker worktree (a git checkout) will not
 // have it. Exits 1 listing every invisible cited path; --warn downgrades to
 // exit 0 while still printing the report.
+//
+// Two further checks catch briefs that describe repo state a worker
+// worktree will not see even though the path itself is git-visible:
+//
+//   Check A (stale vs HEAD): a cited path that IS tracked and not ignored
+//   but differs from HEAD (`git diff HEAD -- <path>` produces output —
+//   covers both unstaged and staged-but-uncommitted changes) is reported at
+//   the same severity as invisible, since a worker worktree is created from
+//   committed state and will read HEAD, not the working tree.
+//
+//   Check B (cited commits): hex tokens (7-40 lowercase hex chars) that
+//   appear near a commit-context word (commit/committed/sha/revision) are
+//   treated as commit claims. A token that does not resolve to a commit
+//   object is an ERROR; a token that resolves but is not an ancestor of
+//   HEAD is a WARNING (the object exists but its content is absent from the
+//   worker worktree's history). Conservative by design — see the token
+//   regex and proximity window below.
 
 const { readFileSync, existsSync, realpathSync } = require('node:fs');
 const { relative, join } = require('node:path');
@@ -45,7 +62,9 @@ while (args.length > 0) {
        cat brief.txt | advisor-check-brief-paths [--root <path>] [--warn] [--json]
 
 Extracts repo-relative filesystem paths cited in brief text and asserts each
-one is git-visible to a worker worktree: tracked AND not gitignored.
+one is git-visible to a worker worktree: tracked AND not gitignored, and not
+stale vs HEAD. Also extracts conservatively-identified cited commits and
+asserts each resolves and is an ancestor of HEAD.
 
 Flags:
   --file <path>   Read brief text from this file (default: stdin)
@@ -115,6 +134,69 @@ function isIgnored(root, relPath) {
   }
 }
 
+function isStale(root, relPath) {
+  try {
+    const out = execFileSync('git', ['diff', 'HEAD', '--', relPath], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.length > 0; // covers both unstaged and staged-but-uncommitted changes
+  } catch {
+    return false;
+  }
+}
+
+// Check B: conservative cited-commit extraction. A hex-looking token is only
+// treated as a commit claim when a commit-context word appears within a
+// small character window around it — this is the precision guard the spec
+// demands (colour codes, checksums, fixture ids must NOT be flagged).
+const HEX_TOKEN = /\b[0-9a-f]{7,40}\b/g;
+const COMMIT_CONTEXT = /\b(commit(?:ted)?|sha|revision)\b/i;
+const COMMIT_PROXIMITY = 60;
+
+function extractCommitClaims(text) {
+  const claims = [];
+  const seen = new Set();
+  let m;
+  HEX_TOKEN.lastIndex = 0;
+  while ((m = HEX_TOKEN.exec(text)) !== null) {
+    const tok = m[0];
+    if (seen.has(tok)) continue;
+    const windowStart = Math.max(0, m.index - COMMIT_PROXIMITY);
+    const windowEnd = Math.min(text.length, m.index + tok.length + COMMIT_PROXIMITY);
+    const window = text.slice(windowStart, windowEnd);
+    if (COMMIT_CONTEXT.test(window)) {
+      seen.add(tok);
+      claims.push(tok);
+    }
+  }
+  return claims;
+}
+
+function resolvesToCommit(root, token) {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', `${token}^{commit}`], {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isAncestorOfHead(root, token) {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', token, 'HEAD'], {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 let briefText;
 if (file) {
   briefText = readFileSync(file, 'utf8');
@@ -132,6 +214,7 @@ const rawCandidates = extractPaths(briefText);
 const seen = new Set();
 const checked = [];
 const invisible = [];
+const stale = [];
 
 for (const tok of rawCandidates) {
   const relPath = toRepoRelative(tok, resolvedRoot);
@@ -156,16 +239,57 @@ for (const tok of rawCandidates) {
       reason = 'nonexistent (no such path)';
     }
     invisible.push({ path: relPath, reason });
+  } else if (isStale(resolvedRoot, relPath)) {
+    stale.push({
+      path: relPath,
+      reason: 'differs from HEAD (uncommitted changes) — a worker worktree is created from committed state and will see the HEAD version, not this one',
+    });
   }
 }
 
+const commits = [];
+for (const token of extractCommitClaims(briefText)) {
+  if (!resolvesToCommit(resolvedRoot, token)) {
+    commits.push({ token, status: 'error', detail: 'does not resolve to a commit object' });
+  } else if (!isAncestorOfHead(resolvedRoot, token)) {
+    commits.push({
+      token,
+      status: 'warning',
+      detail: 'resolves to a commit but is not an ancestor of HEAD — absent from the worker worktree history',
+    });
+  }
+}
+const commitErrors = commits.filter((c) => c.status === 'error');
+const commitWarnings = commits.filter((c) => c.status === 'warning');
+
 if (json) {
-  console.log(JSON.stringify({ checked: checked.length, invisible }));
-} else if (invisible.length > 0) {
-  console.error(`advisor-check-brief-paths: ${invisible.length} cited path(s) invisible to a worker worktree:`);
-  for (const inv of invisible) console.error(`  - ${inv.path} (${inv.reason})`);
+  console.log(JSON.stringify({ checked: checked.length, invisible, stale, commits }));
 } else {
-  console.log(`advisor-check-brief-paths: ${checked.length} cited path(s) checked, all visible.`);
+  let printedAny = false;
+  if (invisible.length > 0) {
+    console.error(`advisor-check-brief-paths: ${invisible.length} cited path(s) invisible to a worker worktree:`);
+    for (const inv of invisible) console.error(`  - ${inv.path} (${inv.reason})`);
+    printedAny = true;
+  }
+  if (stale.length > 0) {
+    console.error(`advisor-check-brief-paths: ${stale.length} cited path(s) stale vs HEAD:`);
+    for (const s of stale) console.error(`  - ${s.path} (${s.reason})`);
+    printedAny = true;
+  }
+  if (commitErrors.length > 0) {
+    console.error(`advisor-check-brief-paths: ${commitErrors.length} cited commit(s) do not resolve:`);
+    for (const c of commitErrors) console.error(`  - ${c.token} (${c.detail})`);
+    printedAny = true;
+  }
+  if (commitWarnings.length > 0) {
+    console.error(`advisor-check-brief-paths: ${commitWarnings.length} cited commit(s) not an ancestor of HEAD:`);
+    for (const c of commitWarnings) console.error(`  - ${c.token} (${c.detail})`);
+    printedAny = true;
+  }
+  if (!printedAny) {
+    console.log(`advisor-check-brief-paths: ${checked.length} cited path(s) checked, all visible.`);
+  }
 }
 
-process.exit(!warn && invisible.length > 0 ? 1 : 0);
+const hasErrors = invisible.length > 0 || stale.length > 0 || commitErrors.length > 0;
+process.exit(!warn && hasErrors ? 1 : 0);
