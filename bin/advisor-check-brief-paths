@@ -1,0 +1,171 @@
+#!/usr/bin/env bun
+// bin/advisor-check-brief-paths — asserts every repo-relative path cited in a
+// brief is actually visible to a worker worktree.
+//
+// Usage:
+//   advisor-check-brief-paths --file <path> [--root <path>] [--warn] [--json]
+//   cat brief.txt | advisor-check-brief-paths [--root <path>] [--warn] [--json]
+//
+// A cited path is visible to a worker worktree only if BOTH hold: it is
+// tracked by git (`git ls-files --error-unmatch` succeeds) AND it is not
+// gitignored (`git check-ignore -q` does not match). An untracked-but-
+// present-on-disk file is INVISIBLE — that is the entire point, since it
+// exists in the advisor cwd but a worker worktree (a git checkout) will not
+// have it. Exits 1 listing every invisible cited path; --warn downgrades to
+// exit 0 while still printing the report.
+
+const { readFileSync, existsSync, realpathSync } = require('node:fs');
+const { relative, join } = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+let root = process.cwd();
+let file = null;
+let warn = false;
+let json = false;
+
+const args = process.argv.slice(2);
+while (args.length > 0) {
+  const arg = args.shift();
+  switch (arg) {
+    case '--file':
+      file = args.shift();
+      break;
+    case '--root':
+      root = args.shift();
+      break;
+    case '--warn':
+      warn = true;
+      break;
+    case '--json':
+      json = true;
+      break;
+    case '-h':
+    case '--help':
+      console.log(`Usage: advisor-check-brief-paths --file <path> [--root <path>] [--warn] [--json]
+       cat brief.txt | advisor-check-brief-paths [--root <path>] [--warn] [--json]
+
+Extracts repo-relative filesystem paths cited in brief text and asserts each
+one is git-visible to a worker worktree: tracked AND not gitignored.
+
+Flags:
+  --file <path>   Read brief text from this file (default: stdin)
+  --root <path>   Repo root to check paths against (default: cwd)
+  --warn          Print the report but exit 0 instead of 1 on invisible paths
+  --json          Emit machine-readable JSON instead of text
+`);
+      process.exit(0);
+      break;
+    default:
+      console.error(`Unknown flag: ${arg}`);
+      process.exit(1);
+  }
+}
+
+const KNOWN_EXT = /\.(md|mdx|js|mjs|cjs|ts|tsx|jsx|json|jsonl|yaml|yml|py|sh|bash|txt|html|htm|css|scss|rb|go|rs|java|c|cpp|h|hpp|toml|ini|cfg|lock|xml|sql|proto|graphql|vue|svelte)$/i;
+
+function extractPaths(text) {
+  const tokens = text.split(/\s+/);
+  const candidates = new Set();
+  for (const raw of tokens) {
+    let tok = raw.replace(/^[`'"([{<]+/, '').replace(/[`'")\]}>,.;:!?]+$/, '');
+    if (!tok) continue;
+    if (/^https?:\/\//i.test(tok) || tok.includes('://')) continue;
+    if (tok.startsWith('-')) continue;
+    if (/^\d+\/\d+$/.test(tok)) continue;
+    const hasSlash = tok.includes('/');
+    const hasKnownExt = KNOWN_EXT.test(tok);
+    if (!hasSlash && !hasKnownExt) continue;
+    candidates.add(tok);
+  }
+  return [...candidates];
+}
+
+function toRepoRelative(tok, resolvedRoot) {
+  if (tok.startsWith('/')) {
+    if (tok === resolvedRoot || tok.startsWith(resolvedRoot + '/')) {
+      return relative(resolvedRoot, tok);
+    }
+    return null; // outside the repo (e.g. a worker output dir), not our concern
+  }
+  if (tok.startsWith('../')) return null;
+  return tok;
+}
+
+function isTracked(root, relPath) {
+  try {
+    execFileSync('git', ['ls-files', '--error-unmatch', '--', relPath], {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isIgnored(root, relPath) {
+  try {
+    execFileSync('git', ['check-ignore', '-q', '--', relPath], {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true; // exit 0 = matched an ignore rule
+  } catch (e) {
+    return false; // exit 1 = not ignored (exit >1 treated the same: not confirmed ignored)
+  }
+}
+
+let briefText;
+if (file) {
+  briefText = readFileSync(file, 'utf8');
+} else {
+  try {
+    briefText = readFileSync(0, 'utf8');
+  } catch {
+    briefText = '';
+  }
+}
+
+const resolvedRoot = realpathSync(root);
+const rawCandidates = extractPaths(briefText);
+
+const seen = new Set();
+const checked = [];
+const invisible = [];
+
+for (const tok of rawCandidates) {
+  const relPath = toRepoRelative(tok, resolvedRoot);
+  if (relPath === null || relPath === '') continue;
+  if (seen.has(relPath)) continue;
+  seen.add(relPath);
+
+  const tracked = isTracked(resolvedRoot, relPath);
+  const ignored = isIgnored(resolvedRoot, relPath);
+  const visible = tracked && !ignored;
+  checked.push(relPath);
+
+  if (!visible) {
+    let reason;
+    if (tracked && ignored) {
+      reason = 'tracked but gitignored';
+    } else if (ignored) {
+      reason = 'gitignored';
+    } else if (existsSync(join(resolvedRoot, relPath))) {
+      reason = 'untracked (exists on disk but not committed)';
+    } else {
+      reason = 'nonexistent (no such path)';
+    }
+    invisible.push({ path: relPath, reason });
+  }
+}
+
+if (json) {
+  console.log(JSON.stringify({ checked: checked.length, invisible }));
+} else if (invisible.length > 0) {
+  console.error(`advisor-check-brief-paths: ${invisible.length} cited path(s) invisible to a worker worktree:`);
+  for (const inv of invisible) console.error(`  - ${inv.path} (${inv.reason})`);
+} else {
+  console.log(`advisor-check-brief-paths: ${checked.length} cited path(s) checked, all visible.`);
+}
+
+process.exit(!warn && invisible.length > 0 ? 1 : 0);
