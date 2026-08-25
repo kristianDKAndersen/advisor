@@ -116,4 +116,80 @@ describe('advisor-check-brief-paths', () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('docs/evalLoop.md');
   });
+
+  test('check A: unstaged uncommitted change on a cited tracked path -> stale, exit 1', () => {
+    const root = makeRepo();
+    writeFileSync(join(root, 'lib', 'channel.js'), '// modified, unstaged\n');
+    const brief = 'The fix is now in place at lib/channel.js.';
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('lib/channel.js');
+    expect(result.stderr).toMatch(/stale/);
+  });
+
+  test('check A: staged-but-uncommitted change on a cited tracked path -> stale, exit 1', () => {
+    const root = makeRepo();
+    writeFileSync(join(root, 'lib', 'channel.js'), '// modified, staged\n');
+    execFileSync('git', ['add', 'lib/channel.js'], { cwd: root });
+    const brief = 'The fix is now in place at lib/channel.js.';
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('lib/channel.js');
+    expect(result.stderr).toMatch(/stale/);
+  });
+
+  test('check A: unmodified (committed) tracked path -> not stale, exit 0', () => {
+    const root = makeRepo();
+    const brief = 'The fix is now in place at lib/channel.js.';
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toMatch(/stale/);
+  });
+
+  test('check B: brief citing a nonexistent commit SHA errors, exit 1', () => {
+    const root = makeRepo();
+    const brief = 'The fix was committed at deadbeef01 in the last session.';
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('deadbeef01');
+    expect(result.stderr).toMatch(/do not resolve/);
+  });
+
+  test('check B: brief citing a real commit that is not an ancestor of HEAD warns, exit 0', () => {
+    const root = makeRepo();
+    const initialBranch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    execFileSync('git', ['checkout', '-b', 'other'], { cwd: root });
+    writeFileSync(join(root, 'lib', 'other.js'), '// other branch file\n');
+    execFileSync('git', ['add', 'lib/other.js'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'other branch commit'], { cwd: root });
+    const otherSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    execFileSync('git', ['checkout', initialBranch], { cwd: root });
+    const brief = `The fix was committed at ${otherSha} on a different branch.`;
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain(otherSha);
+    expect(result.stderr).toMatch(/not an ancestor/);
+  });
+
+  test('check B: brief citing a commit that IS an ancestor of HEAD passes silently, exit 0', () => {
+    const root = makeRepo();
+    const headSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    const brief = `This behavior was committed at ${headSha} initially.`;
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain(headSha);
+  });
+
+  test('check B precision: realistic brief with non-SHA hex tokens yields zero check-B findings', () => {
+    const root = makeRepo();
+    const brief = 'Please commit your changes once review is done. ' +
+      'The cache warms with key deadbeefcafe1 stored for a day. ' +
+      'Checksum 0123456789abcdef0123456789abcdef must match the fixture. ' +
+      'Palette token 1a2b3c4d5e6f7a8b feeds the theme. ' +
+      'Session id fedcba9876543210 identifies the request.';
+    const result = run(['--root', root, '--json'], brief);
+    expect(result.code).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.commits.length).toBe(0);
+  });
 });
