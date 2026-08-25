@@ -205,19 +205,37 @@ test('an acceptance-tests bar ref (a shell command) is left byte-exact, not path
   }
 });
 
-test('a metric bar ref (a threshold descriptor) is left byte-exact, not path-resolved', async () => {
+// These two "metric" tests previously asserted that `--bar-type metric` was
+// ACCEPTED (exit 0, bar ref preserved byte-exact / never written to
+// state.test_command). That locked in a real bug: resolveBar() used to let
+// "metric" through, but nothing in the codebase ever writes
+// roundRecord.metric_value, so a metric bar could never be met and the loop
+// would burn every round before failing anyway. lib/loop-bar.js (fixed in
+// 7fcc255) now refuses "metric" up front via NoBarError, exit code 6. The two
+// invariants these tests used to defend are NOT lost by converting them:
+// the byte-exact bar-ref invariant remains covered by "an acceptance-tests
+// bar ref (a shell command) is left byte-exact, not path-resolved" above, and
+// the state.test_command invariant remains covered by "an external-reference
+// bar ref (a filesystem path) is never assigned to state.test_command" below.
+// Do not restore the old exit-0 expectations here.
+test('a metric bar ref (a threshold descriptor) is rejected: metric bars can never be satisfied', async () => {
   const repoRoot = makeTmpRepo();
   const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
   const metricRef = 'coverage >= 0.8';
-  let plan;
+  let stderrOutput = '';
   try {
     const code = await main(
       ['--goal', 'do the thing', '--bar-type', 'metric', '--bar-ref', metricRef,
         '--repo-root', repoRoot, '--output-dir', outputDir, '--dry-run'],
-      { stdout: { write: (s) => { plan = JSON.parse(s); } }, stderr: { write: () => {} } },
+      { stdout: { write: () => {} }, stderr: { write: (s) => { stderrOutput += s; } } },
     );
-    expect(code).toBe(0);
-    expect(plan.bar).toEqual({ type: 'metric', ref: metricRef });
+    expect(code).toBe(6);
+    // Assert on the cause, not just the exit code: exit 6 is shared by every
+    // NoBarError, including the unrelated "no comparison bar could be
+    // declared" refusal. If the metric-specific message ever regressed to
+    // that generic text, this assertion would fail.
+    expect(stderrOutput).toContain('bar-type "metric" can never be satisfied');
+    expect(stderrOutput).toContain('roundRecord.metric_value has no producer');
   } finally {
     fs.rmSync(repoRoot, { recursive: true, force: true });
     fs.rmSync(outputDir, { recursive: true, force: true });
@@ -274,10 +292,19 @@ test('an explicit --spec test_command wins over an acceptance-tests bar ref', as
   }
 });
 
-test('a metric bar ref (a threshold descriptor) is never assigned to state.test_command', async () => {
+// Same rejection as the dry-run variant above, exercised via the
+// non-dry-run path: `--bar-type metric` is refused (exit 6) before
+// state.test_command is ever set — see the comment above "a metric bar ref
+// (a threshold descriptor) is rejected: metric bars can never be satisfied"
+// for the full history of why this used to assert exit 0 and why converting
+// it loses no coverage (the state.test_command invariant remains covered by
+// "an external-reference bar ref (a filesystem path) is never assigned to
+// state.test_command" below).
+test('a metric bar ref (a threshold descriptor) is rejected before state.test_command is ever set', async () => {
   const repoRoot = makeTmpRepo();
   const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
   const metricRef = 'coverage >= 0.8';
+  let stderrOutput = '';
   try {
     const code = await main(
       ['--goal', 'do the thing', '--bar-type', 'metric', '--bar-ref', metricRef,
@@ -285,12 +312,13 @@ test('a metric bar ref (a threshold descriptor) is never assigned to state.test_
       {
         runLoopFn: async () => {},
         stdout: { write: () => {} },
-        stderr: { write: () => {} },
+        stderr: { write: (s) => { stderrOutput += s; } },
       },
     );
-    expect(code).toBe(0);
-    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
-    expect(state.test_command).toBe(null);
+    expect(code).toBe(6);
+    expect(stderrOutput).toContain('bar-type "metric" can never be satisfied');
+    expect(stderrOutput).toContain('roundRecord.metric_value has no producer');
+    expect(fs.existsSync(path.join(outputDir, 'round_state.json'))).toBe(false);
   } finally {
     fs.rmSync(repoRoot, { recursive: true, force: true });
     fs.rmSync(outputDir, { recursive: true, force: true });

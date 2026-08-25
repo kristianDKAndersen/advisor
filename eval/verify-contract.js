@@ -7,20 +7,36 @@ const { mapLimit } = require(src)
 const out = []
 const log = (k, ok, d='') => out.push(`${ok?'PASS':'FAIL'} ${k} ${d}`)
 
-// eco: literal-source injection (not JSON) so NaN/Infinity/undefined/{} survive
-// into the child snippet unchanged; upgrade if the limit set ever needs values
-// JSON can't encode losslessly some other way.
+// Literal-source injection (not JSON) so NaN/Infinity/undefined/{} survive into
+// the child snippet unchanged - JSON.stringify(NaN) === "null", which would
+// silently swap the probed value. Anything that can't be rendered as an exact
+// source literal (arrays, non-plain objects, functions, symbols, bigints, or a
+// non-empty plain object) throws instead of degrading to "{}", so a future
+// limit case that isn't losslessly representable fails loudly rather than
+// silently probing the wrong value and reporting a false PASS.
 function literalOf(v) {
   if (v === undefined) return 'undefined'
   if (v === null) return 'null'
-  if (typeof v === 'number') {
+  const t = typeof v
+  if (t === 'number') {
     if (Number.isNaN(v)) return 'NaN'
     if (v === Infinity) return 'Infinity'
     if (v === -Infinity) return '-Infinity'
     if (Object.is(v, -0)) return '-0'
     return String(v)
   }
-  if (typeof v === 'object') return '{}'
+  if (t === 'function' || t === 'symbol' || t === 'bigint') {
+    throw new Error(`literalOf: cannot represent ${t} value as a source literal: ${String(v)}`)
+  }
+  if (t === 'object') {
+    if (Array.isArray(v) || Object.getPrototypeOf(v) !== Object.prototype) {
+      throw new Error(`literalOf: cannot represent ${Object.prototype.toString.call(v)} as a source literal`)
+    }
+    if (Object.keys(v).length > 0) {
+      throw new Error(`literalOf: cannot represent non-empty plain object as a source literal: ${JSON.stringify(v)}`)
+    }
+    return '{}'
+  }
   return JSON.stringify(v)
 }
 

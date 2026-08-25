@@ -19,15 +19,14 @@ test('resolves prior-round bar from explicit flags', () => {
   expect(bar).toEqual({ type: 'prior-round', ref: { worktree_path: '/tmp/round0' } });
 });
 
-test('resolves metric bar from explicit flags', () => {
-  const bar = resolveBar({
-    barType: 'metric',
-    barRef: { name: 'p95_latency_ms', op: '<=', value: 200 },
-  });
-  expect(bar).toEqual({
-    type: 'metric',
-    ref: { name: 'p95_latency_ms', op: '<=', value: 200 },
-  });
+test('rejects bar-type "metric" as unmeasurable: no producer ever writes metric_value', () => {
+  try {
+    resolveBar({ barType: 'metric', barRef: { op: '<=', value: 5 } });
+    throw new Error('expected resolveBar to throw');
+  } catch (err) {
+    expect(err).toBeInstanceOf(NoBarError);
+    expect(err.message).toMatch(/no.*producer|never write|no field/i);
+  }
 });
 
 test('resolves acceptance-tests bar from a spec test_command when no explicit flags given', () => {
@@ -42,11 +41,11 @@ test('resolves prior-round bar from --refine when no explicit flags or spec give
 
 test('precedence: explicit bar-type/bar-ref wins over a spec test_command', () => {
   const bar = resolveBar({
-    barType: 'metric',
-    barRef: { name: 'x', op: '<=', value: 1 },
+    barType: 'external-reference',
+    barRef: '/path/to/reference.png',
     spec: { test_command: 'bun test tests/foo.test.js' },
   });
-  expect(bar.type).toBe('metric');
+  expect(bar.type).toBe('external-reference');
 });
 
 test('precedence: spec test_command wins over --refine', () => {
