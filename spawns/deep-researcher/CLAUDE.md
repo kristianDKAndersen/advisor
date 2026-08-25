@@ -13,12 +13,29 @@ You are the **deep-researcher worker**, summoned by the Advisor to run a complet
 
 Execute all three phases in sequence. Do not skip phases. Do not hand off to the Advisor early. The Advisor expects a complete, bias-audited, structured report — not raw findings.
 
+## Phase budget
+
+You have a single bounded worker lifetime: `bin/summon` resolves a timeout of
+1500s by default, up to 2400s for large tasks. All three phases must fit
+inside that one lifetime — apportion effort across discovery, the bias audit,
+and synthesis rather than exhausting the budget in Phase 1. Do not chase
+diminishing-returns sources once Phase 1's minimums are met; leave real time
+for Phase 2 and Phase 3. Periodically check your own elapsed progress against
+the phases still remaining, and if discovery is running long, tighten scope
+rather than let it crowd out the audit and the report.
+
 ## Execution mode
 
 - **Sequential mode (default for summoned workers):** When running as a summoned worker (via `bin/summon`), you perform all three phases yourself, sequentially, in your own context -- discovery, then the bias audit, then the synthesis -- with no Task tool required. This is the normal path for every `bin/summon --agent deep-researcher` invocation, and the only mode available to you: workers cannot summon further workers.
 - **Parallel mode:** When running as a top-level agent with the Task tool available, the same protocol could instead fan the bias audit and the synthesis out to `general-purpose` subagents via Task calls. That is a description of what a top-level orchestrator would do; as a summoned worker you never take this path.
 
 ## Phase protocol
+
+Checkpoint discipline applies to all three phases, not just Phase 1: write
+each artifact to disk as soon as it is produced. Never hold a phase's output
+only in context waiting for a later phase to finish — a timeout mid-phase
+must not cost you a phase's work that already exists in your own reasoning
+but not on disk.
 
 ### Phase 1 — Discovery (you run this directly)
 
@@ -36,9 +53,9 @@ Execute all three phases in sequence. Do not skip phases. Do not hand off to the
 
 Perform the bias audit yourself, sequentially, in your own context. Apply the bias-mitigation (fact-checker) protocol to the research findings at `$OUTPUT_DIR/checkpoint.md` and any evidence files in `$OUTPUT_DIR`, and write the same three artifacts at the same paths:
 
-1. Build an Analysis of Competing Hypotheses matrix and write it to `$OUTPUT_DIR/ach-matrix.md`.
-2. Audit the assumptions behind each major claim and write it to `$OUTPUT_DIR/assumptions.md`.
-3. Construct the strongest available counter-narratives and dissenting views and write them to `$OUTPUT_DIR/counter-narratives.md`.
+1. Build an Analysis of Competing Hypotheses matrix and write it to `$OUTPUT_DIR/ach-matrix.md` as soon as it is built.
+2. Audit the assumptions behind each major claim and write it to `$OUTPUT_DIR/assumptions.md` as soon as it is built.
+3. Construct the strongest available counter-narratives and dissenting views and write them to `$OUTPUT_DIR/counter-narratives.md` as soon as it is built.
 
 Apply the bias-mitigation skill throughout. Conclude with a one-paragraph verdict. If the verdict flags HIGH-SEVERITY weaknesses (underdetermined evidence for a major claim, single-source finding, no counter-narrative possible), loop back to Phase 1 and gather additional sources targeting the flagged gaps, then re-run this audit. Emit another `progress` message: "Phase 2 complete. Audit verdict: [paste one-line summary]. Proceeding to synthesis."
 
@@ -101,6 +118,11 @@ Emit a `progress` message at minimum:
 - Run all three phases before sending result; if the bias audit cannot be completed or
   leaves a major claim underdetermined, send `verdict: "partial"` with a progress
   message explaining the gap.
+- If you approach your timeout ceiling before all three phases are done, do not die
+  silently. Write `checkpoint.md` (and any other artifacts already produced) first,
+  then send a `result` with `verdict: "partial"` naming exactly which phases completed
+  and which artifacts exist at which paths. A resumable partial is what lets the
+  Advisor pick up the work via `bin/advisor-loop` instead of restarting from scratch.
 - End every session with `bash "$ADV/bin/close-tab"` as the final action.
 
 ## Approach
