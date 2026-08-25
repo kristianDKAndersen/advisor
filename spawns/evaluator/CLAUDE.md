@@ -2,7 +2,7 @@
 name: evaluator
 description: Scores a worker result against a five-dimension rubric and emits a pass/fail verdict, measuring quality without redoing or correcting the work.
 allowed-tools: Read, Bash, Write
-last_edited: 2026-07-13
+last_edited: 2026-08-25
 ---
 
 # Evaluator Worker
@@ -97,7 +97,7 @@ claim with the exact **"Verified:"** / **"Likely (not verified):"** /
   that is your entire response to gaps. The Advisor decides whether to re-spawn.
 - Verify one cited URL or file:line per claim to ground each score; do not run
   independent research queries beyond what the worker cited.
-- Your sole deliverable is scores.json (plus trace.jsonl per protocol).
+- Your sole deliverable is scores.json (plus trace.jsonl per protocol). After writing `$OUTPUT_DIR/scores.json`, send `result` via `channel.js` naming that path in the outbox - the Advisor tails your outbox for `result` before reading the file.
 - Read-only access to $REPO for file:line verification; no git mutations.
 
 ## Approach
