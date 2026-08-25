@@ -1,0 +1,171 @@
+#!/usr/bin/env bun
+// bin/advisor-audit-clis — destructive-subcommand help/dry-run guard auditor.
+//
+// Usage:
+//   advisor-audit-clis [--root <path>] [--json]
+//
+// Walks every top-level script under <root>/bin and <root>/lib/*.js, finds
+// subcommand-dispatching code (switch/case or if/else-if branching on a
+// string literal), and for every subcommand whose name contains a
+// destructive verb (delete, prune, rebuild, purge, clean, reset, migrate)
+// checks that a -h/--help or dry-run short-circuit appears, in source
+// order, before any filesystem-mutating call in that subcommand's block.
+// Exits 1 listing every unguarded destructive subcommand found; 0 when
+// clean.
+
+const { readdirSync, statSync, readFileSync } = require('node:fs');
+const { join, extname } = require('node:path');
+
+const DESTRUCTIVE_VERBS = ['delete', 'prune', 'rebuild', 'purge', 'clean', 'reset', 'migrate'];
+
+const CASE_RE = /^\s*case\s+['"]([a-zA-Z][\w-]*)['"]\s*:/;
+const IF_EQ_RE = /\b(?:if|else if)\s*\(\s*[\w.[\]]+\s*===?\s*['"]([a-zA-Z][\w-]*)['"]/;
+const GUARD_RE = /(-h\b|--help\b|dry-run|dryRun|dry_run|--dry\b)/i;
+const EXIT_RE = /process\.exit\s*\(|^\s*return\b/;
+const MUTATE_RE = /\b(?:rmSync|unlinkSync|rmdirSync|fs\.rmSync|fs\.rm|fs\.unlink|fs\.rmdir|rimraf)\s*\(|execFileSync\([^)]*['"]rm['"]|execSync\([^)]*\brm\s/;
+
+let root = process.cwd();
+let json = false;
+
+const args = process.argv.slice(2);
+while (args.length > 0) {
+  const arg = args.shift();
+  switch (arg) {
+    case '--root':
+      root = args.shift();
+      break;
+    case '--json':
+      json = true;
+      break;
+    case '-h':
+    case '--help':
+      console.log(`Usage: advisor-audit-clis [--root <path>] [--json]
+
+Walks <root>/bin/* and <root>/lib/*.js for subcommand-dispatching scripts.
+For every subcommand whose name contains a destructive verb
+(${DESTRUCTIVE_VERBS.join(', ')}), asserts a -h/--help or dry-run
+short-circuit precedes any filesystem-mutating call in that subcommand's
+block.
+
+Flags:
+  --root <path>   Root directory to scan (default: cwd)
+  --json          Emit machine-readable JSON instead of text
+`);
+      process.exit(0);
+      break;
+    default:
+      console.error(`Unknown flag: ${arg}`);
+      process.exit(1);
+  }
+}
+
+function listFiles(dir, filter) {
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const entry of entries) {
+    const p = join(dir, entry);
+    let st;
+    try {
+      st = statSync(p);
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    if (filter && !filter(entry)) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+function findCandidateFiles(scanRoot) {
+  const binFiles = listFiles(join(scanRoot, 'bin'), null);
+  const libFiles = listFiles(join(scanRoot, 'lib'), (name) => extname(name) === '.js');
+  return [...binFiles, ...libFiles];
+}
+
+function findSubcommands(lines) {
+  const found = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = CASE_RE.exec(lines[i]) || IF_EQ_RE.exec(lines[i]);
+    if (m) found.push({ name: m[1], line: i });
+  }
+  return found;
+}
+
+function isDestructive(name) {
+  const lower = name.toLowerCase();
+  return DESTRUCTIVE_VERBS.some((v) => lower.includes(v));
+}
+
+// Scans [startLine, endLine) for the first mutating call, then checks
+// whether a help/dry-run guard with a control-flow exit precedes it.
+function auditBlock(lines, startLine, endLine) {
+  let firstMutate = -1;
+  for (let i = startLine; i < endLine; i++) {
+    if (MUTATE_RE.test(lines[i])) {
+      firstMutate = i;
+      break;
+    }
+  }
+  if (firstMutate === -1) return { mutates: false, guarded: true };
+
+  for (let i = startLine; i < firstMutate; i++) {
+    if (GUARD_RE.test(lines[i])) {
+      for (let j = i; j < Math.min(i + 6, firstMutate); j++) {
+        if (EXIT_RE.test(lines[j])) return { mutates: true, guarded: true };
+      }
+    }
+  }
+  return { mutates: true, guarded: false, mutateLine: firstMutate };
+}
+
+const violations = [];
+const scanned = [];
+
+for (const filePath of findCandidateFiles(root)) {
+  let content;
+  try {
+    content = readFileSync(filePath, 'utf8');
+  } catch {
+    continue;
+  }
+  const lines = content.split('\n');
+  const subcommands = findSubcommands(lines);
+  if (subcommands.length === 0) continue;
+  scanned.push(filePath);
+
+  for (let i = 0; i < subcommands.length; i++) {
+    const { name, line } = subcommands[i];
+    if (!isDestructive(name)) continue;
+    const endLine = i + 1 < subcommands.length ? subcommands[i + 1].line : lines.length;
+    const result = auditBlock(lines, line, endLine);
+    if (result.mutates && !result.guarded) {
+      violations.push({
+        file: filePath,
+        subcommand: name,
+        line: line + 1,
+        mutateLine: result.mutateLine + 1,
+      });
+    }
+  }
+}
+
+if (json) {
+  console.log(JSON.stringify({ scanned: scanned.length, violations }));
+} else if (violations.length > 0) {
+  console.error(`advisor-audit-clis: ${violations.length} unguarded destructive subcommand(s):`);
+  for (const v of violations) {
+    console.error(
+      `  - ${v.file}:${v.line} subcommand '${v.subcommand}' mutates the filesystem at line ${v.mutateLine} with no preceding -h/--help or dry-run short-circuit`
+    );
+  }
+} else {
+  console.log(`advisor-audit-clis: ${scanned.length} dispatching script(s) scanned, 0 unguarded destructive subcommands.`);
+}
+
+process.exit(violations.length > 0 ? 1 : 0);

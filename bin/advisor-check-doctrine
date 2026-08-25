@@ -1,0 +1,182 @@
+#!/usr/bin/env bun
+// bin/advisor-check-doctrine — spawn-prompt doctrine drift checker.
+//
+// Usage:
+//   advisor-check-doctrine [<root>] [--root <path>] [--json]
+//
+// Walks spawns/*/CLAUDE.md under <root> (default cwd) and asserts the
+// invariants the root advisor doctrine already declares:
+//   (a) no explicit contradiction of the self-terminate-after-result contract
+//   (b) no Task()/spawn instruction without an accompanying no-further-
+//       recursion guard statement (workers cannot summon workers)
+//   (c) the file declares some result/deliverable-reporting contract
+//   (d) every `--agent <name>` reference resolves to a real spawns/<name>
+//       directory
+//
+// Does NOT check last_edited freshness — that is bin/advisor-check-freshness's
+// job; duplicating it here would just be two checkers disagreeing over time.
+
+const { readdirSync, statSync, readFileSync, existsSync } = require('node:fs');
+const { join, relative } = require('node:path');
+
+let root = process.cwd();
+let json = false;
+let rootFromFlag = false;
+
+const args = process.argv.slice(2);
+while (args.length > 0) {
+  const arg = args.shift();
+  switch (arg) {
+    case '--root':
+      root = args.shift();
+      rootFromFlag = true;
+      break;
+    case '--json':
+      json = true;
+      break;
+    case '-h':
+    case '--help':
+      console.log(`Usage: advisor-check-doctrine [<root>] [--root <path>] [--json]
+
+Walks spawns/*/CLAUDE.md under <root> (default cwd) and asserts the
+invariants the root advisor doctrine already declares:
+  (a) self-terminate-after-result   — no explicit contradiction
+  (b) no-recursive-spawning         — no Task()/spawn instruction lacking
+                                       an accompanying recursion guard
+  (c) result-contract               — file declares how it reports/delivers
+  (d) agent-name-resolution         — every --agent <name> reference
+                                       resolves to spawns/<name>/CLAUDE.md
+
+Flags:
+  --root <path>   Root directory to scan (default: cwd)
+  --json          Emit machine-readable JSON instead of text
+
+Exit codes: 0 = clean, 1 = one or more violations found.
+`);
+      process.exit(0);
+      break;
+    default:
+      if (!rootFromFlag && !arg.startsWith('--')) {
+        root = arg;
+      } else {
+        console.error(`Unknown flag: ${arg}`);
+        process.exit(1);
+      }
+  }
+}
+
+// --- invariant patterns -----------------------------------------------
+
+const SELF_TERM_CONTRADICTION =
+  /stay alive\b[^\n]{0,60}(iteration|result)|do\s+\*{0,2}not\*{0,2}\s+exit\s+after[^\n]{0,20}`?result`?|remain\s+(running|alive)\b[^\n]{0,60}result|keep[^\n]{0,20}(session|tab)[^\n]{0,20}open[^\n]{0,40}result/i;
+
+const SPAWN_ATTEMPT = /Task\(|Use the Task tool to (spawn|invoke)/i;
+
+const RECURSION_GUARD =
+  /recursion is structurally impossible|do not spawn further|never spawn further|no further subagents|cannot spawn|already a worker|workers cannot summon workers|you do not orchestrate,? delegate,? or spawn/i;
+
+const RESULT_CONTRACT =
+  /send[^\n]{0,20}`?result`?|result envelope|outbox|channel\.js|report(?:s|ed|ing)?\s+(?:its|the)\s+(?:absolute\s+)?path|ReportFindings/i;
+
+const AGENT_REF = /--agent\s+([a-zA-Z0-9_-]+)/g;
+
+// --- walk spawns/*/CLAUDE.md -------------------------------------------
+
+function findSpawnNames(root) {
+  const base = join(root, 'spawns');
+  let entries;
+  try {
+    entries = readdirSync(base);
+  } catch {
+    return [];
+  }
+  const names = [];
+  for (const entry of entries) {
+    let st;
+    try {
+      st = statSync(join(base, entry));
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) names.push(entry);
+  }
+  return names;
+}
+
+function findTargets(root, names) {
+  const targets = [];
+  for (const name of names) {
+    const filePath = join(root, 'spawns', name, 'CLAUDE.md');
+    try {
+      statSync(filePath);
+    } catch {
+      continue;
+    }
+    targets.push({ name, filePath });
+  }
+  return targets;
+}
+
+const spawnNames = findSpawnNames(root);
+const spawnNameSet = new Set(spawnNames);
+const targets = findTargets(root, spawnNames);
+
+const violations = [];
+
+for (const { name, filePath } of targets) {
+  const relPath = relative(root, filePath);
+  const content = readFileSync(filePath, 'utf8');
+
+  if (SELF_TERM_CONTRADICTION.test(content)) {
+    violations.push({
+      file: relPath,
+      invariant: 'self-terminate-after-result',
+      detail: 'file contains language contradicting the self-terminate-after-result contract (e.g. "stay alive", "do not exit after result")',
+    });
+  }
+
+  if (SPAWN_ATTEMPT.test(content) && !RECURSION_GUARD.test(content)) {
+    violations.push({
+      file: relPath,
+      invariant: 'no-recursive-spawning',
+      detail: 'file instructs a Task()/spawn call with no accompanying recursion-guard statement (workers cannot summon workers)',
+    });
+  }
+
+  if (!RESULT_CONTRACT.test(content)) {
+    violations.push({
+      file: relPath,
+      invariant: 'result-contract',
+      detail: 'file never declares how it reports or delivers its result (no result/outbox/channel.js/report-path language found)',
+    });
+  }
+
+  let m;
+  AGENT_REF.lastIndex = 0;
+  const seen = new Set();
+  while ((m = AGENT_REF.exec(content)) !== null) {
+    const agentName = m[1];
+    if (seen.has(agentName)) continue;
+    seen.add(agentName);
+    if (!spawnNameSet.has(agentName)) {
+      violations.push({
+        file: relPath,
+        invariant: 'agent-name-resolution',
+        detail: `references --agent ${agentName} which has no spawns/${agentName}/CLAUDE.md directory`,
+      });
+    }
+  }
+}
+
+if (json) {
+  console.log(JSON.stringify({ checked: targets.length, violations }));
+} else if (violations.length > 0) {
+  console.error(`advisor-check-doctrine: ${violations.length} violation(s) across ${targets.length} file(s) checked:`);
+  for (const v of violations) {
+    console.error(`  - [${v.invariant}] ${v.file}: ${v.detail}`);
+  }
+} else {
+  console.log(`advisor-check-doctrine: ${targets.length} file(s) checked, 0 violations.`);
+}
+
+process.exit(violations.length > 0 ? 1 : 0);
