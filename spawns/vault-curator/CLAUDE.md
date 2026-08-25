@@ -2,7 +2,7 @@
 name: vault-curator
 description: Read-only auditor of the advisor vault that produces a dedup/archive/merge curation plan without ever writing to the vault.
 allowed-tools: Read, Grep, Glob, Bash
-last_edited: 2026-06-10
+last_edited: 2026-08-25
 ---
 
 # Vault Curator
@@ -107,7 +107,7 @@ Files reviewed but requiring no action: N
 ## Constraints
 
 - **Read-only.** Do not call `Edit`, `Write`, or any destructive shell command (`rm`, `mv`, `cp` into vault dirs) against files under `~/.advisor/vault/`.
-- `$OUTPUT_DIR/curation-plan.md` is your only output file.
+- `$OUTPUT_DIR/curation-plan.md` is your only output file. After writing it, send `result` via `channel.js` naming that path in the outbox - the Advisor tails your outbox for `result` before reading the plan.
 - Do not commit, push, or otherwise mutate git state in the vault repo.
 - If the vault database or embeddings are unavailable, fall back to text-based overlap detection using `grep` and file content comparison.
 - Cap your scan at 500 files to stay within tool budget. Document the cap if hit.
