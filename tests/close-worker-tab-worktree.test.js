@@ -113,6 +113,64 @@ test('[N5] close-worker-tab warns on stderr when branch delete fails', { timeout
   expect(result.stderr).toMatch(/WARN/);
 });
 
+test('[EXT1] close-worker-tab removes a worktree provisioned in an EXTERNAL repo (meta.json repo field)', { timeout: TEST_TIMEOUT }, () => {
+  // Reset the ADVISOR_ROOT-provisioned worktree from beforeEach — this test
+  // provisions its own worktree against a separate external repo instead.
+  execFileSync('git', ['-C', ADVISOR_ROOT, 'worktree', 'remove', '--force', workspaceDir], { stdio: 'ignore' });
+  execFileSync('git', ['-C', ADVISOR_ROOT, 'branch', '-D', branchName], { stdio: 'ignore' });
+
+  const extRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'cwt-extrepo-'));
+  execFileSync('git', ['init'], { cwd: extRepo, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: extRepo, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: extRepo, stdio: 'ignore' });
+  fs.writeFileSync(path.join(extRepo, 'base.txt'), 'base');
+  execFileSync('git', ['add', '.'], { cwd: extRepo, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'init'], { cwd: extRepo, stdio: 'ignore' });
+
+  execFileSync('git', ['-C', extRepo, 'worktree', 'add', '-b', branchName, workspaceDir], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const runDir = path.join(tmpHome, '.advisor', 'runs', sid);
+  fs.writeFileSync(path.join(runDir, 'meta.json'), JSON.stringify({ agent: 'coder', repo: extRepo }));
+
+  try {
+    const result = spawnSync(CLOSE_WORKER_TAB, [sid], {
+      env: { ...process.env, HOME: tmpHome },
+      encoding: 'utf8',
+    });
+    expect(result.status).toBe(0);
+
+    expect(fs.existsSync(workspaceDir)).toBe(false);
+    const wtList = execFileSync('git', ['-C', extRepo, 'worktree', 'list'], { encoding: 'utf8' });
+    expect(wtList).not.toContain(workspaceDir);
+    const branchList = execFileSync('git', ['-C', extRepo, 'branch', '--list', branchName], { encoding: 'utf8' }).trim();
+    expect(branchList).toBe('');
+    // Must NOT have leaked into the advisor repo itself.
+    expect(listBranches()).toBe('');
+  } finally {
+    try { execFileSync('git', ['-C', extRepo, 'worktree', 'remove', '--force', workspaceDir], { stdio: 'ignore' }); } catch (_) {}
+    fs.rmSync(extRepo, { recursive: true, force: true });
+  }
+});
+
+test('[EXT2] close-worker-tab falls back to advisorRoot when meta.json is missing', { timeout: TEST_TIMEOUT }, () => {
+  // No meta.json written in this run's runDir — beforeEach already provisioned
+  // the worktree against ADVISOR_ROOT with no meta.json present.
+  const runDir = path.join(tmpHome, '.advisor', 'runs', sid);
+  expect(fs.existsSync(path.join(runDir, 'meta.json'))).toBe(false);
+
+  const result = spawnSync(CLOSE_WORKER_TAB, [sid], {
+    env: { ...process.env, HOME: tmpHome },
+    encoding: 'utf8',
+  });
+  expect(result.status).toBe(0);
+
+  expect(fs.existsSync(workspaceDir)).toBe(false);
+  expect(listWorktrees()).not.toContain(workspaceDir);
+  expect(listBranches()).toBe('');
+});
+
 test('close-worker-tab is a no-op when no worktree is registered for the sid', { timeout: TEST_TIMEOUT }, () => {
   // Pre-emptively clean the worktree so the script has nothing to remove.
   execFileSync('git', ['-C', ADVISOR_ROOT, 'worktree', 'remove', '--force', workspaceDir]);

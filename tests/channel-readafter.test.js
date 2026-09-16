@@ -51,3 +51,59 @@ test('readAfterFast: returns empty array when no new messages since last call', 
   const result = readAfterFast(file, 0, t);
   expect(result.length).toBe(0);
 });
+
+// ── Test 3: a read landing mid-line must not warn, and must not drop the record ──
+test('Tail.read: mid-line read emits no warning and returns the record complete on the following read', async () => {
+  const { Tail } = await import(LIB_CHANNEL);
+
+  const file = path.join(tmpDir, 'midline.jsonl');
+  fs.writeFileSync(file, JSON.stringify({ type: 'test', body: 'first', seq: 1 }) + '\n');
+
+  const t = new Tail();
+  const firstBatch = t.read(file); // consumes the complete first line
+  expect(firstBatch.length).toBe(1);
+
+  // Simulate the writer being mid-append: a second record whose bytes are only
+  // partially flushed (no trailing newline yet).
+  const partial = '{"type":"test","body":"seco';
+  fs.appendFileSync(file, partial);
+
+  const origWrite = process.stderr.write;
+  const warnings = [];
+  process.stderr.write = (chunk, ...rest) => { warnings.push(String(chunk)); return true; };
+  let midRead;
+  try {
+    midRead = t.read(file);
+  } finally {
+    process.stderr.write = origWrite;
+  }
+  expect(midRead.length).toBe(0);
+  expect(warnings.length).toBe(0);
+
+  // Writer finishes flushing the record.
+  fs.appendFileSync(file, 'nd"}\n');
+  const finalRead = t.read(file);
+  expect(finalRead.length).toBe(1);
+  expect(finalRead[0].body).toBe('second');
+});
+
+// ── Test 4: a complete-but-corrupt line must still warn ───────────────────────
+test('Tail.read: a complete corrupt line still emits the malformed-line warning', async () => {
+  const { Tail } = await import(LIB_CHANNEL);
+
+  const file = path.join(tmpDir, 'corrupt.jsonl');
+  fs.writeFileSync(file, 'not valid json\n');
+
+  const t = new Tail();
+  const origWrite = process.stderr.write;
+  const warnings = [];
+  process.stderr.write = (chunk, ...rest) => { warnings.push(String(chunk)); return true; };
+  let result;
+  try {
+    result = t.read(file);
+  } finally {
+    process.stderr.write = origWrite;
+  }
+  expect(result.length).toBe(0);
+  expect(warnings.some(w => w.includes('skipping malformed line'))).toBe(true);
+});
