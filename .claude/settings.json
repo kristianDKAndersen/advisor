@@ -98,7 +98,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/capture-correction.js"
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture-correction.js\" 2>/dev/null || true"
           }
         ]
       }
