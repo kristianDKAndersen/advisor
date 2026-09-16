@@ -119,3 +119,69 @@ test('scenario 7: missing evaluator_dim defaults to verdict:blocked in frontmatt
   expect(fm.evaluator_dim).toBe('verdict:blocked');
   expect(fm.type).toBe('lesson');
 });
+
+// Scenario 9: writeLesson stamps a due_date defaulting to +90d from created_at
+test('scenario 9: writeLesson defaults due_date to +90 days from created_at', () => {
+  const createdAt = '2026-01-01T00:00:00.000Z';
+  const record = {
+    sid: 'due-default-sid',
+    agent: 'researcher',
+    synthesis_seq: 1,
+    ts_iso: createdAt,
+    task_type: 'default-due-date',
+    failure_mode: 'blocked',
+    root_cause: 'root',
+    heuristic: 'heuristic',
+    score: 'n/a'
+  };
+  vault.writeLesson(record);
+
+  const notePath = path.join(tmpVaultRoot, 'lessons', 'due-default-sid-researcher-1.md');
+  const content = fs.readFileSync(notePath, 'utf8');
+  const { fm } = vault.parseFrontmatter(content);
+  expect(fm.due_date).toBe('2026-04-01');
+});
+
+// Scenario 10: an explicit record.due_date overrides the +90d default
+test('scenario 10: explicit record.due_date overrides the default', () => {
+  const record = {
+    sid: 'due-override-sid',
+    agent: 'researcher',
+    synthesis_seq: 1,
+    ts_iso: '2026-01-01T00:00:00.000Z',
+    due_date: '2026-02-15',
+    task_type: 'override-due-date',
+    failure_mode: 'blocked',
+    root_cause: 'root',
+    heuristic: 'heuristic',
+    score: 'n/a'
+  };
+  vault.writeLesson(record);
+
+  const notePath = path.join(tmpVaultRoot, 'lessons', 'due-override-sid-researcher-1.md');
+  const content = fs.readFileSync(notePath, 'utf8');
+  const { fm } = vault.parseFrontmatter(content);
+  expect(fm.due_date).toBe('2026-02-15');
+});
+
+// Scenario 11: listDue() actually returns a freshly written lesson whose
+// due_date is in the past — end-to-end proof the stamped format parses.
+test('scenario 11: listDue() returns a freshly written lesson with a past due_date', () => {
+  const record = {
+    sid: 'due-listdue-sid',
+    agent: 'researcher',
+    synthesis_seq: 1,
+    due_date: '2020-01-01',
+    task_type: 'past-due-date',
+    failure_mode: 'blocked',
+    root_cause: 'root',
+    heuristic: 'heuristic',
+    score: 'n/a'
+  };
+  vault.writeLesson(record);
+
+  const due = vault.listDue('2026-01-01', 14);
+  const match = due.find(n => n.path === 'lessons/due-listdue-sid-researcher-1.md');
+  expect(match).toBeDefined();
+  expect(match.due_date).toBe('2020-01-01');
+});
