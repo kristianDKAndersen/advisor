@@ -35,6 +35,28 @@ function vaultRoot() {
   return process.env.ADVISOR_VAULT || path.join(os.homedir(), '.advisor', 'vault');
 }
 
+// Secret-shaped substrings are redacted before the 300-char slice so a secret
+// can't survive truncation. Assignment/Bearer forms keep the label, replace
+// only the value, so triage wording ("the password is ...") stays legible.
+const SECRET_PATTERNS = [
+  /\bsk-(?:ant-)?[A-Za-z0-9_-]{10,}\b/gi,
+  /\b(?:ghp|gho|ghu|ghs)_[A-Za-z0-9]{10,}\b/g,
+  /\bAKIA[0-9A-Z]{10,}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\bglpat-[A-Za-z0-9_-]{10,}\b/g,
+];
+function redact(text) {
+  let out = text;
+  for (const re of SECRET_PATTERNS) out = out.replace(re, '[REDACTED]');
+  out = out.replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]');
+  out = out.replace(
+    /\b(password|passwd|secret|token|api[_-]?key|access[_-]?key)\b(\s*(?:[:=]|\bis\b)\s*)(\S+)/gi,
+    '$1$2[REDACTED]'
+  );
+  out = out.replace(/[A-Za-z0-9_-]{32,}/g, '[REDACTED]');
+  return out;
+}
+
 try {
   if (process.env.ADVISOR_CAPTURE === '0') process.exit(0); // opt-out
   let raw = '';
@@ -45,20 +67,31 @@ try {
   if (!p || p.length > 500) process.exit(0); // corrections are short
   const hits = PATTERNS.filter(([, re]) => re.test(p));
   if (hits.length) {
+    let safe;
+    try {
+      safe = redact(p);
+      if (typeof safe !== 'string') throw new Error('redact did not return a string');
+    } catch {
+      process.exit(0); // fail closed: never write raw text if redaction breaks
+    }
     const entry = {
       ts: Date.now() / 1000,
       sid: typeof data.session_id === 'string' ? data.session_id : '',
       target: 'advisor',
       confidence: hits.some(([, , strong]) => strong) ? 0.75 : 0.55,
       matched_pattern: hits.map(([name]) => name).join(','),
-      text: p.slice(0, 300),
+      text: safe.slice(0, 300),
     };
     const file = path.join(vaultRoot(), '.cache', 'corrections.jsonl');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     try {
-      if (fs.statSync(file).size >= MAX_BYTES) fs.renameSync(file, file + '.1');
+      if (fs.statSync(file).size >= MAX_BYTES) {
+        fs.renameSync(file, file + '.1');
+        try { fs.chmodSync(file + '.1', 0o600); } catch { /* best-effort */ }
+      }
     } catch { /* no file yet, or stat/rename raced — fall through and append */ }
-    fs.appendFileSync(file, JSON.stringify(entry) + '\n');
+    fs.appendFileSync(file, JSON.stringify(entry) + '\n', { mode: 0o600 });
+    try { fs.chmodSync(file, 0o600); } catch { /* best-effort; never throw */ }
   }
 } catch { /* capture is advisory; never block or crash the prompt */ }
 process.exit(0);
