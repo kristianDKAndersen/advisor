@@ -270,6 +270,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
        --evaluator-scores <evaluator-outputDir>/scores.json
      ```
      The lesson note is written to `~/.advisor/vault/lessons/` and will be retrieved automatically in future sessions at Step 5. Do not trigger on the first failure — a single failure may be task-specific noise.
+
+     **Code-level 2-blocked-verdict trigger (separate signal):** independently of the evaluator path above, `lib/channel.js synthesize` itself now prints a `LESSON EXTRACTION REQUIRED` directive automatically when a worker's persisted result envelope carries `verdict:blocked` for the 2nd time in a session — this is gated on the worker's own verdict, not an evaluator score, so it can fire even when no evaluator ran. When the directive appears in your own synthesize output, run the printed `/extract-lesson` command as-is; do not conflate it with, or use it to skip, the evaluator-driven check above.
 8. **Report to the user.** Write a structured synthesis:
    1. **Executive summary** — 2-4 sentences of prose. Lead with what was found, not what was attempted.
    2. **Key findings** — numbered list; each item must include an inline citation (source file path or

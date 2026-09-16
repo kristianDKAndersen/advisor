@@ -369,7 +369,7 @@ Implemented in `lib/summon.js`; pinned by `tests/summon-advisor-disable.test.js`
 
 ## Self-healing — lesson vault
 
-The advisor learns from failure across sessions via a Reflexion-style post-mortem channel. When a worker delivers `verdict=blocked` with `material=yes`, `lib/channel.js synthesize --verdict blocked` emits a `LESSON EXTRACTION REQUIRED` block. The `/extract-lesson` skill turns the failure into a negative-polarity lesson note (one heuristic, one trigger, one anti-pattern) and writes it to `~/.advisor/vault/lessons/`.
+The advisor learns from failure across sessions via a Reflexion-style post-mortem channel. When a worker's persisted result envelope carries `verdict:blocked` for the 2nd time in a session, `lib/channel.js synthesize` emits a `LESSON EXTRACTION REQUIRED` block - gated on the worker verdict on the result envelope, not a CLI flag (one failure is noise, two is signal). The `/extract-lesson` skill turns the failure into a negative-polarity lesson note (one heuristic, one trigger, one anti-pattern) and writes it to `~/.advisor/vault/lessons/`.
 
 Before writing a brief, the advisor queries the vault:
 
