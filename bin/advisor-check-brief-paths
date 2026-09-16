@@ -134,6 +134,38 @@ function isIgnored(root, relPath) {
   }
 }
 
+function coreIgnoreCase(root) {
+  try {
+    const out = execFileSync('git', ['config', '--get', 'core.ignorecase'], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString().trim();
+    return out === 'true';
+  } catch {
+    return false;
+  }
+}
+
+// git ls-files is case-SENSITIVE even when core.ignorecase=true (that setting only
+// governs git's own working-tree comparisons, not this plumbing command). On such a
+// checkout a cited path that differs only in case from a tracked path IS visible to
+// the worker worktree, so we must resolve it ourselves via a case-folded scan.
+function findTrackedCaseInsensitive(root, relPath) {
+  try {
+    const out = execFileSync('git', ['ls-files'], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString();
+    const target = relPath.toLowerCase();
+    for (const line of out.split('\n')) {
+      if (line && line.toLowerCase() === target) return line;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function isStale(root, relPath) {
   try {
     const out = execFileSync('git', ['diff', 'HEAD', '--', relPath], {
@@ -210,11 +242,13 @@ if (file) {
 
 const resolvedRoot = realpathSync(root);
 const rawCandidates = extractPaths(briefText);
+const ignoreCase = coreIgnoreCase(resolvedRoot);
 
 const seen = new Set();
 const checked = [];
 const invisible = [];
 const stale = [];
+const caseMismatches = [];
 
 for (const tok of rawCandidates) {
   const relPath = toRepoRelative(tok, resolvedRoot);
@@ -222,8 +256,18 @@ for (const tok of rawCandidates) {
   if (seen.has(relPath)) continue;
   seen.add(relPath);
 
-  const tracked = isTracked(resolvedRoot, relPath);
-  const ignored = isIgnored(resolvedRoot, relPath);
+  let tracked = isTracked(resolvedRoot, relPath);
+  let resolvedPath = relPath;
+  let trackedAs = null;
+  if (!tracked && ignoreCase) {
+    const actualTracked = findTrackedCaseInsensitive(resolvedRoot, relPath);
+    if (actualTracked) {
+      tracked = true;
+      resolvedPath = actualTracked;
+      trackedAs = actualTracked;
+    }
+  }
+  const ignored = isIgnored(resolvedRoot, resolvedPath);
   const visible = tracked && !ignored;
   checked.push(relPath);
 
@@ -239,11 +283,20 @@ for (const tok of rawCandidates) {
       reason = 'nonexistent (no such path)';
     }
     invisible.push({ path: relPath, reason });
-  } else if (isStale(resolvedRoot, relPath)) {
-    stale.push({
-      path: relPath,
-      reason: 'differs from HEAD (uncommitted changes) — a worker worktree is created from committed state and will see the HEAD version, not this one',
-    });
+  } else {
+    if (trackedAs) {
+      caseMismatches.push({
+        path: relPath,
+        trackedAs,
+        reason: `cited '${relPath}' but tracked as '${trackedAs}' — visible to the worker worktree under that casing`,
+      });
+    }
+    if (isStale(resolvedRoot, resolvedPath)) {
+      stale.push({
+        path: relPath,
+        reason: 'differs from HEAD (uncommitted changes) — a worker worktree is created from committed state and will see the HEAD version, not this one',
+      });
+    }
   }
 }
 
@@ -263,12 +316,17 @@ const commitErrors = commits.filter((c) => c.status === 'error');
 const commitWarnings = commits.filter((c) => c.status === 'warning');
 
 if (json) {
-  console.log(JSON.stringify({ checked: checked.length, invisible, stale, commits }));
+  console.log(JSON.stringify({ checked: checked.length, invisible, stale, caseMismatches, commits }));
 } else {
   let printedAny = false;
   if (invisible.length > 0) {
     console.error(`advisor-check-brief-paths: ${invisible.length} cited path(s) invisible to a worker worktree:`);
     for (const inv of invisible) console.error(`  - ${inv.path} (${inv.reason})`);
+    printedAny = true;
+  }
+  if (caseMismatches.length > 0) {
+    console.error(`advisor-check-brief-paths: ${caseMismatches.length} cited path(s) visible only under a different casing:`);
+    for (const c of caseMismatches) console.error(`  - ${c.path} (${c.reason})`);
     printedAny = true;
   }
   if (stale.length > 0) {

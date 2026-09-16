@@ -180,6 +180,57 @@ describe('advisor-check-brief-paths', () => {
     expect(result.stderr).not.toContain(headSha);
   });
 
+  test('case-insensitive checkout: cited path differs only in case from a tracked path -> visible with warning, exit 0', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adv-brief-paths-test-'));
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+    execFileSync('git', ['config', 'core.ignorecase', 'true'], { cwd: root });
+    writeFileSync(join(root, 'claude.md'), '# claude\n');
+    execFileSync('git', ['add', 'claude.md'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
+
+    const brief = 'Read CLAUDE.md for your role prompt.';
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain('CLAUDE.md');
+    expect(result.stderr).toContain('claude.md');
+    expect(result.stderr).not.toMatch(/untracked/);
+  });
+
+  test('case-insensitive checkout: genuinely absent path (any casing) still reported untracked, exit 1', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adv-brief-paths-test-'));
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+    execFileSync('git', ['config', 'core.ignorecase', 'true'], { cwd: root });
+    writeFileSync(join(root, 'claude.md'), '# claude\n');
+    execFileSync('git', ['add', 'claude.md'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
+
+    const brief = 'See NOTES.md for context.';
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('NOTES.md');
+    expect(result.stderr).toMatch(/nonexistent/);
+  });
+
+  test('case-sensitive checkout (core.ignorecase=false): casing mismatch remains invisible', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adv-brief-paths-test-'));
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+    execFileSync('git', ['config', 'core.ignorecase', 'false'], { cwd: root });
+    writeFileSync(join(root, 'claude.md'), '# claude\n');
+    execFileSync('git', ['add', 'claude.md'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
+
+    const brief = 'Read CLAUDE.md for your role prompt.';
+    const result = run(['--root', root], brief);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('CLAUDE.md');
+  });
+
   test('check B precision: realistic brief with non-SHA hex tokens yields zero check-B findings', () => {
     const root = makeRepo();
     const brief = 'Please commit your changes once review is done. ' +
