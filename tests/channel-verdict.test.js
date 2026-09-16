@@ -41,7 +41,25 @@ function runSynthesize(args, sid) {
   );
 }
 
-// Scenario 4a: --verdict blocked --material yes → dead block removed; no LESSON EXTRACTION output
+// Seed persisted result envelopes into ADVISOR_RUNS_ROOT/<sid>/channel/outbox.jsonl,
+// the exact layout synthesize reads at lib/channel.js persistOutboxPath.
+function seedResults(sid, verdicts) {
+  const dir = path.join(tmpRuns, sid, 'channel');
+  fs.mkdirSync(dir, { recursive: true });
+  const lines = verdicts.map((verdict, i) => JSON.stringify({
+    seq: i + 1, type: 'result', from: 'coder', ts: Date.now() / 1000,
+    body: { verdict, summary: 'test' },
+  }));
+  fs.writeFileSync(path.join(dir, 'outbox.jsonl'), lines.join('\n') + '\n');
+}
+
+function seedBlockedResults(sid, n) {
+  seedResults(sid, Array(n).fill('blocked'));
+}
+
+// Scenario 4a: --verdict blocked --material yes → the --verdict CLI flag is ignored
+// (never read into the nudge gate); no LESSON EXTRACTION output without a persisted
+// blocked result envelope.
 test('synthesize --verdict blocked does NOT emit LESSON EXTRACTION REQUIRED block', () => {
   const sid = `verdict-test-blocked-${Date.now()}`;
   const result = runSynthesize(['--verdict', 'blocked'], sid);
@@ -76,11 +94,41 @@ test('synthesize --verdict partial does NOT emit LESSON EXTRACTION block', () =>
   expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
 }, TEST_TIMEOUT);
 
-// Dead block deleted: --verdict blocked produces no LESSON EXTRACTION output regardless of sid/seq
+// --verdict CLI flag stays ignored: it produces no LESSON EXTRACTION output regardless
+// of sid/seq. The trigger is the persisted worker verdict, not this flag.
 test('synthesize --verdict blocked produces no LESSON EXTRACTION output', () => {
   const sid = `verdict-test-vals-${Date.now()}`;
   const result = runSynthesize(['--verdict', 'blocked'], sid);
   expect(result.status).toBe(0);
   expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
   expect(result.stdout).not.toContain('extract-lesson');
+}, TEST_TIMEOUT);
+
+// Repaired guard: a 2nd persisted blocked result envelope DOES emit the nudge.
+test('synthesize emits LESSON EXTRACTION on 2nd blocked worker verdict', () => {
+  const sid = `verdict-2blk-${Date.now()}`;
+  seedBlockedResults(sid, 2);
+  const result = runSynthesize([], sid);
+  expect(result.status).toBe(0);
+  expect(result.stdout).toContain('LESSON EXTRACTION REQUIRED');
+  expect(result.stdout).toContain('/extract-lesson');
+  expect(result.stdout).toContain(sid);
+}, TEST_TIMEOUT);
+
+// The 1st blocked verdict alone is noise, not signal: no nudge yet.
+test('synthesize does NOT emit LESSON EXTRACTION on the 1st blocked verdict', () => {
+  const sid = `verdict-1blk-${Date.now()}`;
+  seedBlockedResults(sid, 1);
+  const result = runSynthesize([], sid);
+  expect(result.status).toBe(0);
+  expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
+}, TEST_TIMEOUT);
+
+// Persisted complete/partial verdicts never emit the nudge, even 2+ of them.
+test('synthesize does NOT emit LESSON EXTRACTION for persisted complete verdicts', () => {
+  const sid = `verdict-complete-persisted-${Date.now()}`;
+  seedResults(sid, ['complete', 'complete']);
+  const result = runSynthesize([], sid);
+  expect(result.status).toBe(0);
+  expect(result.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
 }, TEST_TIMEOUT);
