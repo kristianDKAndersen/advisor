@@ -1,6 +1,6 @@
 ---
 name: observe
-description: Canonical pattern for watching worker outboxes — launch bin/advisor-observe per worker as run_in_background, set a mandatory ScheduleWakeup fallback (>=1200s), and never use the Monitor tool. Use whenever you have one or more in-flight workers and need to resume automatically when results arrive.
+description: Canonical pattern for watching worker outboxes — launch ONE bin/advisor-observe listing all in-flight sids as run_in_background, set a mandatory ScheduleWakeup fallback (>=1200s), and never use the Monitor tool. Use whenever you have one or more in-flight workers and need to resume automatically when results arrive.
 allowed-tools:
   - Bash
 ---
@@ -14,18 +14,21 @@ Canonical background-observe + ScheduleWakeup pattern for monitoring in-flight w
 **Critical constraint: do NOT use the `Monitor` tool to observe worker outboxes.**
 Monitor is a within-turn event pump — its events cannot resume a suspended turn. If you end your turn after starting Monitor ("Wave N in flight. Will report back."), the session sleeps indefinitely until the user prompts you again. This has caused confirmed failures. Use `run_in_background` Bash + ScheduleWakeup instead.
 
-### Step 1 — Launch observer(s) as background processes
+### Step 1 — Launch one observer covering all in-flight sids
 
-For each in-flight worker, launch `bin/advisor-observe` as a `run_in_background` Bash call. It exits on `result` (exit 0), `error` (exit 1), or timeout (exit 2).
+Invocation is positional and variadic: `bin/advisor-observe <sid> [<sid>...]`. Launch ONE `bin/advisor-observe` as a `run_in_background` Bash call, listing every in-flight sid — one resident process covers the whole fleet. It blocks until the FIRST terminal event across the fleet, then exits: `result` with non-blocked verdict (exit 0), `result` with `verdict: "blocked"` or an error (exit 1), or timeout (exit 2). Every stdout line carries a `sid` field, since a single exit code can't say which worker it refers to.
 
 ```bash
 # Single worker
 bin/advisor-observe <sid> --max-wait 1800 | jq -c .
+
+# Multiple workers — one process, all sids
+bin/advisor-observe <sid1> <sid2> --max-wait 1800 | jq -c .
 ```
 
-Flags: `--after <seq>` (start cursor, default 0), `--max-wait <secs>` (default 1800), `--poll <ms>` (default 1000).
+Flags: `--after <sid>:<seq>` (repeatable, one per sid), or a bare `--after <seq>` (legal only for a single sid — a usage error, exit 2, with 2+ sids), `--max-wait <secs>` (default 1800), `--poll <ms>` (default 1000), `--verbose` (restores filtered `progress` messages; `stalled`/`heartbeat` lines are always emitted).
 
-For multiple workers, launch one `run_in_background` call per worker — each observer tails its own outbox.
+On exit, re-arm ONE fresh observe with the REMAINING sids and their per-sid `--after <sid>:<seq>` cursors. Single-sid invocation is fully backwards compatible.
 
 ### Step 2 — Mandatory ScheduleWakeup fallback
 
@@ -64,7 +67,7 @@ Do not end the wakeup turn with another "in flight" message — either poll + pr
 
 ## Quick-reference checklist
 
-- [ ] `bin/advisor-observe <sid>` launched as `run_in_background`
+- [ ] `bin/advisor-observe <sid> [<sid>...]` launched as ONE `run_in_background` process covering all in-flight sids
 - [ ] ScheduleWakeup called with `delaySeconds >= 1200`
 - [ ] Monitor tool NOT used
 - [ ] On wakeup: poll outbox, then either proceed or re-schedule
