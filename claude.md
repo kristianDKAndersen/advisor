@@ -153,29 +153,44 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    you will sleep indefinitely until the user prompts you. This has caused three
    confirmed failures. Use foreground Bash or ScheduleWakeup instead.
 
-   **Default — background observe (single- and multi-worker):** For each summoned
-   worker, launch `bin/advisor-observe` as a **background Bash task**
-   (`run_in_background: true`). Claude Code keeps background tasks running across
-   turns and re-invokes the advisor when the command exits.
+   **Default — background observe (single- and multi-worker):** Invocation is
+   positional and variadic: `bin/advisor-observe <sid> [<sid>...]`. ONE background
+   process now covers all in-flight workers — launch it as a **background Bash
+   task** (`run_in_background: true`) listing every in-flight sid. Claude Code keeps
+   background tasks running across turns and re-invokes the advisor when the
+   command exits.
    ```bash
-   bin/advisor-observe <sid> | jq -c .
+   bin/advisor-observe <sid1> <sid2> ... | jq -c .
    ```
-   Flags: `--after <seq>` (start cursor, default 0), `--max-wait <secs>` (default 1800),
-   `--poll <ms>` (default 1000).
+   The process blocks until the FIRST terminal event across the whole fleet, emits
+   it, and exits. Every stdout line carries a `sid` field, since a single exit code
+   cannot say which of N workers it refers to — read the emitted line, not just the
+   code. `progress` messages are filtered from stdout by default; pass `--verbose`
+   to restore them. `stalled` and `heartbeat` lines are still emitted regardless and
+   are load-bearing for the nudge guardrail below.
 
-   Exit-code semantics on re-invocation:
-   - **exit 0** — result delivered; proceed to synthesis (Step 7).
-   - **exit 1** — worker error; handle per Step 7 (`result` with `verdict: "blocked"`
-     or unexpected termination).
-   - **exit 2** — max-wait timeout elapsed; re-arm a fresh background observe, passing
-     `--after <last-seen-seq>` so already-processed messages are skipped:
-     ```bash
-     bin/advisor-observe <sid> --after <last_seq> | jq -c .
-     ```
+   Flags: `--after <sid>:<seq>` (repeatable, one per sid), or a bare `--after <seq>`
+   which remains legal only for a single sid (a usage error, exit 2, with 2+ sids),
+   `--max-wait <secs>` (default 1800), `--poll <ms>` (default 1000), `--verbose`.
 
-   **Multiple workers:** Launch one background observe per worker in parallel (all in
-   the same turn), then end the turn. The harness re-invokes the advisor as each
-   observe exits.
+   Exit-code semantics on re-invocation (unchanged):
+   - **exit 0** — result delivered with a non-blocked verdict; proceed to synthesis
+     (Step 7) for that sid.
+   - **exit 1** — result delivered with `verdict: "blocked"`, or an error message;
+     handle per Step 7.
+   - **exit 2** — max-wait timeout elapsed with no terminal event for any sid.
+
+   In every case, re-arm ONE fresh background observe with the REMAINING sids (drop
+   whichever sid just delivered its terminal event), passing each remaining sid's
+   own `--after <sid>:<seq>` cursor so already-processed messages are skipped:
+   ```bash
+   bin/advisor-observe <sid2> <sid3> --after <sid2>:<seq2> --after <sid3>:<seq3> | jq -c .
+   ```
+
+   **Multiple workers:** Launch ONE background observe listing all in-flight sids —
+   not one per worker. On every re-arm, pass the remaining sids together with their
+   per-sid cursors, as shown above. Single-sid invocation is fully backwards
+   compatible; existing single-worker usage needs no change.
 
    **ScheduleWakeup fallback (mandatory when any observe is in flight):** Before
    ending any turn that has one or more background observes still running, ALSO call
@@ -228,8 +243,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
    `--ensemble N` to a single summon call to provision N workers on the same brief
    automatically; their result envelopes are batched into a single synthesize record.
    Use for homogeneous fan-out (same brief, same agent type) where territory
-   assignment is not needed. With `--ensemble N`, launch one background observe per
-   worker SID returned by summon, plus one fallback ScheduleWakeup.
+   assignment is not needed. With `--ensemble N`, launch ONE background observe
+   listing all worker SIDs returned by summon, plus one fallback ScheduleWakeup.
 7. **Steer.** React to each worker message:
    - `progress` -> usually acknowledge mentally, wait for more. Intervene only if the worker is clearly off-track.
    - `result`   -> When a worker delivers result, the channel.js output appends a SYNTHESIS REQUIRED block with a pre-filled `synthesize` command. The result body is a structured envelope — read `body.summary` (<=200 char outcome), `body.paths` (absolute file paths to deliverables), `body.verdict` (`complete`|`partial`|`blocked`). Legacy string bodies display as before. Fill the required fields (established, gap, material, next_action) and run it BEFORE spawning a new worker, sending guidance, or proceeding to Step 8. Use `/synth` to run synthesis — it validates required fields before invoking `channel.js synthesize` and prevents malformed synthesis records.
@@ -458,10 +473,10 @@ Full design, including the round-state schema, the blind-A/B judging protocol, t
 
 - **Watchdog rule — never end a turn with "N workers in flight" as your only action.**
   After spawning workers you must do one of these three things before ending the turn:
-  (a) launch a harness-tracked background `bin/advisor-observe <sid> | jq -c .` per
-  worker (`run_in_background: true`) PLUS one fallback ScheduleWakeup (>=1200s) — the
-  harness re-invokes the advisor when each observe exits, and the wakeup covers lost
-  notifications, OR
+  (a) launch a harness-tracked background `bin/advisor-observe <sid> [<sid>...] | jq -c .`
+  listing all in-flight sids in ONE process (`run_in_background: true`) PLUS one
+  fallback ScheduleWakeup (>=1200s) — the harness re-invokes the advisor when the
+  observe exits, and the wakeup covers lost notifications, OR
   (b) hold the turn open with a foreground Bash poll (`bin/advisor-observe` without
   `run_in_background`) until workers deliver, OR
   (c) poll outboxes with `recv` and call ScheduleWakeup if any worker has not yet
@@ -527,3 +542,7 @@ Workers cannot talk to each other. Workers cannot summon further workers. Worker
 - 2026-06: 8 guardrails added (pane-death, destructive-CLI probe, verify-don't-trust, agent-role-contract, shared-repo-coordination, git-add-discipline, claude-in-claude-env-scrub, coder-dep-preinstall). Creative Council Mode restored (bin/summon --agent creative; council runs sequentially inside worker; in-loop). Worker hooks promoted to all agents (default-on). Step 4 brainstormer/doc-agent hints added. Step 8 cost line added. /observe, /pre-compact, bin/advisor-terminate references added.
 - 2026-07: Token-economy bootstrap injection added — `lib/eco-rules.js` writes an ECO-CORE/ECO-REVIEW block into every worker's bootstrap prompt, opt-out via `ADVISOR_ECO=0`. Three worker-lifecycle fixes landed: `spawnHeadless` sentinel-ownership validation (a foreign sentinel payload can no longer falsely complete another worker's poll), `reaperSweepOrphanSessions` 2-hour grace floor for freshly-summoned sessions, and `close-tab` restricted to killing only `$TMUX_PANE` in multiplex mode (no fallback to the attached client's active pane). Synthesize-time telemetry accrual added (`lib/channel.js` calls `telemetry-backfill.js` before tab close, since worker sessions self-terminate before `Stop` fires), plus `bin/advisor-cost-backfill` and `bin/advisor-cost --by-agent`.
 - 2026-08: `bin/advisor-loop` added - bounded builder-plus-critic rounds with a fresh worker per round, so the per-worker wall-clock ceiling resets each round; value is resumability (round N+1 continues round N's in-progress diff in a retained worktree), not blind looping. Bar is mandatory (four types declared, three usable today; undeclarable bar exits 6). Escalates on max-rounds / cost-ceiling / no-improvement / identical-consecutive-failure with a per-category retry policy. Three autonomy levels (L2 shipped default). First mechanical safety gate (path denylist plus deny-by-default action allowlist via `--gate`). Opt-in; leaves the summon / observe / synthesize flow unchanged. Design at `~/.advisor/runs/1786099942-2a9192/output/advisor-loop-design.md`.
+- 2026-09: `bin/advisor-observe` collapsed from one resident process per worker to
+  ONE process watching N sids (positional/variadic invocation, per-sid `--after
+  <sid>:<seq>` cursors, `sid`-tagged stdout lines, `--verbose`). Exit codes and the
+  ScheduleWakeup/Monitor-prohibition guardrails are unchanged. Commit 8add75f.

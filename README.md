@@ -35,7 +35,7 @@ bin/
   advisor-cost        # per-session cost report — reads ~/.advisor/state/token-usage.jsonl and prints token counts + estimated cost by session; --by-agent aggregates by agent name (requires session-map.jsonl)
   advisor-cost-backfill  # backfill token-usage.jsonl rows for worker sessions whose Stop hook never fired and whose synthesize-time accrual predates or missed the fix (--dry-run)
   advisor-list        # list all sessions under ~/.advisor/runs/ (--json, --repo, --agent)
-  advisor-observe     # tail a session's outbox; emits JSON per message; exits on result/error/timeout (--after, --max-wait, --poll)
+  advisor-observe     # tail one process across N sids' outboxes (positional/variadic <sid>...); emits sid-tagged JSON per message; exits on the first result/error/timeout across the fleet (--after <sid>:<seq> repeatable, --max-wait, --poll, --verbose)
   advisor-schedule    # launch autonomous loops detached in a tmux window (--sid, --interval, --task, --once)
   advisor-timeline    # HTTP timeline dashboard on port 7878 — SSE live updates, color-coded by message type
   advisor-vault       # query the native vault index (search / backlinks / path / due [--within <days>])

@@ -1,11 +1,17 @@
 #!/usr/bin/env node
-// advisor-observe — tail a session's outbox, emit each message as a JSON line.
+// advisor-observe — tail one or more sessions' outboxes in ONE process/loop,
+// emit each message as a JSON line, and exit on the FIRST terminal event across
+// the fleet. The Advisor re-arms a fresh process with the remaining sids.
 //
 // Usage:
-//   bin/advisor-observe <sid> [--after <seq>] [--max-wait <secs>] [--poll <ms>]
+//   bin/advisor-observe <sid> [<sid>...] [--after <sid>:<seq>]... [--after <seq>]
+//                             [--max-wait <secs>] [--poll <ms>] [--verbose]
 //
-// Streams each new outbox message as a single JSON line to stdout (Monitor-friendly).
-// Exits 0 on a `result` message, 1 on an `error` message, 2 on timeout.
+// SIDs are positional and variadic. --after is repeatable as <sid>:<seq>; a bare
+// numeric --after is legal ONLY with exactly one sid. Every stdout line carries a
+// `sid` field — the exit code alone cannot describe N workers.
+//   0 = result with non-blocked verdict   1 = result verdict:blocked or error
+//   2 = max-wait timeout or a usage error
 
 const fs = require('fs');
 const path = require('path');
@@ -13,14 +19,20 @@ const { spawnSync } = require('child_process');
 const { Tail } = require(path.join(__dirname, '..', 'lib', 'channel.js'));
 const { loadTerminal } = require(path.join(__dirname, '..', 'lib', 'terminal-persist.js'));
 
+// Flags that never consume the following token (so `--verbose A B` keeps A as a sid).
+const BOOLEAN_FLAGS = new Set(['verbose']);
+
 function parseArgs(argv) {
-  const out = { _: [] };
+  const out = { _: [], after: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
       const k = a.slice(2);
+      if (BOOLEAN_FLAGS.has(k)) { out[k] = true; continue; }
       const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('--')) { out[k] = next; i++; }
+      const hasVal = next !== undefined && !next.startsWith('--');
+      if (k === 'after') { if (hasVal) { out.after.push(next); i++; } }
+      else if (hasVal) { out[k] = next; i++; }
       else { out[k] = true; }
     } else {
       out._.push(a);
@@ -31,96 +43,145 @@ function parseArgs(argv) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Synchronous stdout write so multiple lines survive an immediate process.exit().
+function emit(obj, sid) { fs.writeSync(1, JSON.stringify({ ...obj, sid }) + '\n'); }
+
+function exitCodeForMessage(m) {
+  if (m.type === 'error') return 1;
+  if (m.type === 'result') {
+    const body = typeof m.body === 'string'
+      ? (() => { try { return JSON.parse(m.body); } catch (_) { return {}; } })()
+      : (m.body || {});
+    return body && body.verdict === 'blocked' ? 1 : 0;
+  }
+  return 0;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const sid = args._[0];
-  if (!sid) {
-    process.stderr.write('Usage: advisor-observe <sid> [--after <seq>] [--max-wait <secs>] [--poll <ms>]\n');
+  const sids = args._;
+  if (sids.length === 0) {
+    process.stderr.write('Usage: advisor-observe <sid> [<sid>...] [--after <sid>:<seq>]... [--max-wait <secs>] [--poll <ms>] [--verbose]\n');
     process.exit(2);
   }
 
   const home = process.env.HOME || process.env.USERPROFILE;
-  const outboxPath = path.join(home, '.advisor', 'runs', sid, 'channel', 'outbox.jsonl');
-
-  let cursor = parseInt(args.after || '0', 10);
   const maxWaitMs = parseFloat(args['max-wait'] || '1800') * 1000;
   const pollMs = parseInt(args.poll || '1000', 10);
+  const verbose = !!args.verbose;
 
-  const channelDir = path.join(home, '.advisor', 'runs', sid, 'channel');
-  const terminal = loadTerminal(channelDir);
-  if (terminal && terminal.seq > cursor) {
-    process.stdout.write(JSON.stringify(terminal) + '\n');
-    process.exit(0);
+  // ── Resolve per-sid cursors from repeatable --after ─────────────────────────
+  const cursors = {};
+  for (const s of sids) cursors[s] = 0;
+  for (const a of args.after) {
+    const idx = a.indexOf(':');
+    if (idx >= 0) {
+      cursors[a.slice(0, idx)] = parseInt(a.slice(idx + 1), 10) || 0;
+    } else {
+      // Bare numeric form: only unambiguous with a single sid.
+      if (sids.length !== 1) {
+        process.stderr.write('advisor-observe: bare numeric --after requires exactly one sid; with multiple sids use the repeatable form --after <sid>:<seq>\n');
+        process.exit(2);
+      }
+      cursors[sids[0]] = parseInt(a, 10) || 0;
+    }
   }
 
-  const tailer = new Tail();
-  const deadline = Date.now() + maxWaitMs;
-  let lastActivityAt = Date.now();
-  let stalledEmitted = false;
+  // ── Build one record per sid (all previously-single-worker locals) ──────────
+  const now = Date.now();
+  const records = new Map();
+  for (const sid of sids) {
+    const channelDir = path.join(home, '.advisor', 'runs', sid, 'channel');
+    records.set(sid, {
+      sid,
+      channelDir,
+      outboxPath: path.join(channelDir, 'outbox.jsonl'),
+      inboxPath: path.join(channelDir, 'inbox.jsonl'),
+      heartbeatPath: path.join(channelDir, 'heartbeat.jsonl'),
+      cursor: cursors[sid] || 0,
+      outTail: new Tail(),
+      inTail: new Tail(),
+      inboxCursor: 0,
+      terminateSeenAt: null,
+      lastEmittedToolCount: -1,
+      lastActivityAt: now,
+      stalledEmitted: false,
+      live: true,
+    });
+  }
 
-  const inboxPath = path.join(channelDir, 'inbox.jsonl');
-  const heartbeatPath = path.join(channelDir, 'heartbeat.jsonl');
-  const inboxTailer = new Tail();
-  let inboxCursor = 0;
-  let terminateSeenAt = null;
-  let lastEmittedToolCount = -1;
+  const liveRecords = () => [...records.values()].filter(r => r.live);
+
+  // ── Terminal fast-path: emit ALL persisted hits, exit only if none stays live ─
+  const preHitCodes = [];
+  for (const rec of records.values()) {
+    const terminal = loadTerminal(rec.channelDir);
+    if (terminal && terminal.seq > rec.cursor) {
+      emit(terminal, rec.sid);
+      rec.live = false;
+      preHitCodes.push(exitCodeForMessage(terminal));
+    }
+  }
+  if (liveRecords().length === 0) {
+    process.exit(preHitCodes.some(c => c !== 0) ? 1 : 0);
+  }
+
+  const deadline = Date.now() + maxWaitMs;
 
   while (true) {
-    const msgs = tailer.read(outboxPath).filter(m => m.seq > cursor);
-    for (const m of msgs) {
-      cursor = Math.max(cursor, m.seq);
-      lastActivityAt = Date.now();
-      stalledEmitted = false;
-      process.stdout.write(JSON.stringify(m) + '\n');
-      if (m.type === 'result') {
-        // Exit 1 for blocked verdict so callers can distinguish failure from success.
-        const body = typeof m.body === 'string'
-          ? (() => { try { return JSON.parse(m.body); } catch (_) { return {}; } })()
-          : (m.body || {});
-        process.exit(body && body.verdict === 'blocked' ? 1 : 0);
+    for (const rec of liveRecords()) {
+      // ── Outbox: first result/error across the fleet exits the process ───────
+      const msgs = rec.outTail.read(rec.outboxPath).filter(m => m.seq > rec.cursor);
+      for (const m of msgs) {
+        rec.cursor = Math.max(rec.cursor, m.seq);
+        rec.lastActivityAt = Date.now();   // activity, even for filtered progress
+        rec.stalledEmitted = false;
+        if (m.type === 'progress' && !verbose) continue; // display-only filter
+        emit(m, rec.sid);
+        if (m.type === 'result') process.exit(exitCodeForMessage(m));
+        if (m.type === 'error') process.exit(1);
       }
-      if (m.type === 'error') process.exit(1);
-    }
 
-    // ── Inbox terminate check ──────────────────────────────────────────────
-    const inboxMsgs = inboxTailer.read(inboxPath).filter(m => m.seq > inboxCursor);
-    for (const im of inboxMsgs) {
-      inboxCursor = Math.max(inboxCursor, im.seq);
-      if (im.type === 'terminate' && terminateSeenAt === null) {
-        terminateSeenAt = Date.now();
+      // ── Inbox terminate check (per sid) ────────────────────────────────────
+      const inboxMsgs = rec.inTail.read(rec.inboxPath).filter(m => m.seq > rec.inboxCursor);
+      for (const im of inboxMsgs) {
+        rec.inboxCursor = Math.max(rec.inboxCursor, im.seq);
+        if (im.type === 'terminate' && rec.terminateSeenAt === null) rec.terminateSeenAt = Date.now();
       }
-    }
 
-    // ── Heartbeat ─────────────────────────────────────────────────────────
-    try {
-      if (fs.existsSync(heartbeatPath)) {
-        const hbLines = fs.readFileSync(heartbeatPath, 'utf8').split('\n').filter(l => l.trim());
-        if (hbLines.length > 0) {
-          const lastHb = JSON.parse(hbLines[hbLines.length - 1]);
-          if (lastHb.tool_count !== lastEmittedToolCount) {
-            lastEmittedToolCount = lastHb.tool_count;
-            const agoSecs = Math.round((Date.now() / 1000 - lastHb.ts));
-            process.stdout.write(JSON.stringify({ type: 'heartbeat', sid, tool_count: lastHb.tool_count, last_active_secs: agoSecs }) + '\n');
+      // ── Heartbeat (per sid) ────────────────────────────────────────────────
+      try {
+        if (fs.existsSync(rec.heartbeatPath)) {
+          const hbLines = fs.readFileSync(rec.heartbeatPath, 'utf8').split('\n').filter(l => l.trim());
+          if (hbLines.length > 0) {
+            const lastHb = JSON.parse(hbLines[hbLines.length - 1]);
+            if (lastHb.tool_count !== rec.lastEmittedToolCount) {
+              rec.lastEmittedToolCount = lastHb.tool_count;
+              const agoSecs = Math.round((Date.now() / 1000 - lastHb.ts));
+              emit({ type: 'heartbeat', tool_count: lastHb.tool_count, last_active_secs: agoSecs }, rec.sid);
+            }
           }
         }
+      } catch (_) {} // absent or malformed heartbeat.jsonl = silent
+
+      // ── Stall (per sid — chatty A must not suppress silent C) ───────────────
+      const silentMs = Date.now() - rec.lastActivityAt;
+      if (!rec.stalledEmitted && silentMs >= 60_000) {
+        emit({ type: 'stalled', silentMs }, rec.sid);
+        rec.stalledEmitted = true;
       }
-    } catch (_) {} // absent or malformed heartbeat.jsonl = silent
 
-    const silentMs = Date.now() - lastActivityAt;
-    if (!stalledEmitted && silentMs >= 60_000) {
-      process.stdout.write(JSON.stringify({ type: 'stalled', sid, silentMs }) + '\n');
-      stalledEmitted = true;
+      // ── Post-terminate auto-close (per sid; must not exit the process) ──────
+      if (rec.terminateSeenAt !== null && Date.now() - rec.terminateSeenAt >= 30_000) {
+        const closeScript = path.join(__dirname, 'close-worker-tab');
+        spawnSync(closeScript, [rec.sid], { stdio: 'inherit' });
+        process.stderr.write(`advisor-observe: terminate observed, no result after 30s — closed worker tab for ${rec.sid}\n`);
+        rec.live = false;
+      }
     }
 
-    // ── Post-terminate auto-close ─────────────────────────────────────────
-    // If a terminate was sent to the worker (observed in inbox) but no result
-    // has arrived in the outbox within 30s, close the worker tab unconditionally.
-    if (terminateSeenAt !== null && Date.now() - terminateSeenAt >= 30_000) {
-      const closeScript = path.join(__dirname, 'close-worker-tab');
-      spawnSync(closeScript, [sid], { stdio: 'inherit' });
-      process.stderr.write(`advisor-observe: terminate observed, no result after 30s — closed worker tab for ${sid}\n`);
-      process.exit(0);
-    }
+    // All sids drained via auto-close (results/errors exit inline above).
+    if (liveRecords().length === 0) process.exit(0);
 
     if (Date.now() >= deadline) {
       process.stderr.write(`advisor-observe: timeout after ${args['max-wait'] || 1800}s waiting for result\n`);
