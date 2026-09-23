@@ -280,7 +280,7 @@ test('advisor-cost-backfill backfills unrecorded uuids and skips already-recorde
   );
   fs.writeFileSync(path.join(stateDir, 'token-usage.jsonl'), JSON.stringify({ sid: oldUuid, total_used: 999 }) + '\n');
 
-  const dry = spawnSync('node', [BACKFILL_BIN, '--dry-run'], {
+  const dry = spawnSync('node', [BACKFILL_BIN, '--all', '--dry-run'], {
     encoding: 'utf8',
     env: { ...process.env, ADVISOR_STATE_DIR: stateDir, ADVISOR_RUNS_ROOT: runsRoot, ADVISOR_CLAUDE_PROJECTS_DIR: projectsDir },
   });
@@ -289,7 +289,7 @@ test('advisor-cost-backfill backfills unrecorded uuids and skips already-recorde
   expect(dry.stdout).toContain('backfilled=1');
   expect(dry.stdout).toContain('skipped_already_recorded=1');
 
-  const real = spawnSync('node', [BACKFILL_BIN], {
+  const real = spawnSync('node', [BACKFILL_BIN, '--all'], {
     encoding: 'utf8',
     env: { ...process.env, ADVISOR_STATE_DIR: stateDir, ADVISOR_RUNS_ROOT: runsRoot, ADVISOR_CLAUDE_PROJECTS_DIR: projectsDir },
   });
@@ -304,4 +304,82 @@ test('advisor-cost-backfill backfills unrecorded uuids and skips already-recorde
   const oldRows = rows.filter((r) => r.sid === oldUuid);
   expect(oldRows.length).toBe(1);
   expect(oldRows[0].total_used).toBe(999);
+});
+
+test('advisor-cost-backfill: bare invocation writes nothing and prints usage', () => {
+  const runsRoot = path.join(tmpDir, 'bare-runs');
+  const projectsDir = path.join(tmpDir, 'bare-projects');
+  const uuid = 'uuid-bare-invocation';
+  const workspace = path.join(runsRoot, 'sid-bare', 'workspace');
+  fs.mkdirSync(path.join(runsRoot, 'sid-bare'), { recursive: true });
+  fs.writeFileSync(path.join(runsRoot, 'sid-bare', 'meta.json'), JSON.stringify({ workspace }));
+  const projDir = path.join(projectsDir, encodeProjectDir(workspace));
+  fs.mkdirSync(projDir, { recursive: true });
+  fs.writeFileSync(path.join(projDir, `${uuid}.jsonl`), makeTranscript(uuid, [
+    { input_tokens: 5, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  ]));
+  fs.writeFileSync(path.join(stateDir, 'session-map.jsonl'), JSON.stringify({ run_sid: 'sid-bare', claude_uuid: uuid, agent: 'coder' }) + '\n');
+
+  const before = fs.existsSync(path.join(stateDir, 'token-usage.jsonl'));
+  expect(before).toBe(false);
+
+  const r = spawnSync('node', [BACKFILL_BIN], {
+    encoding: 'utf8',
+    env: { ...process.env, ADVISOR_STATE_DIR: stateDir, ADVISOR_RUNS_ROOT: runsRoot, ADVISOR_CLAUDE_PROJECTS_DIR: projectsDir },
+  });
+  expect(r.status).toBe(0);
+  expect(r.stdout).toMatch(/--all|--sid/);
+  expect(fs.existsSync(path.join(stateDir, 'token-usage.jsonl'))).toBe(false);
+});
+
+test('advisor-cost-backfill: --help exits 0 and writes nothing', () => {
+  const r = spawnSync('node', [BACKFILL_BIN, '--help'], {
+    encoding: 'utf8',
+    env: { ...process.env, ADVISOR_STATE_DIR: stateDir },
+  });
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain('advisor-cost-backfill');
+  expect(fs.existsSync(path.join(stateDir, 'token-usage.jsonl'))).toBe(false);
+});
+
+test('advisor-cost-backfill: --sid backfills only that sid', () => {
+  const runsRoot = path.join(tmpDir, 'sid-runs');
+  const projectsDir = path.join(tmpDir, 'sid-projects');
+
+  const uuidA = 'uuid-sid-flag-a';
+  const workspaceA = path.join(runsRoot, 'sid-flag-a', 'workspace');
+  fs.mkdirSync(path.join(runsRoot, 'sid-flag-a'), { recursive: true });
+  fs.writeFileSync(path.join(runsRoot, 'sid-flag-a', 'meta.json'), JSON.stringify({ workspace: workspaceA }));
+  const projDirA = path.join(projectsDir, encodeProjectDir(workspaceA));
+  fs.mkdirSync(projDirA, { recursive: true });
+  fs.writeFileSync(path.join(projDirA, `${uuidA}.jsonl`), makeTranscript(uuidA, [
+    { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  ]));
+
+  const uuidB = 'uuid-sid-flag-b';
+  const workspaceB = path.join(runsRoot, 'sid-flag-b', 'workspace');
+  fs.mkdirSync(path.join(runsRoot, 'sid-flag-b'), { recursive: true });
+  fs.writeFileSync(path.join(runsRoot, 'sid-flag-b', 'meta.json'), JSON.stringify({ workspace: workspaceB }));
+  const projDirB = path.join(projectsDir, encodeProjectDir(workspaceB));
+  fs.mkdirSync(projDirB, { recursive: true });
+  fs.writeFileSync(path.join(projDirB, `${uuidB}.jsonl`), makeTranscript(uuidB, [
+    { input_tokens: 2, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  ]));
+
+  fs.writeFileSync(path.join(stateDir, 'session-map.jsonl'), [
+    { run_sid: 'sid-flag-a', claude_uuid: uuidA, agent: 'coder' },
+    { run_sid: 'sid-flag-b', claude_uuid: uuidB, agent: 'coder' },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+
+  const r = spawnSync('node', [BACKFILL_BIN, '--sid', 'sid-flag-a'], {
+    encoding: 'utf8',
+    env: { ...process.env, ADVISOR_STATE_DIR: stateDir, ADVISOR_RUNS_ROOT: runsRoot, ADVISOR_CLAUDE_PROJECTS_DIR: projectsDir },
+  });
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain('backfilled=1');
+
+  const rows = fs.readFileSync(path.join(stateDir, 'token-usage.jsonl'), 'utf8')
+    .trim().split('\n').map((l) => JSON.parse(l));
+  expect(rows.find((row) => row.sid === uuidA)).toBeDefined();
+  expect(rows.find((row) => row.sid === uuidB)).toBeUndefined();
 });
