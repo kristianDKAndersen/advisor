@@ -648,3 +648,168 @@ test('an unrecognized --agent name is not rejected by the CLI itself', async () 
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
 });
+
+// ── refusal-before-summon regression (audit-C row 4) ─────────────────────
+// A prior run of `bin/advisor-loop --bar-type prior-round --bar-ref $(mktemp)`
+// and the `--refine` equivalent spawned real coder workers (real git
+// worktree, real tmux pane) before any refusal fired: an empty file from
+// `mktemp` exists, so it passed validateBarFlags's existsSync check and then
+// resolveBar's case-1 branch accepted it unconditionally. These tests assert
+// that every refusal path (empty --bar-ref, metric, no-bar) is caught before
+// runLoopFn is ever invoked, and that a real artifact still reaches it.
+
+test('--bar-type prior-round --bar-ref <empty file> exits 6 and never calls runLoop', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const emptyRef = path.join(outputDir, 'empty-artifact.txt');
+  fs.writeFileSync(emptyRef, '');
+  let runLoopCalled = 0;
+  let stderrOutput = '';
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'prior-round', '--bar-ref', emptyRef,
+        '--repo-root', repoRoot, '--output-dir', outputDir],
+      {
+        runLoopFn: async () => { runLoopCalled++; },
+        stdout: { write: () => {} },
+        stderr: { write: (s) => { stderrOutput += s; } },
+      },
+    );
+    expect(code).toBe(6);
+    expect(runLoopCalled).toBe(0);
+    expect(stderrOutput).toContain('empty');
+    expect(fs.existsSync(path.join(outputDir, 'round_state.json'))).toBe(false);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('--refine --bar-ref <empty file> exits 6 and never calls runLoop', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const emptyRef = path.join(outputDir, 'empty-artifact.txt');
+  fs.writeFileSync(emptyRef, '');
+  let runLoopCalled = 0;
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--refine', '--bar-ref', emptyRef,
+        '--repo-root', repoRoot, '--output-dir', outputDir],
+      {
+        runLoopFn: async () => { runLoopCalled++; },
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+      },
+    );
+    expect(code).toBe(6);
+    expect(runLoopCalled).toBe(0);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('--bar-type metric never calls runLoop before its exit-6 refusal', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  let runLoopCalled = 0;
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--bar-type', 'metric', '--bar-ref', 'coverage >= 0.8',
+        '--repo-root', repoRoot, '--output-dir', outputDir],
+      {
+        runLoopFn: async () => { runLoopCalled++; },
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+      },
+    );
+    expect(code).toBe(6);
+    expect(runLoopCalled).toBe(0);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('no bar at all never calls runLoop before its exit-6 refusal', async () => {
+  let runLoopCalled = 0;
+  const code = await main(
+    ['--goal', 'do the thing'],
+    {
+      runLoopFn: async () => { runLoopCalled++; },
+      stdout: { write: () => {} },
+      stderr: { write: () => {} },
+    },
+  );
+  expect(code).toBe(6);
+  expect(runLoopCalled).toBe(0);
+});
+
+test('--refine --bar-ref <real non-empty artifact> DOES call runLoop exactly once', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const gateFile = path.join(outputDir, 'stub-gate.json');
+  fs.writeFileSync(gateFile, '{}');
+  const artifactPath = path.join(outputDir, 'real-artifact.txt');
+  fs.writeFileSync(artifactPath, 'a real artifact to refine\n');
+  let runLoopCalled = 0;
+  try {
+    const code = await main(
+      ['--goal', 'do the thing', '--refine', '--bar-ref', artifactPath,
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile],
+      {
+        runLoopFn: async () => { runLoopCalled++; },
+        stdout: { write: () => {} },
+        stderr: { write: () => {} },
+      },
+    );
+    expect(code).toBe(0);
+    expect(runLoopCalled).toBe(1);
+    const state = JSON.parse(fs.readFileSync(path.join(outputDir, 'round_state.json'), 'utf8'));
+    expect(state.bar).toEqual({ type: 'prior-round', ref: artifactPath });
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+// ── .advisor-loop/ excluded from the target repo's untracked files ───────
+
+test('a real run idempotently appends .advisor-loop/ to the repo git-common-dir info/exclude', async () => {
+  const repoRoot = makeTmpRepo();
+  const outputDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-out-'));
+  const gateFile = path.join(outputDir, 'stub-gate.json');
+  fs.writeFileSync(gateFile, '{}');
+  try {
+    await main(
+      ['--goal', 'do the thing', '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile],
+      { runLoopFn: async () => {}, stdout: { write: () => {} }, stderr: { write: () => {} } },
+    );
+    const excludePath = path.join(repoRoot, '.git', 'info', 'exclude');
+    const before = fs.readFileSync(excludePath, 'utf8');
+    expect(before.split('\n')).toContain('.advisor-loop/');
+
+    // Second run: idempotent, no duplicate line.
+    await main(
+      ['--goal', 'do the thing', '--bar-type', 'external-reference', '--bar-ref', '/tmp/ref.png',
+        '--repo-root', repoRoot, '--output-dir', outputDir, '--gate', gateFile],
+      { runLoopFn: async () => {}, stdout: { write: () => {} }, stderr: { write: () => {} } },
+    );
+    const after = fs.readFileSync(excludePath, 'utf8');
+    expect(after.split('\n').filter((l) => l.trim() === '.advisor-loop/').length).toBe(1);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('ensureAdvisorLoopExcluded fails open when git is unavailable', () => {
+  const { ensureAdvisorLoopExcluded } = require(CLI);
+  const notARepo = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'advisor-loop-not-a-repo-'));
+  try {
+    expect(() => ensureAdvisorLoopExcluded(notARepo)).not.toThrow();
+  } finally {
+    fs.rmSync(notARepo, { recursive: true, force: true });
+  }
+});
