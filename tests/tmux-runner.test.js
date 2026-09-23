@@ -725,7 +725,7 @@ test('spawnHeadless multiplex ensemble: pre-created pane, no new-window, send-ke
 
 // ── timeout → pane-died via display-message throw ────────────────────────────
 
-test('spawnHeadless multiplex: timeout with pane-died when display-message throws', async () => {
+test('spawnHeadless multiplex: timeout with pane-died when list-panes omits the pane', async () => {
   const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
   process.env.ADVISOR_TMUX_MULTIPLEX = '1';
 
@@ -742,7 +742,7 @@ test('spawnHeadless multiplex: timeout with pane-died when display-message throw
     const execFn = (cmd, args) => {
       if (cmd === 'tmux' && args[0] === 'new-window') return `${paneId}\n`;
       if (cmd === 'tmux' && args[0] === 'capture-pane') return 'content\n';
-      if (cmd === 'tmux' && args[0] === 'display-message') throw new Error('no such pane');
+      if (cmd === 'tmux' && args[0] === 'list-panes') return ''; // paneId not present → dead
       return '';
     };
 
