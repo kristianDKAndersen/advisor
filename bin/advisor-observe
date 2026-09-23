@@ -26,9 +26,43 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync, execFileSync } = require('child_process');
 const { Tail, append } = require(path.join(__dirname, '..', 'lib', 'channel.js'));
 const { loadTerminal } = require(path.join(__dirname, '..', 'lib', 'terminal-persist.js'));
+const { paneAlive } = require(path.join(__dirname, '..', 'lib', 'tmux-runner.js'));
+
+// Isolated-server test seam: ADVISOR_OBSERVE_TMUX_SOCKET routes every tmux call
+// through `-L <socket>` so tests never touch the real/default tmux server.
+function tmuxExec(cmd, args) {
+  const socket = process.env.ADVISOR_OBSERVE_TMUX_SOCKET;
+  const fullArgs = socket ? ['-L', socket, ...args] : args;
+  return execFileSync(cmd, fullArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
+// Reads runs/<sid>/runner.json written by lib/tmux-runner.js. Null if absent/malformed.
+function readRunnerRecord(sid) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(runsRoot(), sid, 'runner.json'), 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+// True only if BOTH the runner process and its backing pane/session are alive.
+function isRunnerAlive(info) {
+  if (!info || !info.pid) return false;
+  try {
+    process.kill(info.pid, 0);
+  } catch (_) {
+    return false;
+  }
+  if (info.mode === 'legacy' && info.tmux_session) {
+    try { tmuxExec('tmux', ['has-session', '-t', info.tmux_session]); return true; }
+    catch (_) { return false; }
+  }
+  if (info.pane_id) return paneAlive(tmuxExec, info.pane_id);
+  return true;
+}
 
 // Flags that never consume the following token (so `--verbose A B` keeps A as a sid).
 const BOOLEAN_FLAGS = new Set(['verbose']);
@@ -94,7 +128,7 @@ async function main() {
   const sids = args._;
   if (sids.length === 0) {
     process.stderr.write('Usage: advisor-observe <sid> [<sid>...] [--after <sid>:<seq>]... [--max-wait <secs>] [--poll <ms>] [--verbose] [--nudge-after <secs>] [--stall-exit <secs>]\n');
-    emitExit(2, null, 'error');
+    emitExit(2, null, 'usage');
   }
 
   const maxWaitMs = parseFloat(args['max-wait'] || '1800') * 1000;
@@ -114,7 +148,7 @@ async function main() {
       // Bare numeric form: only unambiguous with a single sid.
       if (sids.length !== 1) {
         process.stderr.write('advisor-observe: bare numeric --after requires exactly one sid; with multiple sids use the repeatable form --after <sid>:<seq>\n');
-        emitExit(2, null, 'error');
+        emitExit(2, null, 'usage');
       }
       cursors[sids[0]] = parseInt(a, 10) || 0;
     }
@@ -141,6 +175,7 @@ async function main() {
       lastHeartbeatAt: now,
       stalledEmitted: false,
       nudged: false,
+      busyEmitted: false,
       live: true,
     });
   }
@@ -174,6 +209,7 @@ async function main() {
         rec.lastActivityAt = Date.now();   // activity, even for filtered progress
         rec.stalledEmitted = false;
         rec.nudged = false;
+        rec.busyEmitted = false;
         if (m.type === 'progress' && !verbose) continue; // display-only filter
         emit(m, rec.sid);
         if (m.type === 'result') emitExit(exitCodeForMessage(m), rec.sid, reasonForMessage(m));
@@ -198,6 +234,7 @@ async function main() {
               rec.lastHeartbeatAt = Date.now();
               rec.stalledEmitted = false;
               rec.nudged = false;
+              rec.busyEmitted = false;
               const agoSecs = Math.round((Date.now() / 1000 - lastHb.ts));
               emit({ type: 'heartbeat', tool_count: lastHb.tool_count, last_active_secs: agoSecs }, rec.sid);
             }
@@ -222,12 +259,35 @@ async function main() {
       }
 
       // ── Hard stall-exit after --stall-exit seconds of true silence ─────────
+      // A silent worker isn't necessarily dead — it may be inside one long tool
+      // call (heartbeats fire only when a tool completes). When runner.json
+      // says the process and its pane/session are both still alive, emit
+      // 'busy' and keep waiting instead of exiting; only a genuinely dead
+      // runner or 3x the threshold of continuous silence forces an exit.
       if (stallExitMs > 0 && trueSilenceMs >= stallExitMs) {
-        if (!rec.stalledEmitted) {
-          emit({ type: 'stalled', silentMs: trueSilenceMs }, rec.sid);
-          rec.stalledEmitted = true;
+        const runnerInfo = readRunnerRecord(rec.sid);
+        if (runnerInfo && isRunnerAlive(runnerInfo)) {
+          if (trueSilenceMs >= stallExitMs * 3) {
+            if (!rec.stalledEmitted) {
+              emit({ type: 'stalled', silentMs: trueSilenceMs }, rec.sid);
+              rec.stalledEmitted = true;
+            }
+            emitExit(3, rec.sid, 'stalled');
+          }
+          if (!rec.busyEmitted) {
+            emit({ type: 'busy', silentMs: trueSilenceMs }, rec.sid);
+            rec.busyEmitted = true;
+          }
+        } else if (runnerInfo) {
+          emitExit(3, rec.sid, 'dead');
+        } else {
+          // No runner.json: keep today's behavior.
+          if (!rec.stalledEmitted) {
+            emit({ type: 'stalled', silentMs: trueSilenceMs }, rec.sid);
+            rec.stalledEmitted = true;
+          }
+          emitExit(3, rec.sid, 'stalled');
         }
-        emitExit(3, rec.sid, 'stalled');
       }
 
       // ── Post-terminate auto-close (per sid; must not exit the process) ──────
@@ -253,5 +313,5 @@ async function main() {
 
 main().catch(err => {
   process.stderr.write(`advisor-observe: ${err.message}\n`);
-  emitExit(2, null, 'error');
+  emitExit(2, null, 'internal');
 });

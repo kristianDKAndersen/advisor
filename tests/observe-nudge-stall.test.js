@@ -7,13 +7,37 @@
 // (4) live heartbeats suppress both the nudge and the stalled/stall-exit paths
 // (5) ADVISOR_RUNS_ROOT is honored instead of hardcoding $HOME
 
-const { test, expect } = require('bun:test');
+const { test, expect, afterAll } = require('bun:test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
+const crypto = require('crypto');
+const { spawn, spawnSync, execFileSync } = require('child_process');
 
 const OBS = path.resolve(__dirname, '..', 'bin', 'advisor-observe');
+
+// Isolated tmux server (-L socket unique to this process) — busy/dead detection
+// tests below must never touch the shared/default tmux server other sessions use.
+let tmuxAvailable = true;
+try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); } catch (_) { tmuxAvailable = false; }
+const OBS_SOCKET = `obstest-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+const tmuxIso = (...args) =>
+  execFileSync('tmux', ['-L', OBS_SOCKET, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+
+if (tmuxAvailable) {
+  tmuxIso('new-session', '-d', '-s', 'keeper');
+}
+
+afterAll(() => {
+  if (!tmuxAvailable) return;
+  try { execFileSync('tmux', ['-L', OBS_SOCKET, 'kill-server'], { stdio: 'ignore' }); } catch (_) {}
+});
+
+const tIso = tmuxAvailable ? test : test.skip;
+
+function writeRunnerRecord(root, sid, record) {
+  fs.writeFileSync(path.join(root, sid, 'runner.json'), JSON.stringify(record));
+}
 
 function setupSid(root, name) {
   const channelDir = path.join(root, name, 'channel');
@@ -134,6 +158,94 @@ test('no nudge and no stalled line while heartbeat.jsonl stays live', async () =
 }, 8000);
 
 // ── (5) ADVISOR_RUNS_ROOT honored ────────────────────────────────────────────
+
+// ── (6) runner.json alive -> busy, then exit 3 'stalled' only at 3x --stall-exit ──
+
+tIso('busy: alive runner+pane emits busy at 1x stall-exit and keeps waiting, exits 3 stalled at 3x', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-busy-'));
+  const sid = 'busy-' + Date.now();
+  const runsDir = path.join(home, '.advisor', 'runs');
+  setupSid(runsDir, sid);
+
+  const paneId = tmuxIso('new-window', '-d', '-t', 'keeper', '-P', '-F', '#{pane_id}').trim();
+  writeRunnerRecord(runsDir, sid, { pid: process.pid, mode: 'multiplex', pane_id: paneId, started_at: Date.now() });
+
+  const start = Date.now();
+  const r = spawnSync('node', [OBS, sid, '--nudge-after', '0', '--stall-exit', '1', '--max-wait', '6'], {
+    env: { ...process.env, HOME: home, ADVISOR_OBSERVE_TMUX_SOCKET: OBS_SOCKET }, encoding: 'utf8', timeout: 10000,
+  });
+  const elapsed = Date.now() - start;
+  try {
+    const lines = parseLines(r.stdout);
+    expect(lines.some(l => l.type === 'busy')).toBe(true);
+    expect(elapsed).toBeGreaterThan(2000); // must not exit at the 1x mark
+    expect(r.status).toBe(3);
+    const exitLine = lines.find(l => l.type === 'observe_exit');
+    expect(exitLine.reason).toBe('stalled');
+  } finally {
+    try { tmuxIso('kill-pane', '-t', paneId); } catch (_) {}
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}, 12000);
+
+tIso('dead: runner.json pane is gone exits 3 dead promptly (well before 3x --stall-exit)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-dead-'));
+  const sid = 'dead-' + Date.now();
+  const runsDir = path.join(home, '.advisor', 'runs');
+  setupSid(runsDir, sid);
+
+  const paneId = tmuxIso('new-window', '-d', '-t', 'keeper', '-P', '-F', '#{pane_id}').trim();
+  tmuxIso('kill-pane', '-t', paneId);
+  writeRunnerRecord(runsDir, sid, { pid: process.pid, mode: 'multiplex', pane_id: paneId, started_at: Date.now() });
+
+  const start = Date.now();
+  const r = spawnSync('node', [OBS, sid, '--nudge-after', '0', '--stall-exit', '1', '--max-wait', '6'], {
+    env: { ...process.env, HOME: home, ADVISOR_OBSERVE_TMUX_SOCKET: OBS_SOCKET }, encoding: 'utf8', timeout: 10000,
+  });
+  const elapsed = Date.now() - start;
+  try {
+    expect(r.status).toBe(3);
+    const lines = parseLines(r.stdout);
+    const exitLine = lines.find(l => l.type === 'observe_exit');
+    expect(exitLine.reason).toBe('dead');
+    expect(elapsed).toBeLessThan(2500); // must not wait for the 3x threshold (~3s)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}, 12000);
+
+// ── (7) N1: distinct observe_exit reasons for code 2 ─────────────────────────
+
+test("[N1] exit 2 reason is 'usage' for a zero-sid invocation", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-n1-usage1-'));
+  const r = spawnSync('node', [OBS], { env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 4000 });
+  try {
+    expect(r.status).toBe(2);
+    const lines = parseLines(r.stdout);
+    const exitLine = lines.find(l => l.type === 'observe_exit');
+    expect(exitLine.reason).toBe('usage');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("[N1] exit 2 reason is 'usage' for an ambiguous bare --after with 2+ sids", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-n1-usage2-'));
+  const runsDir = path.join(home, '.advisor', 'runs');
+  setupSid(runsDir, 'sidA');
+  setupSid(runsDir, 'sidB');
+  const r = spawnSync('node', [OBS, 'sidA', 'sidB', '--after', '5'], {
+    env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 4000,
+  });
+  try {
+    expect(r.status).toBe(2);
+    const lines = parseLines(r.stdout);
+    const exitLine = lines.find(l => l.type === 'observe_exit');
+    expect(exitLine.reason).toBe('usage');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test('ADVISOR_RUNS_ROOT is honored instead of hardcoding $HOME', () => {
   const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-runsroot-'));

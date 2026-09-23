@@ -71,6 +71,26 @@ if command -v tmux >/dev/null 2>&1; then
   fi
 fi
 
+# ── Runner-process reaping (runs/<sid>/runner.json) ───────────────────────────
+# Kill the tmux-runner.js process directly (not just its pane/window). Argv is
+# checked against the sid so a reused pid never gets SIGTERM'd by accident.
+runnerJson="$runDir/runner.json"
+if [[ -f "$runnerJson" ]]; then
+  RUNNER_PID=$(node -e '
+    try {
+      const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      if (m && m.pid) process.stdout.write(String(m.pid));
+    } catch (_) {}
+  ' "$runnerJson" 2>/dev/null)
+  if [[ -n "$RUNNER_PID" ]] && kill -0 "$RUNNER_PID" 2>/dev/null; then
+    RUNNER_ARGV=$(ps -p "$RUNNER_PID" -o args= 2>/dev/null)
+    if [[ "$RUNNER_ARGV" == *"tmux-runner.js --sid ${sid}"* ]]; then
+      _tab_trace runner-kill "$RUNNER_PID"
+      kill -TERM "$RUNNER_PID" 2>/dev/null || true
+    fi
+  fi
+fi
+
 # ── Apple Terminal (TUI) path ─────────────────────────────────────────────────
 ttyFile="$runDir/tty.txt"
 if [[ ! -f "$ttyFile" ]]; then _tab_trace no-match -; exit 0; fi
