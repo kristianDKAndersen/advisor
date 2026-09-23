@@ -54,7 +54,7 @@ bun lib/channel.js recv --file <outbox> --after <last_seq> --json
 
 - If all workers have delivered `result`: proceed to `/synth` for each result, then move to the next step.
 - If some workers are still outstanding: re-run ScheduleWakeup and end the turn.
-- Silence handling is now automatic: with the default `--nudge-after 300`/`--stall-exit 600`, observe sends the one "status?" `guidance` nudge itself at 5 minutes and exits 3 (reason `stalled`) at 10 minutes without terminating the worker. Treat exit 3 as the signal to decide `terminate`-vs-wait.
+- Silence handling is now automatic: with the default `--nudge-after 300`/`--stall-exit 600`, observe sends the one "status?" `guidance` nudge itself at 5 minutes. At 10 minutes it emits `busy` if the worker's runner and pane are alive (see `runs/<sid>/runner.json`) and keeps waiting, exiting 3 with reason `stalled` only at 30 minutes; if the pane or runner is gone it exits 3 with reason `dead` at once. It never terminates the worker. Treat exit 3 as the signal to decide `terminate`-vs-wait, and read the reason from the trailing `observe_exit` line, not from `$?`.
 
 Do not end the wakeup turn with another "in flight" message — either poll + proceed, or schedule the next wakeup.
 
