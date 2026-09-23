@@ -18,7 +18,12 @@
 // reuses .claude/hooks/stop-telemetry.js for the actual summing).
 //
 // Usage:
-//   advisor-cost-backfill [--dry-run]
+//   advisor-cost-backfill --all [--dry-run]
+//   advisor-cost-backfill --sid <run-sid> [--dry-run]
+//   advisor-cost-backfill --help
+//
+// A bare invocation (no --all, no --sid) is read-only: it prints usage and a
+// hint and makes no changes, so probing the tool never mutates state.
 //
 // Override state path with ADVISOR_STATE_DIR, runs root with
 // ADVISOR_RUNS_ROOT (both for testing; functionally identical in production).
@@ -49,8 +54,42 @@ function readMetaWorkspace(runSid) {
   }
 }
 
+function printUsage() {
+  process.stdout.write(`advisor-cost-backfill --all [--dry-run]
+advisor-cost-backfill --sid <run-sid> [--dry-run]
+
+Backfills token-usage.jsonl rows for worker sessions whose Stop hook never
+fired (see script header for root cause).
+
+Options:
+  --all         Backfill every mapped session
+  --sid <sid>   Backfill only this run-sid
+  --dry-run     Report what would be backfilled without writing
+  --help, -h    Show this message and exit
+
+A bare invocation (no --all, no --sid) prints this message and makes no
+changes; one of --all or --sid is required to actually write.
+`);
+}
+
 function main() {
-  const dryRun = process.argv.includes('--dry-run');
+  const argv = process.argv.slice(2);
+  if (argv.includes('--help') || argv.includes('-h')) {
+    printUsage();
+    process.exit(0);
+  }
+
+  const dryRun = argv.includes('--dry-run');
+  const all = argv.includes('--all');
+  const sidIdx = argv.indexOf('--sid');
+  const onlySid = sidIdx !== -1 ? argv[sidIdx + 1] : null;
+
+  if (!all && !onlySid) {
+    printUsage();
+    process.stdout.write('\nNo action taken — pass --all to backfill every session, or --sid <sid> to backfill one.\n');
+    process.exit(0);
+  }
+
   const sd = stateDir();
   const entries = readSessionMapEntries(sd);
   const already = alreadyRecordedUuids(sd);
@@ -65,6 +104,7 @@ function main() {
   let skippedNoTranscript = 0;
 
   for (const [claudeUuid, runSid] of byUuid) {
+    if (onlySid && runSid !== onlySid) continue;
     if (already.has(claudeUuid)) {
       skippedRecorded++;
       continue;

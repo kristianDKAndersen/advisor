@@ -102,6 +102,13 @@ function validateBarFlags(flags) {
     if (!fs.existsSync(resolvedRef)) {
       throw new UsageError(`--bar-ref path not found: ${barRef}`);
     }
+    // An empty file (e.g. from `mktemp`) exists but is not a real artifact to
+    // refine or compare against — treat it as no bar at all instead of
+    // letting resolveBar's case-1 branch accept it and spawn a real builder
+    // for nothing (audit-C row 4: this used to spawn a live worker first).
+    if (fs.statSync(resolvedRef).size === 0) {
+      throw new NoBarError(`--bar-ref path is empty, not a real artifact to refine/compare against: ${barRef}`);
+    }
     return { barType: 'prior-round', barRef: resolvedRef, refine: true };
   }
   if (barType && barRef === undefined) {
@@ -151,6 +158,33 @@ function headSha(repoRoot) {
   return childProcess.execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 }
 
+// Fail-open, idempotent: never throws, never blocks a real run. Resolves via
+// `git rev-parse --git-common-dir` so linked worktrees write to the shared
+// git dir (not a per-worktree one); running without git, or outside a repo,
+// is silently a no-op.
+function ensureAdvisorLoopExcluded(repoRoot) {
+  let gitCommonDir;
+  try {
+    gitCommonDir = childProcess.execFileSync(
+      'git', ['-C', repoRoot, 'rev-parse', '--git-common-dir'], { encoding: 'utf8' }
+    ).trim();
+  } catch (_) {
+    return;
+  }
+  try {
+    const resolved = path.isAbsolute(gitCommonDir) ? gitCommonDir : path.resolve(repoRoot, gitCommonDir);
+    const infoDir = path.join(resolved, 'info');
+    const excludePath = path.join(infoDir, 'exclude');
+    const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, 'utf8') : '';
+    if (existing.split('\n').some((l) => l.trim() === '.advisor-loop/')) return;
+    fs.mkdirSync(infoDir, { recursive: true });
+    const sep = existing.length && !existing.endsWith('\n') ? '\n' : '';
+    fs.appendFileSync(excludePath, `${sep}.advisor-loop/\n`);
+  } catch (_) {
+    // fail-open: never let exclude-file bookkeeping block a real run
+  }
+}
+
 // Returns the process exit code. Never calls process.exit itself, so it can
 // be driven directly in tests without spawning a subprocess.
 async function main(argv, options = {}) {
@@ -172,7 +206,7 @@ async function main(argv, options = {}) {
   try {
     barFlags = validateBarFlags(flags);
   } catch (e) {
-    if (!(e instanceof UsageError)) throw e;
+    if (!(e instanceof UsageError) && !(e instanceof NoBarError)) throw e;
     stderr.write(`[advisor-loop] error: ${e.message}\n`);
     return e.exitCode;
   }
@@ -268,6 +302,7 @@ async function main(argv, options = {}) {
     stderr.write('[advisor-loop] warning: no --task given; the builder will receive only --goal with no structured brief\n');
   }
 
+  ensureAdvisorLoopExcluded(repoRoot);
   const state = initRoundState(outputDir, stateFields);
   if (task) {
     state.task = task;
@@ -278,7 +313,7 @@ async function main(argv, options = {}) {
   return 0;
 }
 
-module.exports = { main, parseArgs, validateBarFlags, buildPlan, loadSpecTestCommand, USAGE };
+module.exports = { main, parseArgs, validateBarFlags, buildPlan, loadSpecTestCommand, ensureAdvisorLoopExcluded, USAGE };
 
 if (require.main === module) {
   main(process.argv.slice(2)).then((code) => process.exit(code)).catch((e) => {

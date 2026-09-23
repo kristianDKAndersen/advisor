@@ -6,18 +6,63 @@
 // Usage:
 //   bin/advisor-observe <sid> [<sid>...] [--after <sid>:<seq>]... [--after <seq>]
 //                             [--max-wait <secs>] [--poll <ms>] [--verbose]
+//                             [--nudge-after <secs>] [--stall-exit <secs>]
 //
 // SIDs are positional and variadic. --after is repeatable as <sid>:<seq>; a bare
 // numeric --after is legal ONLY with exactly one sid. Every stdout line carries a
 // `sid` field — the exit code alone cannot describe N workers.
+//
+// Every exit path also emits a final stdout line
+//   {"type":"observe_exit","code":N,"sid":<sid or null>,"reason":"..."}
+// so a piped consumer (e.g. `| jq -c .`) can recover the true outcome even
+// though the pipe's own exit status is jq's, not observe's.
 //   0 = result with non-blocked verdict   1 = result verdict:blocked or error
-//   2 = max-wait timeout or a usage error
+//   2 = max-wait timeout or a usage error 3 = --stall-exit total silence reached
+//
+// Heartbeats come only from tool hooks — a single long-running Bash call emits
+// none. "True silence" for the nudge/stall-exit/stalled checks is silence on
+// BOTH the outbox and heartbeat.jsonl, so a busy-but-quiet-on-outbox worker
+// (e.g. running a 2-minute test) is never mistaken for a stalled one.
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
-const { Tail } = require(path.join(__dirname, '..', 'lib', 'channel.js'));
+const { spawnSync, execFileSync } = require('child_process');
+const { Tail, append } = require(path.join(__dirname, '..', 'lib', 'channel.js'));
 const { loadTerminal } = require(path.join(__dirname, '..', 'lib', 'terminal-persist.js'));
+const { paneAlive } = require(path.join(__dirname, '..', 'lib', 'tmux-runner.js'));
+
+// Isolated-server test seam: ADVISOR_OBSERVE_TMUX_SOCKET routes every tmux call
+// through `-L <socket>` so tests never touch the real/default tmux server.
+function tmuxExec(cmd, args) {
+  const socket = process.env.ADVISOR_OBSERVE_TMUX_SOCKET;
+  const fullArgs = socket ? ['-L', socket, ...args] : args;
+  return execFileSync(cmd, fullArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
+// Reads runs/<sid>/runner.json written by lib/tmux-runner.js. Null if absent/malformed.
+function readRunnerRecord(sid) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(runsRoot(), sid, 'runner.json'), 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+// True only if BOTH the runner process and its backing pane/session are alive.
+function isRunnerAlive(info) {
+  if (!info || !info.pid) return false;
+  try {
+    process.kill(info.pid, 0);
+  } catch (_) {
+    return false;
+  }
+  if (info.mode === 'legacy' && info.tmux_session) {
+    try { tmuxExec('tmux', ['has-session', '-t', info.tmux_session]); return true; }
+    catch (_) { return false; }
+  }
+  if (info.pane_id) return paneAlive(tmuxExec, info.pane_id);
+  return true;
+}
 
 // Flags that never consume the following token (so `--verbose A B` keeps A as a sid).
 const BOOLEAN_FLAGS = new Set(['verbose']);
@@ -43,32 +88,54 @@ function parseArgs(argv) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Resolves the runs root the same way lib/channel.js's (unexported) runsRoot()
+// does: ADVISOR_RUNS_ROOT wins, else $HOME/.advisor/runs. Kept in sync manually
+// since channel.js does not export it.
+function runsRoot() {
+  if (process.env.ADVISOR_RUNS_ROOT) return process.env.ADVISOR_RUNS_ROOT;
+  return path.join(process.env.HOME || process.env.USERPROFILE, '.advisor', 'runs');
+}
+
 // Synchronous stdout write so multiple lines survive an immediate process.exit().
 function emit(obj, sid) { fs.writeSync(1, JSON.stringify({ ...obj, sid }) + '\n'); }
 
-function exitCodeForMessage(m) {
-  if (m.type === 'error') return 1;
+function reasonForMessage(m) {
+  if (m.type === 'error') return 'error';
   if (m.type === 'result') {
     const body = typeof m.body === 'string'
       ? (() => { try { return JSON.parse(m.body); } catch (_) { return {}; } })()
       : (m.body || {});
-    return body && body.verdict === 'blocked' ? 1 : 0;
+    return body && body.verdict === 'blocked' ? 'blocked' : 'result';
   }
-  return 0;
+  return 'result';
+}
+
+function exitCodeForReason(reason) {
+  return (reason === 'blocked' || reason === 'error') ? 1 : 0;
+}
+
+function exitCodeForMessage(m) { return exitCodeForReason(reasonForMessage(m)); }
+
+// Emits the pipe-safe observe_exit line, then exits. This is the ONLY place
+// the process should call process.exit() so every path stays covered.
+function emitExit(code, sid, reason) {
+  emit({ type: 'observe_exit', code, reason }, sid);
+  process.exit(code);
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sids = args._;
   if (sids.length === 0) {
-    process.stderr.write('Usage: advisor-observe <sid> [<sid>...] [--after <sid>:<seq>]... [--max-wait <secs>] [--poll <ms>] [--verbose]\n');
-    process.exit(2);
+    process.stderr.write('Usage: advisor-observe <sid> [<sid>...] [--after <sid>:<seq>]... [--max-wait <secs>] [--poll <ms>] [--verbose] [--nudge-after <secs>] [--stall-exit <secs>]\n');
+    emitExit(2, null, 'usage');
   }
 
-  const home = process.env.HOME || process.env.USERPROFILE;
   const maxWaitMs = parseFloat(args['max-wait'] || '1800') * 1000;
   const pollMs = parseInt(args.poll || '1000', 10);
   const verbose = !!args.verbose;
+  const nudgeAfterMs = parseFloat(args['nudge-after'] !== undefined ? args['nudge-after'] : '300') * 1000;
+  const stallExitMs = parseFloat(args['stall-exit'] !== undefined ? args['stall-exit'] : '600') * 1000;
 
   // ── Resolve per-sid cursors from repeatable --after ─────────────────────────
   const cursors = {};
@@ -81,7 +148,7 @@ async function main() {
       // Bare numeric form: only unambiguous with a single sid.
       if (sids.length !== 1) {
         process.stderr.write('advisor-observe: bare numeric --after requires exactly one sid; with multiple sids use the repeatable form --after <sid>:<seq>\n');
-        process.exit(2);
+        emitExit(2, null, 'usage');
       }
       cursors[sids[0]] = parseInt(a, 10) || 0;
     }
@@ -91,7 +158,7 @@ async function main() {
   const now = Date.now();
   const records = new Map();
   for (const sid of sids) {
-    const channelDir = path.join(home, '.advisor', 'runs', sid, 'channel');
+    const channelDir = path.join(runsRoot(), sid, 'channel');
     records.set(sid, {
       sid,
       channelDir,
@@ -105,7 +172,10 @@ async function main() {
       terminateSeenAt: null,
       lastEmittedToolCount: -1,
       lastActivityAt: now,
+      lastHeartbeatAt: now,
       stalledEmitted: false,
+      nudged: false,
+      busyEmitted: false,
       live: true,
     });
   }
@@ -113,17 +183,19 @@ async function main() {
   const liveRecords = () => [...records.values()].filter(r => r.live);
 
   // ── Terminal fast-path: emit ALL persisted hits, exit only if none stays live ─
-  const preHitCodes = [];
+  const preHits = [];
   for (const rec of records.values()) {
     const terminal = loadTerminal(rec.channelDir);
     if (terminal && terminal.seq > rec.cursor) {
       emit(terminal, rec.sid);
       rec.live = false;
-      preHitCodes.push(exitCodeForMessage(terminal));
+      preHits.push({ sid: rec.sid, code: exitCodeForMessage(terminal), reason: reasonForMessage(terminal) });
     }
   }
   if (liveRecords().length === 0) {
-    process.exit(preHitCodes.some(c => c !== 0) ? 1 : 0);
+    const nonZero = preHits.find(h => h.code !== 0);
+    if (nonZero) emitExit(1, nonZero.sid, nonZero.reason);
+    else emitExit(0, preHits.length === 1 ? preHits[0].sid : null, 'result');
   }
 
   const deadline = Date.now() + maxWaitMs;
@@ -136,10 +208,12 @@ async function main() {
         rec.cursor = Math.max(rec.cursor, m.seq);
         rec.lastActivityAt = Date.now();   // activity, even for filtered progress
         rec.stalledEmitted = false;
+        rec.nudged = false;
+        rec.busyEmitted = false;
         if (m.type === 'progress' && !verbose) continue; // display-only filter
         emit(m, rec.sid);
-        if (m.type === 'result') process.exit(exitCodeForMessage(m));
-        if (m.type === 'error') process.exit(1);
+        if (m.type === 'result') emitExit(exitCodeForMessage(m), rec.sid, reasonForMessage(m));
+        if (m.type === 'error') emitExit(1, rec.sid, 'error');
       }
 
       // ── Inbox terminate check (per sid) ────────────────────────────────────
@@ -157,6 +231,10 @@ async function main() {
             const lastHb = JSON.parse(hbLines[hbLines.length - 1]);
             if (lastHb.tool_count !== rec.lastEmittedToolCount) {
               rec.lastEmittedToolCount = lastHb.tool_count;
+              rec.lastHeartbeatAt = Date.now();
+              rec.stalledEmitted = false;
+              rec.nudged = false;
+              rec.busyEmitted = false;
               const agoSecs = Math.round((Date.now() / 1000 - lastHb.ts));
               emit({ type: 'heartbeat', tool_count: lastHb.tool_count, last_active_secs: agoSecs }, rec.sid);
             }
@@ -164,11 +242,52 @@ async function main() {
         }
       } catch (_) {} // absent or malformed heartbeat.jsonl = silent
 
+      // ── True silence: neither outbox activity NOR a heartbeat ───────────────
+      const trueSilenceMs = Date.now() - Math.max(rec.lastActivityAt, rec.lastHeartbeatAt);
+
       // ── Stall (per sid — chatty A must not suppress silent C) ───────────────
-      const silentMs = Date.now() - rec.lastActivityAt;
-      if (!rec.stalledEmitted && silentMs >= 60_000) {
-        emit({ type: 'stalled', silentMs }, rec.sid);
+      if (!rec.stalledEmitted && trueSilenceMs >= 60_000) {
+        emit({ type: 'stalled', silentMs: trueSilenceMs }, rec.sid);
         rec.stalledEmitted = true;
+      }
+
+      // ── One-time status nudge after --nudge-after seconds of true silence ──
+      if (nudgeAfterMs > 0 && !rec.nudged && trueSilenceMs >= nudgeAfterMs) {
+        append(rec.inboxPath, { type: 'guidance', body: 'status?', from: 'advisor-observe' });
+        emit({ type: 'nudged', silentMs: trueSilenceMs }, rec.sid);
+        rec.nudged = true;
+      }
+
+      // ── Hard stall-exit after --stall-exit seconds of true silence ─────────
+      // A silent worker isn't necessarily dead — it may be inside one long tool
+      // call (heartbeats fire only when a tool completes). When runner.json
+      // says the process and its pane/session are both still alive, emit
+      // 'busy' and keep waiting instead of exiting; only a genuinely dead
+      // runner or 3x the threshold of continuous silence forces an exit.
+      if (stallExitMs > 0 && trueSilenceMs >= stallExitMs) {
+        const runnerInfo = readRunnerRecord(rec.sid);
+        if (runnerInfo && isRunnerAlive(runnerInfo)) {
+          if (trueSilenceMs >= stallExitMs * 3) {
+            if (!rec.stalledEmitted) {
+              emit({ type: 'stalled', silentMs: trueSilenceMs }, rec.sid);
+              rec.stalledEmitted = true;
+            }
+            emitExit(3, rec.sid, 'stalled');
+          }
+          if (!rec.busyEmitted) {
+            emit({ type: 'busy', silentMs: trueSilenceMs }, rec.sid);
+            rec.busyEmitted = true;
+          }
+        } else if (runnerInfo) {
+          emitExit(3, rec.sid, 'dead');
+        } else {
+          // No runner.json: keep today's behavior.
+          if (!rec.stalledEmitted) {
+            emit({ type: 'stalled', silentMs: trueSilenceMs }, rec.sid);
+            rec.stalledEmitted = true;
+          }
+          emitExit(3, rec.sid, 'stalled');
+        }
       }
 
       // ── Post-terminate auto-close (per sid; must not exit the process) ──────
@@ -181,11 +300,11 @@ async function main() {
     }
 
     // All sids drained via auto-close (results/errors exit inline above).
-    if (liveRecords().length === 0) process.exit(0);
+    if (liveRecords().length === 0) emitExit(0, null, 'closed');
 
     if (Date.now() >= deadline) {
       process.stderr.write(`advisor-observe: timeout after ${args['max-wait'] || 1800}s waiting for result\n`);
-      process.exit(2);
+      emitExit(2, null, 'timeout');
     }
 
     await sleep(pollMs);
@@ -194,5 +313,5 @@ async function main() {
 
 main().catch(err => {
   process.stderr.write(`advisor-observe: ${err.message}\n`);
-  process.exit(2);
+  emitExit(2, null, 'internal');
 });

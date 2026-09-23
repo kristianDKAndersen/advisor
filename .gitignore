@@ -20,6 +20,11 @@ venv/
 #  to target repos; include here so this template repo is also covered)
 .advisor-output/
 
+# Loop run state written into a repo when bin/advisor-loop is invoked from it
+# (bin/advisor-loop → ensureAdvisorLoopExcluded() auto-adds this to target
+#  repos' info/exclude; include here so this template repo is also covered)
+.advisor-loop/
+
 # ── Vault data — never commit ─────────────────────────────────────────────
 # Each user builds their own vault as they use the advisor; only the code that
 # manages a vault belongs in this repo. The default root is ~/.advisor/vault,

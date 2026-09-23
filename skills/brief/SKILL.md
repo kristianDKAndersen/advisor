@@ -1,7 +1,7 @@
 ---
 name: brief
 description: Compose a validated bin/summon command for a worker agent with all 5 required fields: objective, output, tools, scope, and parallelism. Use when the Advisor needs to launch a new worker via bin/summon and wants to ensure the brief is complete before invocation.
-last_edited: 2026-04-29
+last_edited: 2026-09-23
 ---
 
 # Brief
@@ -46,6 +46,11 @@ bin/summon --agent <agent> \
 The `<agent>` value should be chosen based on the objective (e.g., `researcher`,
 `coder`, `creative`, `evaluator`). If the agent type is ambiguous, default to
 `researcher`.
+
+Optionally append `--tier <fact|comparison|deep_research|fixated>` to the emitted
+`bin/summon` command (passed straight through by `bin/brief`); the tier drives
+the worker's tool budget and tier-filtered skill injection. Omit it to leave any
+tier a prior summon set for the same `--sid` untouched.
 
 ## Usage example
 

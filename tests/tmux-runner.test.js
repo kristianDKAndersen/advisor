@@ -725,7 +725,7 @@ test('spawnHeadless multiplex ensemble: pre-created pane, no new-window, send-ke
 
 // ── timeout → pane-died via display-message throw ────────────────────────────
 
-test('spawnHeadless multiplex: timeout with pane-died when display-message throws', async () => {
+test('spawnHeadless multiplex: timeout with pane-died when list-panes omits the pane', async () => {
   const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
   process.env.ADVISOR_TMUX_MULTIPLEX = '1';
 
@@ -742,7 +742,7 @@ test('spawnHeadless multiplex: timeout with pane-died when display-message throw
     const execFn = (cmd, args) => {
       if (cmd === 'tmux' && args[0] === 'new-window') return `${paneId}\n`;
       if (cmd === 'tmux' && args[0] === 'capture-pane') return 'content\n';
-      if (cmd === 'tmux' && args[0] === 'display-message') throw new Error('no such pane');
+      if (cmd === 'tmux' && args[0] === 'list-panes') return ''; // paneId not present → dead
       return '';
     };
 
@@ -1217,6 +1217,150 @@ test('reaperSweepOrphanSessions: still kills a session older than the 2h grace f
   reaperSweepOrphanSessions({ runsDir, execFn, now: Date.now() });
   expect(killed).toContain(`advisor-${sid}`);
 });
+
+// ── runner.json lifecycle (W1 follow-up: busy-vs-dead worker detection) ─────
+
+test('spawnHeadless multiplex: writes runner.json before send-keys and removes it on happy-path exit', async () => {
+  const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
+  process.env.ADVISOR_TMUX_MULTIPLEX = '1';
+  try {
+    const launchScript = path.join(tmpDir, 'launch-rr.sh');
+    const promptFile = path.join(tmpDir, 'prompt-rr.txt');
+    const logFile = path.join(tmpDir, 'claude-rr.log');
+    const transcriptFile = path.join(tmpDir, 'transcript-rr.jsonl');
+    fs.mkdirSync(path.join(tmpDir, 'channel'), { recursive: true });
+    fs.writeFileSync(launchScript, '#!/bin/bash\n');
+    fs.writeFileSync(promptFile, 'Hello');
+    fs.writeFileSync(transcriptFile, JSON.stringify({
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Done!' }] },
+    }) + '\n');
+
+    const runnerJsonPath = path.join(tmpDir, 'runner.json');
+    const paneId = '%77';
+    let sawDuringRun = null;
+
+    const execFn = (cmd, args) => {
+      if (cmd === 'tmux' && args[0] === 'new-window') {
+        const shCmd = args[args.length - 1];
+        const m = shCmd.match(/CLAUDE_I_SENTINEL='([^']+)'/);
+        if (m) {
+          const sp = m[1];
+          fs.writeFileSync(sp + '.json', JSON.stringify({ transcript_path: transcriptFile }));
+          fs.writeFileSync(sp, '');
+        }
+        return `${paneId}\n`;
+      }
+      if (cmd === 'tmux' && args[0] === 'send-keys') {
+        sawDuringRun = fs.existsSync(runnerJsonPath)
+          ? JSON.parse(fs.readFileSync(runnerJsonPath, 'utf8'))
+          : null;
+      }
+      if (cmd === 'tmux' && args[0] === 'capture-pane') return 'content\n';
+      return '';
+    };
+
+    await spawnHeadless({ sid: 'rr12345-abc678', agent: 'test', launchScript, promptFile, logFile, timeoutMs: 5000, execFn });
+
+    expect(sawDuringRun).not.toBeNull();
+    expect(sawDuringRun.mode).toBe('multiplex');
+    expect(sawDuringRun.pane_id).toBe(paneId);
+    expect(typeof sawDuringRun.pid).toBe('number');
+    expect(typeof sawDuringRun.started_at).toBe('number');
+    expect(fs.existsSync(runnerJsonPath)).toBe(false);
+  } finally {
+    if (origMultiplex === undefined) delete process.env.ADVISOR_TMUX_MULTIPLEX;
+    else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
+  }
+});
+
+test('spawnHeadless legacy: writes runner.json with mode legacy + tmux_session, removes it on timeout exit', async () => {
+  const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
+  delete process.env.ADVISOR_TMUX_MULTIPLEX;
+  try {
+    const launchScript = path.join(tmpDir, 'launch-rr-leg.sh');
+    const promptFile = path.join(tmpDir, 'prompt-rr-leg.txt');
+    fs.mkdirSync(path.join(tmpDir, 'channel'), { recursive: true });
+    fs.writeFileSync(launchScript, '#!/bin/bash\n');
+    fs.writeFileSync(promptFile, 'Hello legacy');
+
+    const runnerJsonPath = path.join(tmpDir, 'runner.json');
+    let sawDuringRun = null;
+    const sid = 'rrleg123-abc678';
+
+    const execFn = (cmd, args) => {
+      if (cmd === 'tmux' && args[0] === 'new-session') return '';
+      if (cmd === 'tmux' && args[0] === 'has-session') {
+        sawDuringRun = fs.existsSync(runnerJsonPath)
+          ? JSON.parse(fs.readFileSync(runnerJsonPath, 'utf8'))
+          : sawDuringRun;
+        return ''; // session alive → stopReason will be 'timeout'
+      }
+      if (cmd === 'tmux' && args[0] === 'capture-pane') return 'content\n';
+      return '';
+    };
+
+    await expect(spawnHeadless({
+      sid, agent: 'test', launchScript, promptFile,
+      logFile: path.join(tmpDir, 'claude-rr-leg.log'), timeoutMs: 150, execFn,
+    })).rejects.toThrow();
+
+    expect(sawDuringRun).not.toBeNull();
+    expect(sawDuringRun.mode).toBe('legacy');
+    expect(sawDuringRun.tmux_session).toBe(makeTmuxName(sid, 'test'));
+    expect(fs.existsSync(runnerJsonPath)).toBe(false);
+  } finally {
+    if (origMultiplex === undefined) delete process.env.ADVISOR_TMUX_MULTIPLEX;
+    else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
+  }
+});
+
+test('spawnHeadless multiplex: timeout error reports ELAPSED time, not the configured timeoutMs', async () => {
+  const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;
+  process.env.ADVISOR_TMUX_MULTIPLEX = '1';
+  try {
+    const launchScript = path.join(tmpDir, 'launch-elapsed.sh');
+    const promptFile = path.join(tmpDir, 'prompt-elapsed.txt');
+    fs.mkdirSync(path.join(tmpDir, 'channel'), { recursive: true });
+    fs.writeFileSync(launchScript, '#!/bin/bash\n');
+    fs.writeFileSync(promptFile, 'Elapsed prompt');
+
+    const paneId = '%88';
+    // Pane is dead from the start: pollSentinel's checkAlive fires immediately,
+    // then again ~5s later (checkAliveIntervalMs default), returning false via
+    // the 2-consecutive-failure fast path — well before the configured 6000ms.
+    const execFn = (cmd, args) => {
+      if (cmd === 'tmux' && args[0] === 'new-window') return `${paneId}\n`;
+      if (cmd === 'tmux' && args[0] === 'capture-pane') return 'content\n';
+      if (cmd === 'tmux' && args[0] === 'list-panes') return '';
+      return '';
+    };
+
+    const configuredTimeoutMs = 6000;
+    const start = Date.now();
+    let caught = null;
+    try {
+      await spawnHeadless({
+        sid: 'elapsed1-abc678', agent: 'test', launchScript, promptFile,
+        logFile: path.join(tmpDir, 'log-elapsed.log'), timeoutMs: configuredTimeoutMs, execFn,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    const wallElapsed = Date.now() - start;
+
+    expect(caught).not.toBeNull();
+    expect(caught.message).toContain('pane-died');
+    expect(caught.message).not.toContain(`after ${configuredTimeoutMs}ms`);
+    const m = caught.message.match(/timed out after (\d+)ms/);
+    expect(m).not.toBeNull();
+    const reportedElapsed = parseInt(m[1], 10);
+    expect(reportedElapsed).toBeLessThan(configuredTimeoutMs - 500);
+    expect(Math.abs(reportedElapsed - wallElapsed)).toBeLessThan(1000);
+  } finally {
+    if (origMultiplex === undefined) delete process.env.ADVISOR_TMUX_MULTIPLEX;
+    else process.env.ADVISOR_TMUX_MULTIPLEX = origMultiplex;
+  }
+}, 10000);
 
 test('reaper advisor-window sweep: spares a matched window younger than 2h even with stale session.json', () => {
   const origMultiplex = process.env.ADVISOR_TMUX_MULTIPLEX;

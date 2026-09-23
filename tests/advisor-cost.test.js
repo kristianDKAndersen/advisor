@@ -339,3 +339,99 @@ describe('CLI: positional sid + --sid resolution (bug fix)', () => {
     expect(numbers).toContain('300');
   });
 });
+
+describe('CLI: live cost for an unaccrued sid (never synthesized)', () => {
+  const CLAUDE_UUID = 'dddd4444-dddd-4444-dddd-444444444444';
+  const RUN_SID = '1790000000-11ea00';
+  const NO_TRANSCRIPT_RUN_SID = '1790000001-a0a001';
+  const NO_TRANSCRIPT_UUID = 'eeee5555-eeee-5555-eeee-555555555555';
+
+  let stateDir, runsRoot, projectsDir, workspace, tokenUsagePath;
+
+  function makeTranscript(uuid, usages) {
+    return usages.map(u => JSON.stringify({ message: { role: 'assistant', usage: u } })).join('\n') + '\n';
+  }
+  function encodeProjectDir(p) { return p.replace(/[/.]/g, '-'); }
+
+  beforeAll(() => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'advisor-cost-live-test-'));
+    stateDir = path.join(tmpDir, 'state');
+    runsRoot = path.join(tmpDir, 'runs');
+    projectsDir = path.join(tmpDir, 'projects');
+    fs.mkdirSync(stateDir, { recursive: true });
+
+    workspace = path.join(runsRoot, RUN_SID, 'workspace');
+    fs.mkdirSync(path.join(runsRoot, RUN_SID), { recursive: true });
+    fs.writeFileSync(path.join(runsRoot, RUN_SID, 'meta.json'), JSON.stringify({ workspace }));
+    const projDir = path.join(projectsDir, encodeProjectDir(workspace));
+    fs.mkdirSync(projDir, { recursive: true });
+    fs.writeFileSync(path.join(projDir, `${CLAUDE_UUID}.jsonl`), makeTranscript(CLAUDE_UUID, [
+      { input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    ]));
+
+    // Mapped run_sid whose meta.json workspace exists but transcript file does not.
+    const noTxWorkspace = path.join(runsRoot, NO_TRANSCRIPT_RUN_SID, 'workspace');
+    fs.mkdirSync(path.join(runsRoot, NO_TRANSCRIPT_RUN_SID), { recursive: true });
+    fs.writeFileSync(path.join(runsRoot, NO_TRANSCRIPT_RUN_SID, 'meta.json'), JSON.stringify({ workspace: noTxWorkspace }));
+
+    fs.writeFileSync(path.join(stateDir, 'session-map.jsonl'), [
+      { run_sid: RUN_SID, claude_uuid: CLAUDE_UUID, agent: 'coder' },
+      { run_sid: NO_TRANSCRIPT_RUN_SID, claude_uuid: NO_TRANSCRIPT_UUID, agent: 'coder' },
+    ].map(e => JSON.stringify(e)).join('\n') + '\n');
+
+    // No token-usage.jsonl at all — both sids are unaccrued.
+    tokenUsagePath = path.join(stateDir, 'token-usage.jsonl');
+  });
+
+  afterAll(() => {
+    fs.rmSync(path.dirname(stateDir), { recursive: true, force: true });
+  });
+
+  function run(args) {
+    return spawnSync('bun', [BIN, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, ADVISOR_STATE_DIR: stateDir, ADVISOR_RUNS_ROOT: runsRoot, ADVISOR_CLAUDE_PROJECTS_DIR: projectsDir },
+      timeout: 15000,
+    });
+  }
+
+  test('computes cost live for an unaccrued sid and marks it not-yet-accrued', () => {
+    const before = fs.existsSync(tokenUsagePath) ? { size: fs.statSync(tokenUsagePath).size } : null;
+
+    const r = run(['--sid', RUN_SID]);
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(RUN_SID); // SID column shows the run sid, not the claude uuid
+    expect(r.stdout).toContain(CLAUDE_UUID); // uuid still noted, secondarily
+    expect(r.stdout).toMatch(/live, not yet accrued/);
+    expect(r.stdout).toContain(`advisor-cost-backfill --sid ${RUN_SID}`); // concrete sid in hint, not '<run-sid>'
+    expect(r.stdout).toContain('1,000'); // input tokens
+    expect(r.stdout).toContain('500');   // output tokens
+
+    const sidLine = r.stdout.split('\n').find(l => l.startsWith(RUN_SID));
+    expect(sidLine).toBeDefined();
+
+    const after = fs.existsSync(tokenUsagePath) ? { size: fs.statSync(tokenUsagePath).size } : null;
+    expect(after).toEqual(before); // advisor-cost never writes token-usage.jsonl
+  });
+
+  test('mtime of token-usage.jsonl (when present) is unchanged by a live lookup', () => {
+    fs.writeFileSync(tokenUsagePath, JSON.stringify({ sid: 'unrelated', total_used: 1 }) + '\n');
+    const before = fs.statSync(tokenUsagePath);
+
+    const r = run(['--sid', RUN_SID]);
+    expect(r.status).toBe(0);
+
+    const after = fs.statSync(tokenUsagePath);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+
+    fs.rmSync(tokenUsagePath);
+  });
+
+  test('prints an explicit no-telemetry message when the transcript file is missing', () => {
+    const r = run(['--sid', NO_TRANSCRIPT_RUN_SID]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/no telemetry found for/i);
+  });
+});
