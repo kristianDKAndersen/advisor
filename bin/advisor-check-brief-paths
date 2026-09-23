@@ -335,6 +335,7 @@ const checked = [];
 const invisible = [];
 const stale = [];
 const caseMismatches = [];
+const bareNotChecked = [];
 
 for (const tok of rawCandidates) {
   const relPath = toRepoRelative(tok, resolvedRoot);
@@ -346,10 +347,13 @@ for (const tok of rawCandidates) {
   let resolvedPath = relPath;
   let trackedAs = null;
   if (!tracked && !relPath.includes('/')) {
+    // A bare basename that matches a DIFFERENT tracked file must never satisfy
+    // the invisibility check for the literal cited token — that would silence
+    // the warning for an untracked new file with the same basename elsewhere.
+    // Report it separately instead of resolving tracked/resolvedPath.
     const basenameMatch = resolveBareBasename(resolvedRoot, relPath);
     if (basenameMatch) {
-      tracked = true;
-      resolvedPath = basenameMatch;
+      bareNotChecked.push({ path: relPath, resolvedTo: basenameMatch });
     }
   }
   if (!tracked && ignoreCase) {
@@ -409,7 +413,7 @@ const commitErrors = commits.filter((c) => c.status === 'error');
 const commitWarnings = commits.filter((c) => c.status === 'warning');
 
 if (json) {
-  console.log(JSON.stringify({ checked: checked.length, invisible, stale, caseMismatches, commits, skippedNotRepoRelative }));
+  console.log(JSON.stringify({ checked: checked.length, invisible, stale, caseMismatches, bareNotChecked, commits, skippedNotRepoRelative }));
 } else {
   let printedAny = false;
   if (skippedNotRepoRelative.length > 0) {
@@ -420,6 +424,10 @@ if (json) {
     console.error(`advisor-check-brief-paths: ${invisible.length} cited path(s) invisible to a worker worktree:`);
     for (const inv of invisible) console.error(`  - ${inv.path} (${inv.reason})`);
     printedAny = true;
+  }
+  if (bareNotChecked.length > 0) {
+    console.error(`advisor-check-brief-paths: ${bareNotChecked.length} bare filename(s) not checked (ambiguous with a different tracked file):`);
+    for (const b of bareNotChecked) console.error(`  - ${b.path} (matches tracked '${b.resolvedTo}' but cited without a directory — not verified as the same file)`);
   }
   if (caseMismatches.length > 0) {
     console.error(`advisor-check-brief-paths: ${caseMismatches.length} cited path(s) visible only under a different casing:`);

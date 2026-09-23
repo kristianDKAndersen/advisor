@@ -104,3 +104,27 @@ test('synthesize calls setWorkerVerdict for a STRING-body result', () => {
   expect(row).not.toBeNull();
   expect(row.worker_verdict).toBe('complete');
 }, TEST_TIMEOUT);
+
+// N4: a JSON-object body with neither summary nor verdict is not an envelope —
+// the block must not render (previously printed "SUMMARY: undefined").
+test('recv omits the Result envelope block for a non-envelope JSON-object body', () => {
+  const sid = `envstr-noenv-${Date.now()}`;
+  const dir = path.join(tmpRuns, sid, 'channel');
+  fs.mkdirSync(dir, { recursive: true });
+  const outboxPath = path.join(dir, 'outbox.jsonl');
+  const msg = {
+    seq: 1, type: 'result', from: 'coder', ts: Date.now() / 1000,
+    body: JSON.stringify({ foo: 'bar', baz: 1 }),
+  };
+  fs.writeFileSync(outboxPath, JSON.stringify(msg) + '\n');
+
+  const result = spawnSync('bun', [CHANNEL_JS, 'recv', '--file', outboxPath], {
+    encoding: 'utf8',
+    timeout: 25000,
+    env: { ...process.env, ADVISOR_RUNS_ROOT: tmpRuns },
+  });
+
+  expect(result.status).toBe(0);
+  expect(result.stdout).not.toContain('Result envelope received:');
+  expect(result.stdout).not.toContain('undefined');
+}, TEST_TIMEOUT);

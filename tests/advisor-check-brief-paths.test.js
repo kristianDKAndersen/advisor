@@ -269,4 +269,22 @@ describe('advisor-check-brief-paths', () => {
     const parsed = JSON.parse(result.stdout);
     expect(parsed.commits.length).toBe(0);
   });
+
+  test('W2: bare basename resolving to a different tracked file is not silently marked tracked', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adv-brief-paths-test-'));
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'review.md'), '# tracked review\n');
+    execFileSync('git', ['add', 'docs/review.md'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
+
+    const brief = 'Write your new findings to review.md at the repo root.';
+    const result = run(['--root', root, '--json'], brief);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.invisible.some((i) => i.path === 'review.md')).toBe(true);
+    expect(parsed.bareNotChecked.some((b) => b.path === 'review.md' && b.resolvedTo === 'docs/review.md')).toBe(true);
+    expect(parsed.stale.some((s) => s.path === 'docs/review.md')).toBe(false);
+  });
 });

@@ -64,6 +64,14 @@ beforeAll(() => {
     path.join(universalDir, 'SKILL.md'),
     '# Universal Skill — no tier restriction\n'
   );
+
+  // Skill with a list-valued (block-list) tier field
+  const multiDir = path.join(agentSkillsDir, 'multi-tier');
+  fs.mkdirSync(multiDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(multiDir, 'SKILL.md'),
+    '---\ntier:\n  - fact\n  - comparison\n---\n# Multi-tier skill\n'
+  );
 });
 
 afterAll(() => {
@@ -96,4 +104,19 @@ test('skill with no tier field is always injected regardless of session tier', (
   const meta = provisionOne({ agent: agentName, task: 'test', goal: 'test', cwd: ADVISOR_ROOT }, sid);
   const skillLink = path.join(meta.workspace, '.claude', 'skills', 'universal-skill');
   expect(fs.existsSync(skillLink)).toBe(true);
+});
+
+// N3: a list-valued (block-list) tier field must match via includes(), not ===.
+test('skill with a list-valued tier matches a session tier that is one of the list', () => {
+  const sid = prepareSession('comparison');
+  const meta = provisionOne({ agent: agentName, task: 'test', goal: 'test', cwd: ADVISOR_ROOT }, sid);
+  const skillLink = path.join(meta.workspace, '.claude', 'skills', 'multi-tier');
+  expect(fs.existsSync(skillLink)).toBe(true);
+});
+
+test('skill with a list-valued tier is NOT injected when session tier is absent from the list', () => {
+  const sid = prepareSession('fixated');
+  const meta = provisionOne({ agent: agentName, task: 'test', goal: 'test', cwd: ADVISOR_ROOT }, sid);
+  const skillLink = path.join(meta.workspace, '.claude', 'skills', 'multi-tier');
+  expect(fs.existsSync(skillLink)).toBe(false);
 });

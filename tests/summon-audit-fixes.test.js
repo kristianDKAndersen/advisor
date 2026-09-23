@@ -131,3 +131,12 @@ test('resolveIntelligence(-5) clamps to the 0 band instead of throwing', () => {
 test('resolveIntelligence("abc") still throws RangeError (non-numeric rejected)', () => {
   expect(() => resolveIntelligence('abc')).toThrow(RangeError);
 });
+
+// --- (5) N2: meta.json records the clamped intelligence, not the raw value --
+
+test('meta.json records the clamped intelligence (150 -> 100), not the raw out-of-range value', () => {
+  const { sid, r } = provision(['--intelligence', '150']);
+  if (r.status !== 0) throw new Error(`summon exited ${r.status}: ${r.stderr}`);
+  const meta = metaOf(sid);
+  expect(meta.intelligence).toBe(100);
+});
