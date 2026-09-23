@@ -13,7 +13,7 @@
 //     (currently `opus`), the working default.
 //
 // Coverage (asserts against the built launch.sh):
-//   T1  --intelligence 95  (95-100 band → claude-opus-4-8/max) → NO disable export
+//   T1  --intelligence 95  (95-100 band → claude-opus-5-5/max) → NO disable export
 //   T1b --model claude-fable-5                     → has CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1
 //   T2  --intelligence 50  (sonnet band)           → NO disable export
 //   T2b --model claude-sonnet-5                    → NO disable export
@@ -21,7 +21,7 @@
 //   T4  REGRESSION: no launch.sh, any tier, ever contains `--advisor`
 //
 // Note: 95 no longer maps to a fable band — adapter/intelligence-map.json routes
-// 95-100 to claude-opus-4-8/max. Only an explicit --model claude-fable-5 disables
+// 95-100 to claude-opus-5-5/max. Only an explicit --model claude-fable-5 disables
 // the advisor (see lib/summon.js's includes('fable') guard).
 
 import { test, expect, afterAll } from 'bun:test';
@@ -65,7 +65,7 @@ function provision(extraArgs) {
   return { meta, launchSh };
 }
 
-test('T1: --intelligence 95 (opus-4-8/max band) does NOT disable the advisor', () => {
+test('T1: --intelligence 95 (opus-5-5/max band) does NOT disable the advisor', () => {
   const { launchSh } = provision(['--intelligence', '95']);
   expect(launchSh).not.toContain(DISABLE);
 });

@@ -4,12 +4,12 @@
 # Usage (inline flags):
 #   bin/brief --agent <name> --task "<text>" --goal "<done>" \
 #             [--tools "Read,Write,Bash"] [--model <model>] \
-#             [--intelligence <0-100>] [--sid <id>]
+#             [--intelligence <0-100>] [--tier <fact|comparison|deep_research|fixated>] [--sid <id>]
 #
 # Usage (brief file):
 #   bin/brief --file brief.json
 #
-# brief.json: { agent, task, goal, tools?, model?, intelligence?, sid? }
+# brief.json: { agent, task, goal, tools?, model?, intelligence?, tier?, sid? }
 #
 # When a tools field is present, --allowedTools is appended to the bin/summon
 # invocation so the worker's claude session is restricted to that tool set.
@@ -25,6 +25,7 @@ GOAL=""
 TOOLS=""
 MODEL=""
 INTELLIGENCE=""
+TIER=""
 SID=""
 FILE=""
 
@@ -36,10 +37,11 @@ while [[ $# -gt 0 ]]; do
     --tools)         TOOLS="$2";        shift 2 ;;
     --model)         MODEL="$2";        shift 2 ;;
     --intelligence)  INTELLIGENCE="$2"; shift 2 ;;
+    --tier)          TIER="$2";         shift 2 ;;
     --sid)           SID="$2";          shift 2 ;;
     --file)          FILE="$2";         shift 2 ;;
     -h|--help)
-      echo "Usage: brief --agent <name> --task \"<text>\" --goal \"<done>\" [--tools \"T1,T2\"] [--model <m>] [--intelligence <0-100>] [--sid <id>]"
+      echo "Usage: brief --agent <name> --task \"<text>\" --goal \"<done>\" [--tools \"T1,T2\"] [--model <m>] [--intelligence <0-100>] [--tier <fact|comparison|deep_research|fixated>] [--sid <id>]"
       echo "       brief --file brief.json"
       exit 0
       ;;
@@ -63,6 +65,7 @@ try {
   [[ -z "$TOOLS" ]]        && TOOLS="$(_extract tools)"
   [[ -z "$MODEL" ]]        && MODEL="$(_extract model)"
   [[ -z "$INTELLIGENCE" ]] && INTELLIGENCE="$(_extract intelligence)"
+  [[ -z "$TIER" ]]         && TIER="$(_extract tier)"
   [[ -z "$SID" ]]          && SID="$(_extract sid)"
 fi
 
@@ -74,6 +77,7 @@ fi
 SUMMON_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
 [[ -n "$MODEL" ]]        && SUMMON_ARGS+=(--model        "$MODEL")
 [[ -n "$INTELLIGENCE" ]] && SUMMON_ARGS+=(--intelligence "$INTELLIGENCE")
+[[ -n "$TIER" ]]         && SUMMON_ARGS+=(--tier         "$TIER")
 [[ -n "$SID" ]]          && SUMMON_ARGS+=(--sid          "$SID")
 [[ -n "$TOOLS" ]]        && SUMMON_ARGS+=(--allowed-tools "$TOOLS")
 

@@ -33,7 +33,7 @@ Workers run in isolated, ephemeral workspaces. Durable output lands in `$OUTPUT_
 bin/
   _worktree-capture.sh  # capture-before-remove helper — snapshots a coder worktree's changed+untracked files into $OUTPUT_DIR before removal (sourced, internal)
   advisor-cost        # per-session cost report — reads ~/.advisor/state/token-usage.jsonl and prints token counts + estimated cost by session; --by-agent aggregates by agent name (requires session-map.jsonl)
-  advisor-cost-backfill  # backfill token-usage.jsonl rows for worker sessions whose Stop hook never fired and whose synthesize-time accrual predates or missed the fix (--dry-run)
+  advisor-cost-backfill  # backfill token-usage.jsonl rows for worker sessions whose Stop hook never fired and whose synthesize-time accrual predates or missed the fix; a bare invocation is read-only and prints usage - pass --all or --sid <sid> to write (also --dry-run, --help)
   advisor-list        # list all sessions under ~/.advisor/runs/ (--json, --repo, --agent)
   advisor-observe     # tail one process across N sids' outboxes (positional/variadic <sid>...); emits sid-tagged JSON per message; exits on the first result/error/timeout across the fleet (--after <sid>:<seq> repeatable, --max-wait, --poll, --verbose)
   advisor-schedule    # launch autonomous loops detached in a tmux window (--sid, --interval, --task, --once)

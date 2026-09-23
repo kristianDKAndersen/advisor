@@ -1,7 +1,7 @@
 // tests/summon-intelligence-map.test.js
 // Tests for adapter/intelligence-map.json band partition — intentional 7-band layout:
 // [0,29] haiku/low, [30,49] haiku/high, [50,69] sonnet-5/medium, [70,84] sonnet-5/high,
-// [85,89] opus-4-8/medium, [90,94] opus-4-8/high, [95,100] opus-4-8/max.
+// [85,89] opus-5-5/medium, [90,94] opus-5-5/high, [95,100] opus-5-5/max.
 
 import { test, expect } from 'bun:test';
 import { resolveIntelligence } from '../lib/summon.js';
@@ -61,49 +61,49 @@ test('score 84 resolves to sonnet high band (upper boundary)', () => {
 // Band 5: opus medium [85, 89]
 test('score 85 resolves to opus medium band (lower boundary)', () => {
   const r = resolveIntelligence(85);
-  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.model).toBe('claude-opus-5-5');
   expect(r.reasoning).toBe('medium');
 });
 
 test('score 89 resolves to opus medium band (upper boundary)', () => {
   const r = resolveIntelligence(89);
-  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.model).toBe('claude-opus-5-5');
   expect(r.reasoning).toBe('medium');
 });
 
 // Band 6: opus high [90, 94]
 test('score 90 resolves to opus high band (lower boundary)', () => {
   const r = resolveIntelligence(90);
-  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.model).toBe('claude-opus-5-5');
   expect(r.reasoning).toBe('high');
 });
 
 test('score 94 resolves to opus high band (upper boundary)', () => {
   const r = resolveIntelligence(94);
-  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.model).toBe('claude-opus-5-5');
   expect(r.reasoning).toBe('high');
 });
 
-// Band 7: opus-4-8 max [95, 100]
-test('score 95 resolves to opus-4-8 max band (lower boundary)', () => {
+// Band 7: opus-5-5 max [95, 100]
+test('score 95 resolves to opus-5-5 max band (lower boundary)', () => {
   const r = resolveIntelligence(95);
-  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.model).toBe('claude-opus-5-5');
   expect(r.reasoning).toBe('max');
 });
 
-test('score 100 resolves to opus-4-8 max band (upper boundary)', () => {
+test('score 100 resolves to opus-5-5 max band (upper boundary)', () => {
   const r = resolveIntelligence(100);
-  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.model).toBe('claude-opus-5-5');
   expect(r.reasoning).toBe('max');
 });
 
 // Model string must not contain literal quote characters
-test('top-band (opus-4-8) model string contains no single-quote characters', () => {
+test('top-band (opus-5-5) model string contains no single-quote characters', () => {
   const r = resolveIntelligence(95);
   expect(r.model).not.toContain("'");
 });
 
-test('top-band (opus-4-8) model string contains no double-quote characters', () => {
+test('top-band (opus-5-5) model string contains no double-quote characters', () => {
   const r = resolveIntelligence(95);
   expect(r.model).not.toContain('"');
 });
@@ -111,7 +111,7 @@ test('top-band (opus-4-8) model string contains no double-quote characters', () 
 // Validator: finite out-of-range scores clamp to the nearest bound instead of throwing
 test('score 101 clamps to the 100 band instead of throwing', () => {
   const r = resolveIntelligence(101);
-  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.model).toBe('claude-opus-5-5');
   expect(r.reasoning).toBe('max');
 });
 
