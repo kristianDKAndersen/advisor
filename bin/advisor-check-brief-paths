@@ -31,7 +31,7 @@
 //   worker worktree's history). Conservative by design — see the token
 //   regex and proximity window below.
 
-const { readFileSync, existsSync, realpathSync } = require('node:fs');
+const { readFileSync, existsSync, realpathSync, statSync } = require('node:fs');
 const { relative, join } = require('node:path');
 const { execFileSync } = require('node:child_process');
 
@@ -82,21 +82,83 @@ Flags:
 
 const KNOWN_EXT = /\.(md|mdx|js|mjs|cjs|ts|tsx|jsx|json|jsonl|yaml|yml|py|sh|bash|txt|html|htm|css|scss|rb|go|rs|java|c|cpp|h|hpp|toml|ini|cfg|lock|xml|sql|proto|graphql|vue|svelte)$/i;
 
-function extractPaths(text) {
-  const tokens = text.split(/\s+/);
+// Brief text is XML-ish (<objective>...</objective>), often with no whitespace
+// between a closing tag and the next word/path — strip tags before splitting
+// so neither side of the boundary is swallowed into a bogus candidate token.
+const TAG_RE = /<\/?[A-Za-z][A-Za-z0-9_:-]*\/?>/g;
+const LINE_SUFFIX_RE = /:\d+(-\d+)?$/;
+
+// A dirCache memoizes "does <root>/<segment> exist as a directory" lookups
+// across candidates in one run.
+function makeDirChecker(root) {
+  const cache = new Map();
+  return (segment) => {
+    if (cache.has(segment)) return cache.get(segment);
+    let isDir = false;
+    if (root) {
+      try {
+        isDir = statSync(join(root, segment)).isDirectory();
+      } catch {
+        isDir = false;
+      }
+    }
+    cache.set(segment, isDir);
+    return isDir;
+  };
+}
+
+// A line that names an absolute path outside the repo (or a $VAR/~ path)
+// puts any bare filename mentioned later on that same line in its context —
+// "evidence tables audit-A.md, audit-B.md ... in the same folder" cites
+// files colocated with the external path just named, not repo paths.
+const EXTERNAL_MARKER_RE = /(\$[A-Z_][A-Z0-9_]*\/|~\/|\/(?:Users|home)\/)/;
+
+function extractPaths(text, root) {
+  const stripped = text.replace(TAG_RE, ' ');
   const candidates = new Set();
-  for (const raw of tokens) {
-    let tok = raw.replace(/^[`'"([{<]+/, '').replace(/[`'")\]}>,.;:!?]+$/, '');
-    if (!tok) continue;
-    if (/^https?:\/\//i.test(tok) || tok.includes('://')) continue;
-    if (tok.startsWith('-')) continue;
-    if (/^\d+\/\d+$/.test(tok)) continue;
-    const hasSlash = tok.includes('/');
-    const hasKnownExt = KNOWN_EXT.test(tok);
-    if (!hasSlash && !hasKnownExt) continue;
-    candidates.add(tok);
+  const skippedNotRepoRelative = new Set();
+  const isKnownDir = makeDirChecker(root);
+  for (const line of stripped.split('\n')) {
+    const lineHasExternalMarker = EXTERNAL_MARKER_RE.test(line);
+    for (const raw of line.split(/\s+/)) {
+      let tok = raw.replace(/^[`'"([{<]+/, '').replace(/[`'")\]}>,.;:!?]+$/, '');
+      if (!tok) continue;
+      if (/^https?:\/\//i.test(tok) || tok.includes('://')) continue;
+      if (tok.startsWith('-')) continue;
+      if (/^\d+\/\d+$/.test(tok)) continue;
+      if (tok.includes('*') || tok.includes('?')) continue; // glob pattern quoted in prose, not a literal path
+      tok = tok.replace(LINE_SUFFIX_RE, '');
+      if (!tok) continue;
+      // $VAR/... and ~/... reference the caller's environment, not a
+      // repo-relative path — never checkable against the worktree.
+      if (tok.startsWith('$') || tok.startsWith('~/') || tok === '~') {
+        skippedNotRepoRelative.add(tok);
+        continue;
+      }
+      const hasSlash = tok.includes('/');
+      const hasKnownExt = KNOWN_EXT.test(tok);
+      if (!hasSlash && !hasKnownExt) continue;
+      if (hasSlash && !hasKnownExt) {
+        // Slash-joined bare words with no extension (Read/Grep/Glob,
+        // send/recv/tail) are prose enumerations, not paths, unless the
+        // first segment is an actual directory in the repo.
+        const firstSegment = tok.split('/')[0];
+        if (!isKnownDir(firstSegment)) continue;
+      }
+      if (/^\.\w{1,6}$/.test(tok)) continue; // stray extension fragment (".md"), not a filename
+      if (lineHasExternalMarker) {
+        // On a line naming an external ($VAR/~/absolute) path, a bare
+        // filename or a slash-path with no known repo directory prefix is
+        // colocated with that external path, not a repo-relative citation.
+        if (!hasSlash || !isKnownDir(tok.split('/')[0])) {
+          skippedNotRepoRelative.add(tok);
+          continue;
+        }
+      }
+      candidates.add(tok);
+    }
   }
-  return [...candidates];
+  return { candidates: [...candidates], skippedNotRepoRelative: [...skippedNotRepoRelative] };
 }
 
 function toRepoRelative(tok, resolvedRoot) {
@@ -164,6 +226,30 @@ function findTrackedCaseInsensitive(root, relPath) {
   } catch {
     return null;
   }
+}
+
+let lsFilesCache = null;
+function allTrackedFiles(root) {
+  if (lsFilesCache) return lsFilesCache;
+  try {
+    lsFilesCache = execFileSync('git', ['ls-files'], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString().split('\n').filter(Boolean);
+  } catch {
+    lsFilesCache = [];
+  }
+  return lsFilesCache;
+}
+
+// A bare filename cited without a directory (e.g. prose shorthand
+// "channel.js" for lib/channel.js) resolves to a tracked path only when
+// exactly one tracked file has that basename — an ambiguous or absent
+// basename is left unresolved and checked (and likely reported) as-is.
+function resolveBareBasename(root, tok) {
+  if (tok.includes('/')) return null;
+  const matches = allTrackedFiles(root).filter((f) => f.slice(f.lastIndexOf('/') + 1) === tok);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function isStale(root, relPath) {
@@ -241,7 +327,7 @@ if (file) {
 }
 
 const resolvedRoot = realpathSync(root);
-const rawCandidates = extractPaths(briefText);
+const { candidates: rawCandidates, skippedNotRepoRelative } = extractPaths(briefText, resolvedRoot);
 const ignoreCase = coreIgnoreCase(resolvedRoot);
 
 const seen = new Set();
@@ -259,6 +345,13 @@ for (const tok of rawCandidates) {
   let tracked = isTracked(resolvedRoot, relPath);
   let resolvedPath = relPath;
   let trackedAs = null;
+  if (!tracked && !relPath.includes('/')) {
+    const basenameMatch = resolveBareBasename(resolvedRoot, relPath);
+    if (basenameMatch) {
+      tracked = true;
+      resolvedPath = basenameMatch;
+    }
+  }
   if (!tracked && ignoreCase) {
     const actualTracked = findTrackedCaseInsensitive(resolvedRoot, relPath);
     if (actualTracked) {
@@ -316,9 +409,13 @@ const commitErrors = commits.filter((c) => c.status === 'error');
 const commitWarnings = commits.filter((c) => c.status === 'warning');
 
 if (json) {
-  console.log(JSON.stringify({ checked: checked.length, invisible, stale, caseMismatches, commits }));
+  console.log(JSON.stringify({ checked: checked.length, invisible, stale, caseMismatches, commits, skippedNotRepoRelative }));
 } else {
   let printedAny = false;
+  if (skippedNotRepoRelative.length > 0) {
+    console.error(`advisor-check-brief-paths: ${skippedNotRepoRelative.length} cited token(s) not checked (outside repo, e.g. $VAR/... or ~/...):`);
+    for (const s of skippedNotRepoRelative) console.error(`  - ${s}`);
+  }
   if (invisible.length > 0) {
     console.error(`advisor-check-brief-paths: ${invisible.length} cited path(s) invisible to a worker worktree:`);
     for (const inv of invisible) console.error(`  - ${inv.path} (${inv.reason})`);

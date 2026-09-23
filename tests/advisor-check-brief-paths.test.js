@@ -231,6 +231,32 @@ describe('advisor-check-brief-paths', () => {
     expect(result.stderr).toContain('CLAUDE.md');
   });
 
+  test('corpus false-hit regression: XML tags, prose slash-lists, $VAR/~ paths, and :LINE suffixes are not flagged', () => {
+    const root = makeRepo();
+    const brief = [
+      '<objective>Cut the false-positive rate</objective>',
+      '<tools>Read/Grep/Glob first.</tools>',
+      '<parallelism>Run all checks in parallel if possible.</parallelism>',
+      '<output_format>Write to $OUTPUT_DIR/audit-A.md and describes?</objective>',
+      'send/recv/tail message types. 5-minute/10-minute windows. write/rebuild/prune/delete.',
+      'See ~/.claude/skills/brief for reference, and bin/advisor-loop:85-91 for the real fix.',
+    ].join('\n');
+    const result = run(['--root', root, '--json'], brief);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.invisible.some((i) => /objective|tools|parallelism|output_format/.test(i.path))).toBe(false);
+    expect(parsed.invisible.some((i) => i.path === 'Read/Grep/Glob')).toBe(false);
+    expect(parsed.invisible.some((i) => i.path === 'send/recv/tail')).toBe(false);
+    expect(parsed.invisible.some((i) => i.path === '5-minute/10-minute')).toBe(false);
+    expect(parsed.invisible.some((i) => i.path === 'write/rebuild/prune/delete')).toBe(false);
+    expect(parsed.invisible.some((i) => i.path.includes('$OUTPUT_DIR'))).toBe(false);
+    expect(parsed.invisible.some((i) => i.path.includes('~/.claude'))).toBe(false);
+    // a genuinely missing repo path (with :LINE suffix stripped) must still be reported
+    const brief2 = 'The bug is at lib/does-not-exist.js:12-14.';
+    const result2 = run(['--root', root, '--json'], brief2);
+    const parsed2 = JSON.parse(result2.stdout);
+    expect(parsed2.invisible.some((i) => i.path === 'lib/does-not-exist.js')).toBe(true);
+  });
+
   test('check B precision: realistic brief with non-SHA hex tokens yields zero check-B findings', () => {
     const root = makeRepo();
     const brief = 'Please commit your changes once review is done. ' +
