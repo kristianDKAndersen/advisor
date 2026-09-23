@@ -346,6 +346,7 @@ for (const tok of rawCandidates) {
   let tracked = isTracked(resolvedRoot, relPath);
   let resolvedPath = relPath;
   let trackedAs = null;
+  let isInBareNotChecked = false;
   if (!tracked && !relPath.includes('/')) {
     // A bare basename that matches a DIFFERENT tracked file must never satisfy
     // the invisibility check for the literal cited token — that would silence
@@ -354,6 +355,7 @@ for (const tok of rawCandidates) {
     const basenameMatch = resolveBareBasename(resolvedRoot, relPath);
     if (basenameMatch) {
       bareNotChecked.push({ path: relPath, resolvedTo: basenameMatch });
+      isInBareNotChecked = true;
     }
   }
   if (!tracked && ignoreCase) {
@@ -368,7 +370,7 @@ for (const tok of rawCandidates) {
   const visible = tracked && !ignored;
   checked.push(relPath);
 
-  if (!visible) {
+  if (!visible && !isInBareNotChecked) {
     let reason;
     if (tracked && ignored) {
       reason = 'tracked but gitignored';

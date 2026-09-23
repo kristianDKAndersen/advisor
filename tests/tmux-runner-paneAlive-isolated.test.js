@@ -1,5 +1,6 @@
 import { test, expect, afterAll } from 'bun:test';
 import { execFileSync } from 'child_process';
+import { unlinkSync } from 'fs';
 import crypto from 'crypto';
 import { paneAlive, pollSentinel } from '../lib/tmux-runner.js';
 
@@ -12,14 +13,21 @@ const socket = `advtest-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
 const exec = (cmd, args) =>
   execFileSync(cmd, ['-L', socket, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
 
+let socketPath = null;
+
 if (tmuxAvailable) {
   // Keeper session keeps the isolated server alive while tests run.
   exec('tmux', ['new-session', '-d', '-s', 'keeper']);
+  // Capture socket path for cleanup
+  socketPath = exec('tmux', ['display-message', '-p', '#{socket_path}']).trim();
 }
 
 afterAll(() => {
   if (!tmuxAvailable) return;
   try { execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' }); } catch (_) {}
+  if (socketPath) {
+    try { unlinkSync(socketPath); } catch (_) {}
+  }
 });
 
 const t = tmuxAvailable ? test : test.skip;

@@ -283,8 +283,28 @@ describe('advisor-check-brief-paths', () => {
     const brief = 'Write your new findings to review.md at the repo root.';
     const result = run(['--root', root, '--json'], brief);
     const parsed = JSON.parse(result.stdout);
-    expect(parsed.invisible.some((i) => i.path === 'review.md')).toBe(true);
+    // review.md must appear in bareNotChecked (and nowhere else)
     expect(parsed.bareNotChecked.some((b) => b.path === 'review.md' && b.resolvedTo === 'docs/review.md')).toBe(true);
+    // review.md must NOT appear in invisible (deduplication)
+    expect(parsed.invisible.some((i) => i.path === 'review.md')).toBe(false);
     expect(parsed.stale.some((s) => s.path === 'docs/review.md')).toBe(false);
+  });
+
+  test('N2: truly missing bare filename (not matching any tracked file) is reported nonexistent', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adv-brief-paths-test-'));
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+    mkdirSync(join(root, 'lib'), { recursive: true });
+    writeFileSync(join(root, 'lib', 'channel.js'), '// channel\n');
+    execFileSync('git', ['add', 'lib/channel.js'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: root });
+
+    const brief = 'See the implementation in missing-file.js.';
+    const result = run(['--root', root, '--json'], brief);
+    const parsed = JSON.parse(result.stdout);
+    // missing-file.js has no match and doesn't exist, so it should be in invisible only
+    expect(parsed.invisible.some((i) => i.path === 'missing-file.js' && i.reason.includes('nonexistent'))).toBe(true);
+    expect(parsed.bareNotChecked.some((b) => b.path === 'missing-file.js')).toBe(false);
   });
 });
