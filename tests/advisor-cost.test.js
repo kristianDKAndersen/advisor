@@ -401,10 +401,15 @@ describe('CLI: live cost for an unaccrued sid (never synthesized)', () => {
     const r = run(['--sid', RUN_SID]);
 
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain(CLAUDE_UUID);
+    expect(r.stdout).toContain(RUN_SID); // SID column shows the run sid, not the claude uuid
+    expect(r.stdout).toContain(CLAUDE_UUID); // uuid still noted, secondarily
     expect(r.stdout).toMatch(/live, not yet accrued/);
+    expect(r.stdout).toContain(`advisor-cost-backfill --sid ${RUN_SID}`); // concrete sid in hint, not '<run-sid>'
     expect(r.stdout).toContain('1,000'); // input tokens
     expect(r.stdout).toContain('500');   // output tokens
+
+    const sidLine = r.stdout.split('\n').find(l => l.startsWith(RUN_SID));
+    expect(sidLine).toBeDefined();
 
     const after = fs.existsSync(tokenUsagePath) ? { size: fs.statSync(tokenUsagePath).size } : null;
     expect(after).toEqual(before); // advisor-cost never writes token-usage.jsonl

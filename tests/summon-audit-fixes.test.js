@@ -69,6 +69,12 @@ test('a later summon on the same sid with no --tier does not blank an existing t
   expect(sessionStateOf(sid).tier).toBe('comparison');
 });
 
+test('--tier fixated persists into session.json', () => {
+  const { sid, r } = provision(['--tier', 'fixated']);
+  if (r.status !== 0) throw new Error(`summon exited ${r.status}: ${r.stderr}`);
+  expect(sessionStateOf(sid).tier).toBe('fixated');
+});
+
 test('an invalid --tier value is rejected with a non-zero exit and a usage error', () => {
   const { r } = provision(['--tier', 'bogus']);
   expect(r.status).not.toBe(0);
