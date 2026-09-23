@@ -108,11 +108,20 @@ test('top-band (opus-4-8) model string contains no double-quote characters', () 
   expect(r.model).not.toContain('"');
 });
 
-// Validator: score > 100 throws RangeError
-test('score 101 throws RangeError', () => {
-  expect(() => resolveIntelligence(101)).toThrow(RangeError);
+// Validator: finite out-of-range scores clamp to the nearest bound instead of throwing
+test('score 101 clamps to the 100 band instead of throwing', () => {
+  const r = resolveIntelligence(101);
+  expect(r.model).toBe('claude-opus-4-8');
+  expect(r.reasoning).toBe('max');
 });
 
-test('score 101 throws with message mentioning [0,100]', () => {
-  expect(() => resolveIntelligence(101)).toThrow(/\[0,100\]/);
+test('score -1 clamps to the 0 band instead of throwing', () => {
+  const r0 = resolveIntelligence(0);
+  const r = resolveIntelligence(-1);
+  expect(r.model).toBe(r0.model);
+  expect(r.reasoning).toBe(r0.reasoning);
+});
+
+test('non-numeric score still throws RangeError mentioning [0,100]', () => {
+  expect(() => resolveIntelligence('abc')).toThrow(/\[0,100\]/);
 });
