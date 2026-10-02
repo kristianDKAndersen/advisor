@@ -10,6 +10,8 @@ const SID_RE = /^\d{10}-[0-9a-f]{6}$/
 
 const watches = atom({ plugin: 'fleet-waker', key: 'watches' }, {})
 const instanceIdAtom = atom({ plugin: 'fleet-waker', key: 'instanceId' }, '')
+const fleetSummaryAtom = atom({ plugin: 'fleet-waker', key: 'fleetSummary' }, [])
+const MAX_BAND_ROWS = 5
 
 // Module-level: reset on reload, unlike $.state/$.store (mirrors canary's pattern).
 let timer = null
@@ -33,6 +35,44 @@ function randomId() {
 }
 
 // ─── Pure functions (directly unit-testable, no `$`) ───────────────────────
+
+// Whether a watch's outbox needs a fs.read this tick: no prior stat or a
+// failed stat (caller passes null) always reads; otherwise only size/mtime
+// drift triggers a read.
+export function shouldRead(prev, stat) {
+  if (!stat) return true
+  if (!prev) return true
+  return stat.size !== prev.size || stat.mtimeMs !== prev.mtimeMs
+}
+
+// First 6 chars after the sid's dash (the hex suffix itself, for a real sid).
+export function shortSid(sid) {
+  const s = String(sid)
+  const i = s.indexOf('-')
+  return i >= 0 ? s.slice(i + 1, i + 7) : s.slice(0, 6)
+}
+
+// Minutes (then hours+minutes past 60) since a timestamp, e.g. "3m", "2h5m".
+export function formatAge(ms) {
+  const totalMin = Math.max(0, Math.floor(ms / 60000))
+  if (totalMin < 60) return totalMin + 'm'
+  return Math.floor(totalMin / 60) + 'h' + (totalMin % 60) + 'm'
+}
+
+// One line per worker (sid, agent, age, last event type, grace note), capped
+// at MAX_BAND_ROWS with a "+N more" summary row; [] for zero workers hides
+// the band entirely (the render hook returns the untouched base tree then).
+export function formatFleetLines(watchList, nowMs) {
+  const list = Array.isArray(watchList) ? watchList : []
+  const shown = list.slice(0, MAX_BAND_ROWS).map((w) => {
+    const bits = [shortSid(w.sid), w.agent, formatAge(nowMs - w.addedAt)]
+    if (w.lastEventType) bits.push(w.lastEventType)
+    if (w.pendingGrace) bits.push('waiting grace')
+    return bits.join(' ')
+  })
+  if (list.length > MAX_BAND_ROWS) shown.push('+' + (list.length - MAX_BAND_ROWS) + ' more')
+  return shown
+}
 
 // A worker's cwd is ~/.advisor/runs/<sid>/workspace or ~/.advisor/slots/<name>,
 // or the session has ADVISOR_SID set (set in every worker's env regardless of cwd).
@@ -379,6 +419,19 @@ async function syncState($, instanceId) {
   } catch (err) {
     safeLog($, 'status failed: ' + (err && err.message))
   }
+  const summary = Object.keys(map)
+    .sort((a, b) => map[a].addedAt - map[b].addedAt)
+    .map((sid) => {
+      const w = map[sid]
+      return {
+        sid: w.sid,
+        agent: w.agent,
+        addedAt: w.addedAt,
+        lastEventType: w.lastEventType,
+        pendingGrace: !!(w.pending && w.pending.length),
+      }
+    })
+  await update($, fleetSummaryAtom, () => summary)
   return map
 }
 
@@ -415,23 +468,47 @@ async function pollOnce($, instanceId, runsRoot) {
         safeLog($, 'refusing to read outbox outside runs root: ' + w.outbox)
         continue
       }
-      let content
+      let stat = null
       try {
-        content = await $.fs.read(w.outbox, { as: 'text' })
+        stat = await $.fs.stat(w.outbox)
       } catch (err) {
-        safeLog($, 'read failed for ' + w.outbox + ': ' + (err && err.message))
+        safeLog($, 'stat failed for ' + w.outbox + ': ' + (err && err.message))
+        stat = null
+      }
+      const pending = Array.isArray(w.pending) ? w.pending : []
+      let newEvents = []
+      if (shouldRead(w.lastStat, stat)) {
+        let content
+        try {
+          content = await $.fs.read(w.outbox, { as: 'text' })
+        } catch (err) {
+          safeLog($, 'read failed for ' + w.outbox + ': ' + (err && err.message))
+          content = null
+        }
+        if (content !== null) {
+          const parsed = parseOutboxLines(content, w.lastSeq)
+          newEvents = parsed.events
+          w.lastSeq = parsed.lastSeq
+          if (stat) w.lastStat = { size: stat.size, mtimeMs: stat.mtimeMs }
+        }
+      }
+      const toEvaluate = pending.concat(newEvents)
+      if (!toEvaluate.length) {
+        w.pending = []
+        await saveWatch($, instanceId, w)
         continue
       }
-      const { events, lastSeq } = parseOutboxLines(content, w.lastSeq)
-      w.lastSeq = lastSeq
-      await saveWatch($, instanceId, w)
-      if (!events.length) continue
 
       const synthesized = await readSynthesizedSeqs($, runsRoot, sid)
       let dropSid = false
-      for (const msg of events) {
+      const stillPending = []
+      for (const msg of toEvaluate) {
         const decision = evaluateTerminalEvent(msg, now, synthesized)
-        if (decision.action === 'wait') continue
+        if (decision.action === 'wait') {
+          stillPending.push(msg)
+          continue
+        }
+        w.lastEventType = msg.type
         if (decision.action === 'drop-silent') {
           dropSid = true
           continue
@@ -443,9 +520,12 @@ async function pollOnce($, instanceId, runsRoot) {
         wakes.push({ sid, agent: w.agent, outbox: w.outbox, msg })
         if (decision.terminal) dropSid = true
       }
+      w.pending = stillPending
       if (dropSid) {
         await dropWatchAndWoke($, instanceId, sid)
         delete map[sid]
+      } else {
+        await saveWatch($, instanceId, w)
       }
     }
     await syncState($, instanceId)
@@ -523,6 +603,26 @@ export function register(on) {
       safeLog($, 'classic.SessionStart hook failed: ' + (err && err.message))
     }
     return next(e)
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const base = await next(e)
+    try {
+      const summary = await read($, fleetSummaryAtom)
+      if (!summary || !summary.length) return base
+      const now = await $.clock.now()
+      const lines = formatFleetLines(summary, now)
+      if (!lines.length) return base
+      const ownBox = {
+        type: 'Box',
+        props: { flexDirection: 'column' },
+        children: lines.map((l) => ({ type: 'Text', props: {}, children: [l] })),
+      }
+      return { type: 'Box', props: { flexDirection: 'column' }, children: [base, ownBox] }
+    } catch (err) {
+      safeLog($, 'ui.render AbovePrompt failed: ' + (err && err.message))
+      return base
+    }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {

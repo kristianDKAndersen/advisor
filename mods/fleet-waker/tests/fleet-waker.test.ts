@@ -14,6 +14,10 @@ import {
   evaluateTerminalEvent,
   buildWakeText,
   discoverViaFsList,
+  shouldRead,
+  shortSid,
+  formatAge,
+  formatFleetLines,
   __simulateReload,
 } from '../hooks/register.js'
 
@@ -179,6 +183,31 @@ test('buildWakeText: names every sid/agent/type/seq/verdict/summary, truncates s
   expect(text).toContain('verdict=partial')
   expect(text).toContain('Synthesize per Step 7 before any other action.')
   expect(text).not.toContain('x'.repeat(201))
+})
+
+test('shouldRead: no prior stat or a failed stat (null) reads; unchanged size+mtime skips; either drifting reads', () => {
+  const stat = { kind: 'file', size: 10, mtimeMs: 500, isLink: false }
+  expect(shouldRead(null, stat)).toBe(true)
+  expect(shouldRead({ size: 10, mtimeMs: 500 }, stat)).toBe(false)
+  expect(shouldRead({ size: 11, mtimeMs: 500 }, stat)).toBe(true)
+  expect(shouldRead({ size: 10, mtimeMs: 501 }, stat)).toBe(true)
+  expect(shouldRead({ size: 10, mtimeMs: 500 }, null)).toBe(true)
+})
+
+test('shortSid/formatAge/formatFleetLines: band rows, 5-row cap with a "+N more" summary, grace note', () => {
+  expect(shortSid('1790932045-ed0c73')).toBe('ed0c73')
+  expect(formatAge(3 * 60000)).toBe('3m')
+  expect(formatAge(65 * 60000)).toBe('1h5m')
+
+  const w = (n: number, extra = {}) => ({ sid: `179000000${n}-abcdef`, agent: 'coder', addedAt: 0, ...extra })
+  expect(formatFleetLines([], 0)).toEqual([])
+  expect(formatFleetLines([w(1, { pendingGrace: true, lastEventType: 'result' })], 60000)).toEqual([
+    'abcdef coder 1m result waiting grace',
+  ])
+  const six = [0, 1, 2, 3, 4, 5].map((n) => w(n))
+  const lines = formatFleetLines(six, 0)
+  expect(lines.length).toBe(6)
+  expect(lines[5]).toBe('+1 more')
 })
 
 test('discoverViaFsList: strict-sid + epoch-window filtering, with a meta.json agent lookup, via a hand-rolled $ (no kit)', async () => {
@@ -497,4 +526,114 @@ test('instance id survives a reload: a fresh summon call afterward reuses the sa
   expect(key2).toBeDefined()
 
   expect((key2 as string).slice(0, (key2 as string).lastIndexOf(':'))).toBe((key1 as string).slice(0, (key1 as string).lastIndexOf(':')))
+})
+
+test('a grace-pending result wakes once grace elapses even though the outbox never changes (fs.stat skip path)', async ($, on) => {
+  const store = new Map()
+  wireCommon(on, store, '/Users/x/project')
+  on('ui.status', () => ({ value: undefined }))
+  const outbox = RUNS_ROOT + '/worker-1/channel/outbox.jsonl'
+  let readCalls = 0
+  on('fs.read', ($, e) => {
+    if (e.path !== outbox) return { value: '' }
+    readCalls++
+    return { value: '{"seq":1,"type":"result","body":{"summary":"done","verdict":"complete"},"ts":100}\n' }
+  })
+  on('fs.stat', () => ({ value: { kind: 'file', size: 42, mtimeMs: 42, isLink: false } }))
+  const clock = mock.clock(on, { now: 100000 })
+  on('tool.call', () => ({ result: { stdout: JSON.stringify({ sid: 'worker-1', agent: 'coder', outbox }) } }))
+  const submits: string[] = []
+  on('prompt.submit', ($, e) => {
+    submits.push(e.text)
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: '/Users/x/project' })
+  await $.tool.call({ tool: 'Bash', command: 'bin/summon --agent coder --task "x" --goal "y"' })
+
+  // First tick (now=105000): event ts=100s -> ageMs=5000, still fresh -> waits, goes to pending.
+  await clock.advance(5000)
+  expect(submits.length).toBe(0)
+  expect(readCalls).toBe(1)
+
+  // Second tick (now=110000): file unchanged (stat identical) -> fs.read skipped, but the
+  // pending event is re-evaluated from the watch record and is now grace-old -> wakes.
+  await clock.advance(5000)
+  expect(submits.length).toBe(0)
+  await clock.advance(25000)
+  expect(submits.length).toBe(1)
+  expect(submits[0]).toContain('sid=worker-1')
+  expect(readCalls).toBe(1)
+})
+
+// ─── AbovePrompt band ───────────────────────────────────────────────────
+
+const ABOVE_PROMPT = {
+  plugin: 'fleet-waker',
+  component: 'AbovePrompt',
+  requestId: 'band',
+  surface: 'terminal',
+  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+} as const
+
+function wireRender(on, otherModLine: string) {
+  on('ui.render', () => ({ type: 'Text', props: {}, children: [otherModLine] }))
+}
+
+test('AbovePrompt band: zero watches draws nothing of its own, other mods content passes through untouched', async ($, on) => {
+  const store = new Map()
+  wireCommon(on, store, '/Users/x/project')
+  on('ui.status', () => ({ value: undefined }))
+  mock.clock(on)
+  wireRender(on, 'other-mod-line')
+
+  await $.session.start({ cwd: '/Users/x/project' })
+  const drawn = await $.ui.render(ABOVE_PROMPT)
+  expect(drawn).toEqual({ type: 'Text', props: {}, children: ['other-mod-line'] })
+})
+
+test('AbovePrompt band: one watch renders its row alongside the preserved base tree', async ($, on) => {
+  const store = new Map()
+  wireCommon(on, store, '/Users/x/project')
+  on('ui.status', () => ({ value: undefined }))
+  on('fs.read', () => ({ value: '' }))
+  mock.clock(on)
+  on('tool.call', () => ({
+    result: { stdout: JSON.stringify({ sid: '1790000001-abcdef', agent: 'coder', outbox: RUNS_ROOT + '/w/channel/outbox.jsonl' }) },
+  }))
+  wireRender(on, 'other-mod-line')
+
+  await $.session.start({ cwd: '/Users/x/project' })
+  await $.tool.call({ tool: 'Bash', command: 'bin/summon --agent coder --task "x" --goal "y"' })
+
+  const drawn: any = await $.ui.render(ABOVE_PROMPT)
+  expect(drawn.type).toBe('Box')
+  expect(drawn.children[0]).toEqual({ type: 'Text', props: {}, children: ['other-mod-line'] })
+  const ownBox = drawn.children[1]
+  expect(ownBox.children.length).toBe(1)
+  expect(ownBox.children[0].children[0]).toContain('abcdef')
+})
+
+test('AbovePrompt band: six watches cap at 5 rows plus a "+1 more" row', async ($, on) => {
+  const store = new Map()
+  wireCommon(on, store, '/Users/x/project')
+  on('ui.status', () => ({ value: undefined }))
+  on('fs.read', () => ({ value: '' }))
+  mock.clock(on)
+  const sids = [0, 1, 2, 3, 4, 5].map((n) => `179000000${n}-abcdef`)
+  let call = 0
+  on('tool.call', () => ({
+    result: { stdout: JSON.stringify({ sid: sids[call++], agent: 'coder', outbox: RUNS_ROOT + '/w/channel/outbox.jsonl' }) },
+  }))
+  wireRender(on, 'other-mod-line')
+
+  await $.session.start({ cwd: '/Users/x/project' })
+  for (let i = 0; i < 6; i++) {
+    await $.tool.call({ tool: 'Bash', command: 'bin/summon --agent coder --task "x" --goal "y"' })
+  }
+
+  const drawn: any = await $.ui.render(ABOVE_PROMPT)
+  const ownBox = drawn.children[1]
+  expect(ownBox.children.length).toBe(6)
+  expect(ownBox.children[5].children[0]).toBe('+1 more')
 })
