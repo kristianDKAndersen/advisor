@@ -256,6 +256,105 @@ test('isInputReady: true for an empty "❯ " prompt row between two rule lines',
   expect(smoke.isInputReady(ready)).toBe(true);
 });
 
+test('isInputReady: true for a prompt row with placeholder text "❯ Try"', () => {
+  const ready = [
+    '────────────────────────────────────────',
+    '❯ Try "fix typecheck errors"',
+    '────────────────────────────────────────',
+    ' ⏸ manual mode on · ← for agents',
+  ].join('\n');
+  expect(smoke.isInputReady(ready)).toBe(true);
+});
+
+test('isInputReady: true for a prompt row with suggestion "❯ /ccchat"', () => {
+  const ready = [
+    '────────────────────────────────────────',
+    '❯ /ccchat',
+    '────────────────────────────────────────',
+    ' ⏸ manual mode on · ← for agents',
+  ].join('\n');
+  expect(smoke.isInputReady(ready)).toBe(true);
+});
+
+// --- isDialogOpen -------------------------------------------------------
+
+test('isDialogOpen: detects permission dialog with "Do you want to proceed?"', () => {
+  const permDialog = [
+    ' Some action requested.',
+    ' Do you want to proceed?',
+    ' 1. Yes',
+    ' 2. No',
+    ' 3. Cancel',
+    ' Esc to cancel',
+  ].join('\n');
+  expect(smoke.isDialogOpen(permDialog)).toBe(true);
+});
+
+test('isDialogOpen: detects selection dialog with "Esc to cancel" and numbered options', () => {
+  const selDialog = [
+    ' Choose an option:',
+    ' 1. Option A',
+    ' 2. Option B',
+    ' 3. Option C',
+    ' Esc to cancel',
+  ].join('\n');
+  expect(smoke.isDialogOpen(selDialog)).toBe(true);
+});
+
+test('isDialogOpen: detects trust dialog', () => {
+  expect(smoke.isDialogOpen(PANE_1_NO_SELECTED)).toBe(true);
+  expect(smoke.isDialogOpen(PANE_YES_SELECTED)).toBe(true);
+});
+
+test('isDialogOpen: false when no dialog is showing (ready prompt)', () => {
+  const ready = [
+    '────────────────────────────────────────',
+    '❯ ',
+    '────────────────────────────────────────',
+    ' ⏸ manual mode on · ← for agents',
+  ].join('\n');
+  expect(smoke.isDialogOpen(ready)).toBe(false);
+});
+
+test('isDialogOpen: false when text has "Esc to cancel" but no numbered options', () => {
+  const noOptions = [
+    ' Some message',
+    ' Esc to cancel',
+  ].join('\n');
+  expect(smoke.isDialogOpen(noOptions)).toBe(false);
+});
+
+// --- isBusy -------------------------------------------------------
+
+test('isBusy: false for idle pane with permanent ⏸ footer', () => {
+  const idle = [
+    '────────────────────────────────────────',
+    '❯ ',
+    '────────────────────────────────────────',
+    ' ⏸ manual mode on · ← for agents',
+  ].join('\n');
+  expect(smoke.isBusy(idle)).toBe(false);
+});
+
+test('isBusy: true for pane with active spinner including "Processing…"', () => {
+  const busy = [
+    ' processing input...',
+    ' · Processing… (5s · ↓ 230 tokens · thought for 1s)',
+    '',
+    ' ⏸ manual mode on · ← for agents',
+  ].join('\n');
+  expect(smoke.isBusy(busy)).toBe(true);
+});
+
+test('isBusy: false for pane with no busy patterns', () => {
+  const idle = [
+    ' Ready for input',
+    '────────────────────────────────────────',
+    '❯ ',
+  ].join('\n');
+  expect(smoke.isBusy(idle)).toBe(false);
+});
+
 // --- detectScrubLeak -------------------------------------------------------
 
 test('detectScrubLeak: returns empty array when none of the scrub vars are present', () => {

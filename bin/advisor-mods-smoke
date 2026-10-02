@@ -202,6 +202,27 @@ function pollUntil(fn, timeoutMs, intervalMs) {
   return null;
 }
 
+function waitForInputReady(sessionName, stepName, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pane = tmuxCapture(sessionName);
+    if (smoke.isDialogOpen(pane)) {
+      spawnSync('tmux', ['send-keys', '-t', sessionName, 'Escape']);
+      spawnSync('sleep', ['0.2']);
+      continue;
+    }
+    if (smoke.isBusy(pane)) {
+      spawnSync('sleep', ['0.5']);
+      continue;
+    }
+    if (smoke.isInputReady(pane)) {
+      return true;
+    }
+    spawnSync('sleep', ['0.5']);
+  }
+  return false;
+}
+
 function checkFleetWaker() {
   const t0 = Date.now();
   const sessionName = `mods-smoke-fw-${process.pid}`;
@@ -240,7 +261,7 @@ function checkFleetWaker() {
     env.PATH = `${binDir}:${process.env.PATH}`;
 
     const claudeArgs = ['--plugin-dir', path.join(REPO_ROOT, 'mods', 'fleet-waker'),
-      '--model', args.model, '--allowedTools', 'Bash'];
+      '--model', args.model, '--allowedTools', 'Bash,Read'];
     const paneCommand = smoke.buildPaneCommand(smoke.ENV_SCRUB_VARS, env, claudeArgs, paneEnvFile);
 
     const start = spawnSync('tmux', [
@@ -288,6 +309,11 @@ function checkFleetWaker() {
       return smoke.isInputReady(pane) ? pane : null;
     }, 30000 * args.timeoutScale, 500);
 
+    // Alpha prompt: dismiss any dialogs and wait for ready input
+    if (!waitForInputReady(sessionName, 'alpha', 30000 * args.timeoutScale)) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['session never became ready for alpha prompt']));
+    }
+
     const mainPrompt = `Run exactly this bash command once: ${summonPath} alpha ; then reply with just the word summoned and stop.`;
     spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', mainPrompt]);
     spawnSync('sleep', ['0.5']);
@@ -322,6 +348,11 @@ function checkFleetWaker() {
     const outboxPath = path.join(runsRoot, sid, 'channel', 'outbox.jsonl');
 
     // --- beta: summon a second worker and exercise the grace window -----
+    // Beta prompt: dismiss any dialogs and wait for ready input
+    if (!waitForInputReady(sessionName, 'beta', 30000 * args.timeoutScale)) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['session never became ready for beta prompt']));
+    }
+
     const betaSummonPrompt = `Run exactly this bash command once: ${summonPath} beta ; then reply with just the word summoned and stop.`;
     spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', betaSummonPrompt]);
     spawnSync('sleep', ['0.5']);
@@ -424,6 +455,11 @@ function checkFleetWaker() {
     spawnSync('tmux', ['send-keys', '-t', sessionName, 'Escape']);
 
     // --- gamma: summon a third worker, verify synthesis.log suppresses wake -----
+    // Gamma prompt: dismiss any dialogs and wait for ready input
+    if (!waitForInputReady(sessionName, 'gamma', 30000 * args.timeoutScale)) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['session never became ready for gamma prompt']));
+    }
+
     const gammaSummonPrompt = `Run exactly this bash command once: ${summonPath} gamma ; then reply with just the word summoned and stop.`;
     spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', gammaSummonPrompt]);
     spawnSync('sleep', ['0.5']);
