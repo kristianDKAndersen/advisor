@@ -2,5 +2,13 @@
   "name": "write-gate",
   "version": "0.1.0",
   "description": "Denies Write tool calls whose content exceeds 50KB, mechanizing the large-artifact patch rule",
-  "author": { "name": "Advisor" }
+  "author": { "name": "Advisor" },
+  "userConfig": {
+    "maxWriteBytes": {
+      "type": "number",
+      "title": "Max write bytes",
+      "default": 51200,
+      "description": "Max bytes a single Write call may contain before it is denied"
+    }
+  }
 }
