@@ -29,6 +29,13 @@ test('isWorkerSession: true under .advisor/runs/<sid>/workspace and .advisor/slo
   expect(isWorkerSession(undefined)).toBe(false)
 })
 
+test('isWorkerSession: ADVISOR_SID signal alone, cwd signal alone, neither', () => {
+  expect(isWorkerSession('/Users/x/projects/myrepo', '1790932045-ed0c73')).toBe(true)
+  expect(isWorkerSession('/Users/x/.advisor/runs/abc-123/workspace', undefined)).toBe(true)
+  expect(isWorkerSession('/Users/x/projects/myrepo', undefined)).toBe(false)
+  expect(isWorkerSession('/Users/x/projects/myrepo', '')).toBe(false)
+})
+
 test('isSummonCommand: matches a bin/summon invocation, excludes --help/-h', () => {
   expect(isSummonCommand('bin/summon --agent coder --task "x" --goal "y"')).toBe(true)
   expect(isSummonCommand('bin/summon --help')).toBe(false)
@@ -37,11 +44,16 @@ test('isSummonCommand: matches a bin/summon invocation, excludes --help/-h', () 
   expect(isSummonCommand(undefined)).toBe(false)
 })
 
-test('isUnderRunsRoot: caps reads to .advisor/runs/ paths, rejects traversal and other roots', () => {
-  expect(isUnderRunsRoot('/Users/x/.advisor/runs/sid1/channel/outbox.jsonl')).toBe(true)
-  expect(isUnderRunsRoot('/Users/x/.advisor/runs/sid1/../../etc/passwd')).toBe(false)
-  expect(isUnderRunsRoot('/tmp/outbox.jsonl')).toBe(false)
-  expect(isUnderRunsRoot(undefined)).toBe(false)
+test('isUnderRunsRoot: accepts a path under the given runsRoot, rejects traversal, sibling-prefix and foreign roots', () => {
+  const root = '/tmp/x/runs'
+  expect(isUnderRunsRoot('/tmp/x/runs/123-abc/channel/outbox.jsonl', root)).toBe(true)
+  expect(isUnderRunsRoot('/tmp/x/runs/123-abc/../../../etc/passwd', root)).toBe(false)
+  expect(isUnderRunsRoot('/tmp/x/runs-evil/123-abc/channel/outbox.jsonl', root)).toBe(false)
+  expect(isUnderRunsRoot('/tmp/outbox.jsonl', root)).toBe(false)
+  expect(isUnderRunsRoot('/tmp/x/runs/123-abc/channel/outbox.jsonl', '')).toBe(false)
+  expect(isUnderRunsRoot(undefined, root)).toBe(false)
+  const home = '/Users/x/.advisor/runs'
+  expect(isUnderRunsRoot(home + '/sid1/channel/outbox.jsonl', root)).toBe(false)
 })
 
 test('isStrictSidDir: accepts a real sid, rejects siblings and case aliases', () => {
@@ -374,6 +386,22 @@ test('two workers finishing (fixed, grace-old) in the same tick produce a single
   expect(submits.length).toBe(1)
   expect(submits[0]).toContain('sid=w1')
   expect(submits[0]).toContain('sid=w2')
+})
+
+test('boot with zero watches clears the status line with undefined, not an empty string', async ($, on) => {
+  const store = new Map()
+  wireCommon(on, store, '/Users/x/project')
+  const statusArgs: (string | undefined)[] = []
+  on('ui.status', ($, e) => {
+    statusArgs.push(e.text)
+    return { value: undefined }
+  })
+  mock.clock(on)
+
+  await $.session.start({ cwd: '/Users/x/project' })
+
+  expect(statusArgs.length).toBeGreaterThan(0)
+  expect(statusArgs[statusArgs.length - 1]).toBeUndefined()
 })
 
 test('a worker-cwd session registers no timer, status, or watch', async ($, on) => {

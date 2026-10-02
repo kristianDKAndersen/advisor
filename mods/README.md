@@ -60,12 +60,17 @@ open a session to check whether the hooks worker is still alive.
 ```bash
 bin/advisor-mods-health              # table, newest first
 bin/advisor-mods-health --json       # machine-readable
-bin/advisor-mods-health --all        # include ENDED records older than 1h
+bin/advisor-mods-health --all        # include ENDED records older than 1h, and GONE records
 bin/advisor-mods-health --stale-after 60   # override the 90s default
+bin/advisor-mods-health --max-age 3600     # override the 6h STALE->GONE threshold
 ```
 
 A record is `ENDED` once `session.end` ran, `OK` if the last beat is within
-`--stale-after` seconds (default 90 = three missed 30s beats), otherwise
-`STALE` — no heartbeat means mods unloaded, crashed, or the session was
-killed. Exit code is `3` when any record is `STALE` (`0` otherwise), so a
-statusline or script can key off it directly.
+`--stale-after` seconds (default 90 = three missed 30s beats), `STALE` if
+older than that — no heartbeat means mods unloaded, crashed, or the session
+was killed — and `GONE` once a `STALE` record's last beat passes `--max-age`
+(default 6h): a crashed/killed session that's been dead that long stops
+alarming until the canary mod prunes its stale keys. `GONE` records are
+hidden unless `--all` is passed and never affect the exit code. Exit code is
+`3` when any record is `STALE` (`0` otherwise), so a statusline or script can
+key off it directly.

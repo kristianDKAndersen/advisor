@@ -34,8 +34,10 @@ function randomId() {
 
 // ─── Pure functions (directly unit-testable, no `$`) ───────────────────────
 
-// A worker's cwd is ~/.advisor/runs/<sid>/workspace or ~/.advisor/slots/<name>.
-export function isWorkerSession(cwd) {
+// A worker's cwd is ~/.advisor/runs/<sid>/workspace or ~/.advisor/slots/<name>,
+// or the session has ADVISOR_SID set (set in every worker's env regardless of cwd).
+export function isWorkerSession(cwd, advisorSid) {
+  if (typeof advisorSid === 'string' && advisorSid) return true
   if (typeof cwd !== 'string') return false
   return /[\\/]\.advisor[\\/](runs[\\/][^\\/]+[\\/]workspace|slots[\\/][^\\/]+)([\\/]|$)/.test(cwd)
 }
@@ -48,12 +50,18 @@ export function isSummonCommand(command) {
   return true
 }
 
-// Caps: a watched outbox/log path must resolve under some .advisor/runs/
-// tree, with no `..` traversal segments, before fleet-waker will ever read it.
-export function isUnderRunsRoot(p) {
+// Caps: a watched outbox/log path must resolve under the resolved runs root
+// (ADVISOR_RUNS_ROOT, which need not contain the literal ".advisor/runs"
+// substring), with no `..` traversal segments and on a real segment boundary
+// (so a sibling dir like "runs-evil" next to "runs" is never mistaken for it).
+export function isUnderRunsRoot(p, runsRoot) {
   if (typeof p !== 'string' || !p) return false
+  if (typeof runsRoot !== 'string' || !runsRoot) return false
   if (p.split(/[\\/]/).includes('..')) return false
-  return /(^|[\\/])\.advisor[\\/]runs[\\/]/.test(p)
+  const normRoot = runsRoot.replace(/[\\/]+$/, '')
+  if (!normRoot) return false
+  const normPath = p.replace(/[\\/]+$/, '')
+  return normPath === normRoot || normPath.startsWith(normRoot + '/')
 }
 
 // Strict run-dir naming: <epochSeconds (10 digits)>-<6 lowercase hex>. Rejects
@@ -353,7 +361,7 @@ async function pruneStaleKeys($) {
 
 async function readSynthesizedSeqs($, runsRoot, sid) {
   const p = joinPath(runsRoot, sid, 'synthesis.log')
-  if (!isUnderRunsRoot(p)) return new Set()
+  if (!isUnderRunsRoot(p, runsRoot)) return new Set()
   try {
     const content = await $.fs.read(p, { as: 'text' })
     return parseSynthesisLog(content)
@@ -367,7 +375,7 @@ async function syncState($, instanceId) {
   await update($, watches, () => map)
   const n = Object.keys(map).length
   try {
-    $.ui.status(n > 0 ? 'fleet: ' + n + ' in flight' : '')
+    $.ui.status(n > 0 ? 'fleet: ' + n + ' in flight' : undefined)
   } catch (err) {
     safeLog($, 'status failed: ' + (err && err.message))
   }
@@ -403,7 +411,7 @@ async function pollOnce($, instanceId, runsRoot) {
         delete map[sid]
         continue
       }
-      if (!isUnderRunsRoot(w.outbox)) {
+      if (!isUnderRunsRoot(w.outbox, runsRoot)) {
         safeLog($, 'refusing to read outbox outside runs root: ' + w.outbox)
         continue
       }
@@ -466,7 +474,8 @@ function startTimer($, instanceId, runsRoot) {
 
 async function onBoot($, cwd) {
   try {
-    if (isWorkerSession(cwd)) return
+    const advisorSid = await $.env.get('ADVISOR_SID')
+    if (isWorkerSession(cwd, advisorSid)) return
     const instanceId = await resolveInstanceId($)
     const runsRoot = await resolveRunsRoot($)
     await pruneStaleKeys($)
@@ -521,7 +530,8 @@ export function register(on) {
     const result = await next(e)
     try {
       const cwd = await $.session.cwd()
-      if (isWorkerSession(cwd)) return result
+      const advisorSid = await $.env.get('ADVISOR_SID')
+      if (isWorkerSession(cwd, advisorSid)) return result
       if (!isSummonCommand(e && e.command)) return result
       const callEnd = Math.ceil((await $.clock.now()) / 1000)
       const instanceId = await resolveInstanceId($)

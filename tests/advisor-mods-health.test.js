@@ -153,6 +153,44 @@ test('T10: default table output includes session/status/age columns, newest firs
   expect(olderIdx).toBeGreaterThan(newerIdx);
 });
 
+test('T12: STALE record exactly at --max-age boundary (6h) stays STALE', () => {
+  const now = Date.now();
+  writeStore('canary_inline-iii.json', {
+    'hb:boundary-gone': { ts: now - 6 * 60 * 60 * 1000, startedAt: now - 7 * 60 * 60 * 1000, beats: 1, reloads: 0, registered: {}, cwd: '/x' },
+  });
+  const r = run(['--json', '--all']);
+  expect(r.status).toBe(3);
+  const parsed = JSON.parse(r.stdout);
+  expect(parsed[0].status).toBe('STALE');
+});
+
+test('T13: STALE record just past --max-age boundary (6h+1s) becomes GONE, hidden by default, shown with --all, exit 0', () => {
+  const now = Date.now();
+  writeStore('canary_inline-jjj.json', {
+    'hb:gone-one': { ts: now - (6 * 60 * 60 * 1000 + 1000), startedAt: now - 7 * 60 * 60 * 1000, beats: 1, reloads: 0, registered: {}, cwd: '/x' },
+  });
+  const r1 = run(['--json']);
+  expect(r1.status).toBe(0);
+  expect(JSON.parse(r1.stdout).length).toBe(0);
+
+  const r2 = run(['--json', '--all']);
+  expect(r2.status).toBe(0);
+  const parsed = JSON.parse(r2.stdout);
+  expect(parsed.length).toBe(1);
+  expect(parsed[0].status).toBe('GONE');
+});
+
+test('T14: --max-age override changes the GONE threshold', () => {
+  const now = Date.now();
+  writeStore('canary_inline-kkk.json', {
+    'hb:gone-custom': { ts: now - 200_000, startedAt: now - 300_000, beats: 1, reloads: 0, registered: {}, cwd: '/x' },
+  });
+  const r = run(['--json', '--all', '--max-age', '100']);
+  expect(r.status).toBe(0);
+  const parsed = JSON.parse(r.stdout);
+  expect(parsed[0].status).toBe('GONE');
+});
+
 test('T11: exit code 3 with a STALE record present in table mode too', () => {
   const now = Date.now();
   writeStore('canary_inline-hhh.json', {
