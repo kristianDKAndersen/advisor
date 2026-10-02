@@ -18,6 +18,7 @@ import {
   shortSid,
   formatAge,
   formatFleetLines,
+  watchChanged,
   __simulateReload,
 } from '../hooks/register.js'
 
@@ -208,6 +209,16 @@ test('shortSid/formatAge/formatFleetLines: band rows, 5-row cap with a "+N more"
   const lines = formatFleetLines(six, 0)
   expect(lines.length).toBe(6)
   expect(lines[5]).toBe('+1 more')
+})
+
+test('watchChanged: true on lastSeq/lastStat/pending/lastEventType drift, false when all are identical', () => {
+  const base = { lastSeq: 3, lastStat: { size: 10, mtimeMs: 10 }, pending: [], lastEventType: 'progress' }
+  expect(watchChanged(base, { ...base })).toBe(false)
+  expect(watchChanged(base, { ...base, lastSeq: 4 })).toBe(true)
+  expect(watchChanged(base, { ...base, lastStat: { size: 11, mtimeMs: 10 } })).toBe(true)
+  expect(watchChanged(base, { ...base, pending: [{ seq: 1 }] })).toBe(true)
+  expect(watchChanged(base, { ...base, lastEventType: 'result' })).toBe(true)
+  expect(watchChanged(undefined, undefined)).toBe(false)
 })
 
 test('discoverViaFsList: strict-sid + epoch-window filtering, with a meta.json agent lookup, via a hand-rolled $ (no kit)', async () => {
@@ -566,6 +577,44 @@ test('a grace-pending result wakes once grace elapses even though the outbox nev
   expect(readCalls).toBe(1)
 })
 
+test('write-avoidance: an unchanged poll tick performs zero $.store.set calls; a changed tick performs exactly one', async ($, on) => {
+  let setCalls = 0
+  const realStore = new Map()
+  const store = {
+    get: (k: string) => realStore.get(k),
+    set: (k: string, v: unknown) => {
+      setCalls++
+      realStore.set(k, v)
+    },
+    delete: (k: string) => realStore.delete(k),
+    keys: () => realStore.keys(),
+  }
+  wireCommon(on, store, '/Users/x/project')
+  on('ui.status', () => ({ value: undefined }))
+  const outbox = RUNS_ROOT + '/worker-1/channel/outbox.jsonl'
+  let content = '{"seq":1,"type":"progress","body":"starting"}\n'
+  on('fs.read', ($, e) => (e.path === outbox ? { value: content } : { value: '' }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: content.length, mtimeMs: content.length, isLink: false } }))
+  const clock = mock.clock(on)
+  on('tool.call', () => ({ result: { stdout: JSON.stringify({ sid: 'worker-1', agent: 'coder', outbox }) } }))
+
+  await $.session.start({ cwd: '/Users/x/project' })
+  await $.tool.call({ tool: 'Bash', command: 'bin/summon --agent coder --task "x" --goal "y"' })
+
+  // First tick: reads the progress line, lastSeq advances 0 -> 1 - a real change.
+  await clock.advance(5000)
+  setCalls = 0
+
+  // Second tick: stat identical -> fs.read skipped -> nothing mutated -> no write.
+  await clock.advance(5000)
+  expect(setCalls).toBe(0)
+
+  // A new progress line lands -> stat drifts -> lastSeq advances again -> exactly one write.
+  content += '{"seq":2,"type":"progress","body":"more"}\n'
+  await clock.advance(5000)
+  expect(setCalls).toBe(1)
+})
+
 // ─── AbovePrompt band ───────────────────────────────────────────────────
 
 const ABOVE_PROMPT = {
@@ -636,4 +685,55 @@ test('AbovePrompt band: six watches cap at 5 rows plus a "+1 more" row', async (
   const ownBox = drawn.children[1]
   expect(ownBox.children.length).toBe(6)
   expect(ownBox.children[5].children[0]).toBe('+1 more')
+})
+
+test('ageMin: no summary write before the minute boundary, exactly one write with ageMin 1 and "1m" at/after it', async ($, on) => {
+  const store = new Map()
+  wireCommon(on, store, '/Users/x/project')
+  on('ui.status', () => ({ value: undefined }))
+  on('fs.read', () => ({ value: '' }))
+  let summaryWrites = 0
+  on('state.set', ($, e, next) => {
+    if (e.key === 'fleetSummary') summaryWrites++
+    return next(e)
+  })
+  const outbox = RUNS_ROOT + '/worker-1/channel/outbox.jsonl'
+  on('tool.call', () => ({ result: { stdout: JSON.stringify({ sid: '1790000001-abcdef', agent: 'coder', outbox }) } }))
+  wireRender(on, 'other-mod-line')
+  const clock = mock.clock(on)
+
+  await $.session.start({ cwd: '/Users/x/project' })
+  await $.tool.call({ tool: 'Bash', command: 'bin/summon --agent coder --task "x" --goal "y"' })
+  summaryWrites = 0
+
+  await clock.advance(55000) // 11 ticks @5s -> now=55000, ageMin still 0
+  let drawn: any = await $.ui.render(ABOVE_PROMPT)
+  expect(drawn.children[1].children[0].children[0]).toContain(' 0m')
+  expect(summaryWrites).toBe(0)
+
+  await clock.advance(5000) // now=60000 -> ageMin crosses to 1
+  expect(summaryWrites).toBe(1)
+  drawn = await $.ui.render(ABOVE_PROMPT)
+  expect(drawn.children[1].children[0].children[0]).toContain(' 1m')
+
+  await clock.advance(5000) // now=65000 -> still ageMin 1, no further write
+  expect(summaryWrites).toBe(1)
+})
+
+test('lastEventType: a progress line (not just terminal/question) is reflected in the band', async ($, on) => {
+  const store = new Map()
+  wireCommon(on, store, '/Users/x/project')
+  on('ui.status', () => ({ value: undefined }))
+  const outbox = RUNS_ROOT + '/worker-1/channel/outbox.jsonl'
+  on('fs.read', ($, e) => (e.path === outbox ? { value: '{"seq":1,"type":"progress","body":"working"}\n' } : { value: '' }))
+  on('tool.call', () => ({ result: { stdout: JSON.stringify({ sid: '1790000002-abcdef', agent: 'coder', outbox }) } }))
+  wireRender(on, 'other-mod-line')
+  const clock = mock.clock(on)
+
+  await $.session.start({ cwd: '/Users/x/project' })
+  await $.tool.call({ tool: 'Bash', command: 'bin/summon --agent coder --task "x" --goal "y"' })
+  await clock.advance(5000)
+
+  const drawn: any = await $.ui.render(ABOVE_PROMPT)
+  expect(drawn.children[1].children[0].children[0]).toContain('progress')
 })

@@ -45,6 +45,19 @@ export function shouldRead(prev, stat) {
   return stat.size !== prev.size || stat.mtimeMs !== prev.mtimeMs
 }
 
+// Whether a tick actually changed anything persistence-worthy on a watch:
+// compares the fields a tick can mutate (lastSeq/lastStat/pending/lastEventType).
+// `before` may be a plain snapshot object; `after` the live (mutated) watch.
+export function watchChanged(before, after) {
+  const b = before || {}
+  const a = after || {}
+  if (b.lastSeq !== a.lastSeq) return true
+  if (b.lastEventType !== a.lastEventType) return true
+  if (JSON.stringify(b.lastStat || null) !== JSON.stringify(a.lastStat || null)) return true
+  if (JSON.stringify(b.pending || []) !== JSON.stringify(a.pending || [])) return true
+  return false
+}
+
 // First 6 chars after the sid's dash (the hex suffix itself, for a real sid).
 export function shortSid(sid) {
   const s = String(sid)
@@ -65,7 +78,8 @@ export function formatAge(ms) {
 export function formatFleetLines(watchList, nowMs) {
   const list = Array.isArray(watchList) ? watchList : []
   const shown = list.slice(0, MAX_BAND_ROWS).map((w) => {
-    const bits = [shortSid(w.sid), w.agent, formatAge(nowMs - w.addedAt)]
+    const ageMs = typeof w.ageMin === 'number' ? w.ageMin * 60000 : nowMs - w.addedAt
+    const bits = [shortSid(w.sid), w.agent, formatAge(ageMs)]
     if (w.lastEventType) bits.push(w.lastEventType)
     if (w.pendingGrace) bits.push('waiting grace')
     return bits.join(' ')
@@ -217,6 +231,7 @@ export function parseEnvelope(body) {
 export function parseOutboxLines(content, lastSeq) {
   const events = []
   let maxSeq = lastSeq
+  let lastType
   for (const rawLine of String(content || '').split('\n')) {
     const line = rawLine.trim()
     if (!line) continue
@@ -227,13 +242,16 @@ export function parseOutboxLines(content, lastSeq) {
       continue
     }
     if (!msg || typeof msg !== 'object' || typeof msg.seq !== 'number') continue
-    if (msg.seq > maxSeq) maxSeq = msg.seq
+    if (msg.seq > maxSeq) {
+      maxSeq = msg.seq
+      lastType = msg.type
+    }
     if (msg.seq <= lastSeq) continue
     if (msg.type === 'result' || msg.type === 'error' || msg.type === 'question') {
       events.push(msg)
     }
   }
-  return { events, lastSeq: maxSeq }
+  return { events, lastSeq: maxSeq, lastType }
 }
 
 // Same decoding as lib/channel.js's readSynthesisRecords: one JSON record
@@ -410,15 +428,18 @@ async function readSynthesizedSeqs($, runsRoot, sid) {
   }
 }
 
-async function syncState($, instanceId) {
+// Reset on reload (mirrors `timer`/`moduleInstanceId`): worst case is one
+// redundant status/summary write right after a reload, never a stale skip.
+let lastSyncKey = null
+
+// `allowSkip` scopes the write-avoidance to pollOnce's repetitive 5s ticks
+// (spec item 2) - onBoot/addWatchesFromSummon (rare, state-changing events)
+// always refresh status/summary unconditionally.
+async function syncState($, instanceId, allowSkip) {
   const map = await loadWatches($, instanceId)
   await update($, watches, () => map)
   const n = Object.keys(map).length
-  try {
-    $.ui.status(n > 0 ? 'fleet: ' + n + ' in flight' : undefined)
-  } catch (err) {
-    safeLog($, 'status failed: ' + (err && err.message))
-  }
+  const now = await $.clock.now()
   const summary = Object.keys(map)
     .sort((a, b) => map[a].addedAt - map[b].addedAt)
     .map((sid) => {
@@ -427,11 +448,21 @@ async function syncState($, instanceId) {
         sid: w.sid,
         agent: w.agent,
         addedAt: w.addedAt,
+        ageMin: Math.floor((now - w.addedAt) / 60000),
         lastEventType: w.lastEventType,
         pendingGrace: !!(w.pending && w.pending.length),
       }
     })
-  await update($, fleetSummaryAtom, () => summary)
+  const key = JSON.stringify({ n, summary })
+  if (!allowSkip || key !== lastSyncKey) {
+    lastSyncKey = key
+    try {
+      $.ui.status(n > 0 ? 'fleet: ' + n + ' in flight' : undefined)
+    } catch (err) {
+      safeLog($, 'status failed: ' + (err && err.message))
+    }
+    await update($, fleetSummaryAtom, () => summary)
+  }
   return map
 }
 
@@ -468,6 +499,7 @@ async function pollOnce($, instanceId, runsRoot) {
         safeLog($, 'refusing to read outbox outside runs root: ' + w.outbox)
         continue
       }
+      const before = { lastSeq: w.lastSeq, lastStat: w.lastStat, pending: w.pending, lastEventType: w.lastEventType }
       let stat = null
       try {
         stat = await $.fs.stat(w.outbox)
@@ -489,13 +521,14 @@ async function pollOnce($, instanceId, runsRoot) {
           const parsed = parseOutboxLines(content, w.lastSeq)
           newEvents = parsed.events
           w.lastSeq = parsed.lastSeq
+          if (parsed.lastType) w.lastEventType = parsed.lastType
           if (stat) w.lastStat = { size: stat.size, mtimeMs: stat.mtimeMs }
         }
       }
       const toEvaluate = pending.concat(newEvents)
       if (!toEvaluate.length) {
         w.pending = []
-        await saveWatch($, instanceId, w)
+        if (watchChanged(before, w)) await saveWatch($, instanceId, w)
         continue
       }
 
@@ -524,11 +557,11 @@ async function pollOnce($, instanceId, runsRoot) {
       if (dropSid) {
         await dropWatchAndWoke($, instanceId, sid)
         delete map[sid]
-      } else {
+      } else if (watchChanged(before, w)) {
         await saveWatch($, instanceId, w)
       }
     }
-    await syncState($, instanceId)
+    await syncState($, instanceId, true)
     if (wakes.length) {
       const text = buildWakeText(wakes)
       // Not awaited (submit resolves once a new turn starts, which must not
@@ -584,6 +617,7 @@ export function __simulateReload() {
   }
   moduleInstanceId = null
   moduleRunsRoot = null
+  lastSyncKey = null
 }
 
 export function register(on) {
