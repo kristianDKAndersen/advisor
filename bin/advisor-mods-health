@@ -1,0 +1,213 @@
+#!/usr/bin/env node
+// advisor-mods-health — classify mod-layer canary heartbeats as OK / ENDED / STALE
+//
+// Reads ~/.claude/plugins/store/canary_*.json (one file per plugin provenance,
+// each holding `hb:<sessionId>` records written by mods/canary). Read-only:
+// never writes or deletes store files.
+//
+// Usage:
+//   advisor-mods-health                      # default table
+//   advisor-mods-health --json               # machine-readable
+//   advisor-mods-health --all                # include ENDED records older than 1h
+//   advisor-mods-health --stale-after <secs>  # override the 90s default
+//   advisor-mods-health --store-dir <path>   # override the store directory
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const DEFAULT_STORE_DIR = path.join(os.homedir(), '.claude', 'plugins', 'store');
+const DEFAULT_STALE_AFTER_SECS = 90;
+const HIDE_ENDED_AFTER_MS = 60 * 60 * 1000;
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--help' || a === '-h') {
+      out.help = true;
+    } else if (a.startsWith('--')) {
+      const k = a.slice(2);
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        out[k] = next;
+        i++;
+      } else {
+        out[k] = true;
+      }
+    }
+  }
+  return out;
+}
+
+function usage() {
+  return `advisor-mods-health — classify mod-layer canary heartbeats as OK / ENDED / STALE
+
+Usage:
+  advisor-mods-health                      # default table
+  advisor-mods-health --json               # machine-readable
+  advisor-mods-health --all                # include ENDED records older than 1h
+  advisor-mods-health --stale-after <secs>  # override the 90s default
+  advisor-mods-health --store-dir <path>   # override the store directory
+
+Exit codes:
+  0  no STALE records (or no canary heartbeats found)
+  3  at least one STALE record
+  2  usage error
+`;
+}
+
+function humanAge(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
+}
+
+function shortenHome(p) {
+  const home = os.homedir();
+  if (typeof p === 'string' && home && p.startsWith(home)) {
+    return '~' + p.slice(home.length);
+  }
+  return p;
+}
+
+function classify(hb, now, staleAfterSecs) {
+  const ageMs = now - hb.ts;
+  const ageSecs = Math.floor(ageMs / 1000);
+  let status;
+  if (hb.endedAt !== undefined) {
+    status = 'ENDED';
+  } else if (ageSecs <= staleAfterSecs) {
+    status = 'OK';
+  } else {
+    status = 'STALE';
+  }
+  return { status, ageMs };
+}
+
+function readCanaryFiles(storeDir) {
+  let names;
+  try {
+    names = fs.readdirSync(storeDir);
+  } catch {
+    return null;
+  }
+  return names.filter((n) => n.startsWith('canary_') && n.endsWith('.json'));
+}
+
+function loadRecords(storeDir, files, now, staleAfterSecs) {
+  const records = [];
+  for (const file of files) {
+    const full = path.join(storeDir, file);
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(full, 'utf8'));
+    } catch (err) {
+      process.stderr.write(`advisor-mods-health: skipping corrupt store file ${full}: ${err.message}\n`);
+      continue;
+    }
+    for (const [key, hb] of Object.entries(data || {})) {
+      if (!key.startsWith('hb:') || !hb || typeof hb.ts !== 'number') continue;
+      const sessionId = key.slice('hb:'.length);
+      const { status, ageMs } = classify(hb, now, staleAfterSecs);
+      records.push({
+        sessionId,
+        status,
+        ageMs,
+        beats: hb.beats,
+        reloads: hb.reloads,
+        registered: hb.registered || {},
+        cwd: hb.cwd,
+        ts: hb.ts,
+        startedAt: hb.startedAt,
+        endedAt: hb.endedAt,
+        sourceFile: file,
+      });
+    }
+  }
+  return records;
+}
+
+function main() {
+  const args = parseArgs(process.argv);
+
+  if (args.help) {
+    process.stdout.write(usage());
+    process.exit(0);
+  }
+
+  let staleAfterSecs = DEFAULT_STALE_AFTER_SECS;
+  if (args['stale-after'] !== undefined) {
+    const n = Number(args['stale-after']);
+    if (!Number.isFinite(n) || n <= 0) {
+      process.stderr.write('advisor-mods-health: --stale-after must be a positive number of seconds\n');
+      process.exit(2);
+    }
+    staleAfterSecs = n;
+  }
+  const storeDir = typeof args['store-dir'] === 'string' ? args['store-dir'] : DEFAULT_STORE_DIR;
+  const showAll = !!args.all;
+
+  const files = readCanaryFiles(storeDir);
+  if (files === null || files.length === 0) {
+    console.log('no canary heartbeats found (is mods/canary loaded?)');
+    process.exit(0);
+  }
+
+  const now = Date.now();
+  let records = loadRecords(storeDir, files, now, staleAfterSecs);
+
+  if (!showAll) {
+    records = records.filter((r) => !(r.status === 'ENDED' && r.ageMs > HIDE_ENDED_AFTER_MS));
+  }
+
+  records.sort((a, b) => b.ts - a.ts);
+
+  const anyStale = records.some((r) => r.status === 'STALE');
+
+  if (args.json) {
+    process.stdout.write(JSON.stringify(records, null, 2) + '\n');
+    process.exit(anyStale ? 3 : 0);
+  }
+
+  if (records.length === 0) {
+    console.log('no canary heartbeats found (is mods/canary loaded?)');
+    process.exit(0);
+  }
+
+  const widths = [10, 8, 10, 7, 9, 28, 24];
+  console.log(
+    ['SESSION', 'STATUS', 'LAST BEAT', 'BEATS', 'RELOADS', 'REGISTERED', 'CWD']
+      .map((h, i) => h.padEnd(widths[i]))
+      .join('')
+  );
+  console.log('─'.repeat(widths.reduce((a, b) => a + b, 0)));
+
+  for (const r of records) {
+    const registeredStr = Object.entries(r.registered)
+      .map(([name, n]) => `${name}:${n}`)
+      .join(',');
+    const row = [
+      r.sessionId.slice(0, 8).padEnd(widths[0]),
+      r.status.padEnd(widths[1]),
+      humanAge(r.ageMs).padEnd(widths[2]),
+      String(r.beats ?? '—').padEnd(widths[3]),
+      String(r.reloads ?? '—').padEnd(widths[4]),
+      (registeredStr || '—').slice(0, widths[5] - 1).padEnd(widths[5]),
+      shortenHome(r.cwd || '—'),
+    ].join('');
+    console.log(row);
+  }
+
+  const staleCount = records.filter((r) => r.status === 'STALE').length;
+  console.log(`\n${records.length} record${records.length === 1 ? '' : 's'}, ${staleCount} STALE`);
+
+  process.exit(anyStale ? 3 : 0);
+}
+
+main();

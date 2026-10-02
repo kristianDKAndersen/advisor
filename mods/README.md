@@ -36,7 +36,28 @@ file turns every mod off again.
 
 - `write-gate/` — denies any `Write` tool call whose content exceeds 50KB.
 - `canary/` — dead-man's switch: writes a per-session heartbeat to `$.store`
-  (`hb:<sessionId>`, refreshed every 30s) so a stale heartbeat is visible to
-  external tooling when the hooks worker dies outright, and shows one toast
-  per mod per session if that mod's `plugin.register` count hits 3, ahead of
-  the 3-crash rule that disables every mod.
+  (`hb:<sessionId>`, refreshed every 30s, `endedAt` set on `session.end`) so a
+  stale heartbeat is visible to external tooling when the hooks worker dies
+  outright, and shows one toast per mod per session if that mod's
+  `plugin.register` count hits 3, ahead of the 3-crash rule that disables
+  every mod.
+
+## Health
+
+`bin/advisor-mods-health` reads every session's canary heartbeat
+(`~/.claude/plugins/store/canary_*.json`) and classifies it OK / ENDED /
+STALE, so mod-layer health is visible from outside Claude Code — no need to
+open a session to check whether the hooks worker is still alive.
+
+```bash
+bin/advisor-mods-health              # table, newest first
+bin/advisor-mods-health --json       # machine-readable
+bin/advisor-mods-health --all        # include ENDED records older than 1h
+bin/advisor-mods-health --stale-after 60   # override the 90s default
+```
+
+A record is `ENDED` once `session.end` ran, `OK` if the last beat is within
+`--stale-after` seconds (default 90 = three missed 30s beats), otherwise
+`STALE` — no heartbeat means mods unloaded, crashed, or the session was
+killed. Exit code is `3` when any record is `STALE` (`0` otherwise), so a
+statusline or script can key off it directly.

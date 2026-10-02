@@ -137,6 +137,19 @@ export function __simulateReload() {
   }
 }
 
+async function onEnd($) {
+  try {
+    const sid = String(await $.session.id())
+    const now = await $.clock.now()
+    const key = 'hb:' + sid
+    const hb = await $.store.get(key)
+    if (hb) await $.store.set(key, { ...hb, endedAt: now })
+    if (timer) timer.cancel()
+  } catch (err) {
+    safeLog($, 'onEnd failed: ' + (err && err.message))
+  }
+}
+
 export function register(on) {
   on('session.start', async ($, e, next) => {
     try {
@@ -153,6 +166,11 @@ export function register(on) {
     } catch (err) {
       safeLog($, 'classic.SessionStart hook failed: ' + (err && err.message))
     }
+    return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    await onEnd($)
     return next(e)
   })
 

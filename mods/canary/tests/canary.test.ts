@@ -173,6 +173,48 @@ test('a companion mod loading is counted under its PluginRegisterInput.name in t
   expect(hb.registered).toMatchObject({ 'flaky-mod': 1 })
 })
 
+test('session.end sets endedAt on this session\'s hb record', async ($, on) => {
+  const store = new Map()
+  on('store.get', ($, e) => ({ value: store.get(e.key) }))
+  on('store.set', ($, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: Array.from(store.keys()) }))
+  on('store.delete', ($, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: 'sess-end' }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId: 'sess-end' }))
+  const clock = mock.clock(on)
+
+  await $.session.start({ cwd: '/work' })
+  await $.session.end({})
+
+  const hb = store.get('hb:sess-end')
+  expect(typeof hb.endedAt).toBe('number')
+})
+
+test('session.end swallows a store error', async ($, on) => {
+  on('store.get', () => {
+    throw new Error('store is down')
+  })
+  on('store.set', () => ({ value: undefined }))
+  on('store.keys', () => ({ value: [] }))
+  on('store.delete', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-end-err' }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId: 'sess-end-err' }))
+  on('ui.log', () => ({ value: undefined }))
+  mock.clock(on)
+
+  await $.session.start({ cwd: '/work' })
+  const result = await $.session.end({})
+  expect(result).toBeDefined()
+})
+
 test('a thrown store error does not propagate', async ($, on) => {
   on('store.get', () => {
     throw new Error('store is down')
