@@ -286,6 +286,60 @@ test('formatPaneEvidence: non-blank capture returns last 20 non-blank lines', ()
   expect(ev[19]).toBe('line24');
 });
 
+// --- findBandLine / countWakesBySid (captured-style pane samples) -----
+
+test('findBandLine: matches band with no trailing event type', () => {
+  const pane = '  some chrome\ne9b957 fake-alpha 0m\n──────\n❯ \n';
+  expect(smoke.findBandLine(pane, 'e9b957', 'fake-alpha')).toBe('e9b957 fake-alpha 0m');
+});
+
+test('findBandLine: matches band with trailing event type', () => {
+  const pane = 'header\n7793f3 fake-alpha 1m progress\nfooter\n';
+  expect(smoke.findBandLine(pane, '7793f3', 'fake-alpha')).toBe('7793f3 fake-alpha 1m progress');
+});
+
+test('findBandLine: matches band with " waiting grace" suffix', () => {
+  const pane = 'header\n7793f3 fake-beta 2m progress waiting grace\nfooter\n';
+  const line = smoke.findBandLine(pane, '7793f3', 'fake-beta');
+  expect(line).toBe('7793f3 fake-beta 2m progress waiting grace');
+  expect(line).toContain('waiting grace');
+});
+
+test('findBandLine: returns null when sid does not match', () => {
+  const pane = 'e9b957 fake-alpha 0m\n';
+  expect(smoke.findBandLine(pane, 'aaaaaa', 'fake-alpha')).toBeNull();
+});
+
+test('findBandLine: returns null when agent does not match', () => {
+  const pane = 'e9b957 fake-alpha 0m\n';
+  expect(smoke.findBandLine(pane, 'e9b957', 'fake-beta')).toBeNull();
+});
+
+test('countWakesBySid: counts one sid= line per woken worker', () => {
+  const pane = [
+    'fleet-waker: 2 workers finished:',
+    '- sid=abc123 agent=alpha type=result seq=2 verdict=complete summary="done" outbox=/x',
+    '- sid=def456 agent=beta type=result seq=2 verdict=complete summary="done" outbox=/y',
+    '',
+    'Synthesize per Step 7 before any other action.',
+  ].join('\n');
+  expect(smoke.countWakesBySid(pane)).toEqual({ abc123: 1, def456: 1 });
+});
+
+test('countWakesBySid: sums repeated sid= occurrences across multiple wake blocks', () => {
+  const pane = [
+    'fleet-waker: 1 worker finished:',
+    '- sid=abc123 agent=alpha type=result seq=2 verdict=complete summary="done" outbox=/x',
+    'fleet-waker: 1 worker finished:',
+    '- sid=abc123 agent=alpha type=result seq=2 verdict=complete summary="done" outbox=/x',
+  ].join('\n');
+  expect(smoke.countWakesBySid(pane)).toEqual({ abc123: 2 });
+});
+
+test('countWakesBySid: empty object for pane text with no wake lines', () => {
+  expect(smoke.countWakesBySid('nothing here\n')).toEqual({});
+});
+
 // --- bin: --help and usage error (no live sessions) -------------------------------------------------------
 
 test('bin --help: exits 0, prints usage, no side effects', () => {
@@ -303,4 +357,17 @@ test('bin: unknown flag exits 2 (usage error) before any side effect', () => {
 test('bin: --only with bad value exits 2', () => {
   const r = spawnSync('bun', [BIN, '--only', 'nonsense'], { encoding: 'utf8', timeout: 15000 });
   expect(r.status).toBe(2);
+});
+
+// --- AGENTS agreement with fakeSummonScript -------------------------------------------------------
+
+test('AGENTS names match fakeSummonScript defaults and behavior', () => {
+  const script = smoke.fakeSummonScript('/tmp/runs');
+  // The script uses: agent="${1:-alpha}" — so default is 'alpha'
+  expect(script).toContain('agent="${1:-alpha}');
+  // Verify AGENTS has the expected names that match summon call sites
+  expect(smoke.AGENTS.alpha).toBe('alpha');
+  expect(smoke.AGENTS.beta).toBe('beta');
+  // When invoked with no args, would use alpha; with 'alpha' arg, uses 'alpha';
+  // with 'beta' arg, uses 'beta' — all match AGENTS constant
 });

@@ -310,7 +310,74 @@ function checkFleetWaker() {
       return fail('fleet-waker', t0, ['no run dir created by fake summon']);
     }
     const sid = runDirs[0];
+    const shortSid = sid.split('-')[1];
+    if (!shortSid) {
+      return fail('fleet-waker', t0, [`fake summon sid missing hex suffix: ${sid}`]);
+    }
+
+    if (!smoke.findBandLine(sawFleet, shortSid, smoke.AGENTS.alpha)) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['band missing']));
+    }
+
     const outboxPath = path.join(runsRoot, sid, 'channel', 'outbox.jsonl');
+
+    // --- beta: summon a second worker and exercise the grace window -----
+    const betaSummonPrompt = `Run exactly this bash command once: ${summonPath} beta ; then reply with just the word summoned and stop.`;
+    spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', betaSummonPrompt]);
+    spawnSync('sleep', ['0.5']);
+    spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
+    if (smoke.needsEnterRetry(tmuxCapture(sessionName), betaSummonPrompt)) {
+      spawnSync('sleep', ['0.5']);
+      spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
+    }
+
+    const betaRunDirs = pollUntil(() => {
+      const dirs = fs.readdirSync(runsRoot).filter((d) => d !== sid);
+      return dirs.length > 0 ? dirs : null;
+    }, 60000 * args.timeoutScale, 1000);
+    if (!betaRunDirs) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['beta run dir never created']));
+    }
+    const betaSid = betaRunDirs[0];
+    const betaShortSid = betaSid.split('-')[1];
+    if (!betaShortSid) {
+      return fail('fleet-waker', t0, [`beta sid missing hex suffix: ${betaSid}`]);
+    }
+
+    const betaBandSeen = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return smoke.findBandLine(pane, betaShortSid, smoke.AGENTS.beta) ? pane : null;
+    }, 15000 * args.timeoutScale, 500);
+    if (!betaBandSeen) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['beta band missing']));
+    }
+
+    // Fresh (ts=now) result puts beta inside the grace window.
+    const betaOutboxPath = path.join(runsRoot, betaSid, 'channel', 'outbox.jsonl');
+    const betaResultLine = smoke.buildResultLine({
+      seq: 2, sid: betaSid, ts: Math.floor(Date.now() / 1000),
+      summary: 'done', verdict: 'complete',
+    });
+    fs.appendFileSync(betaOutboxPath, betaResultLine + '\n');
+
+    const betaWaitingGrace = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      const line = smoke.findBandLine(pane, betaShortSid, smoke.AGENTS.beta);
+      return line && line.includes('waiting grace') ? pane : null;
+    }, 15000 * args.timeoutScale, 500);
+    if (!betaWaitingGrace) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['beta never showed "waiting grace"']));
+    }
+
+    const betaWokeEarly = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return smoke.countWakesBySid(pane)[betaSid] ? pane : null;
+    }, 20000 * args.timeoutScale, 1000);
+    if (betaWokeEarly) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['beta woke before grace elapsed']));
+    }
+
+    // --- alpha: backdated (already past grace) result wakes immediately -
     const resultLine = smoke.buildResultLine({
       seq: 2, sid, ts: Math.floor(Date.now() / 1000) - 60,
       summary: 'done', verdict: 'complete',
@@ -325,33 +392,92 @@ function checkFleetWaker() {
       return fail('fleet-waker', t0, captureAndSaveEvidence(['never saw "Prompt from the fleet-waker"']));
     }
 
+    const alphaBandGone = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return !smoke.findBandLine(pane, shortSid, smoke.AGENTS.alpha) ? pane : null;
+    }, 15000 * args.timeoutScale, 500);
+    if (!alphaBandGone) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['alpha band line still present after wake']));
+    }
+
     spawnSync('sleep', ['20']);
     const paneAfterWait = tmuxCapture(sessionName);
-    const countAfterWait = smoke.countOccurrences(paneAfterWait, 'Prompt from the fleet-waker');
-    if (countAfterWait !== 1) {
-      return fail('fleet-waker', t0, captureAndSaveEvidence([`expected exactly 1 prompt after dedupe window, saw ${countAfterWait}`]));
+    const wakesAfterWait = smoke.countWakesBySid(paneAfterWait);
+    if ((wakesAfterWait[sid] || 0) !== 1) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence([`expected exactly 1 wake for alpha (sid=${sid}) after dedupe window, saw ${wakesAfterWait[sid] || 0}`]));
+    }
+
+    // Beta's grace (30s) elapsed somewhere during the band/no-early-wake
+    // polling above plus this 20s wait; it should have woken exactly once.
+    const betaWoke = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return smoke.countWakesBySid(pane)[betaSid] ? pane : null;
+    }, 30000 * args.timeoutScale, 1000);
+    if (!betaWoke) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['beta never woke after grace elapsed']));
+    }
+    const wakesAfterBeta = smoke.countWakesBySid(tmuxCapture(sessionName));
+    if ((wakesAfterBeta[betaSid] || 0) !== 1) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence([`expected exactly 1 wake for beta (sid=${betaSid}), saw ${wakesAfterBeta[betaSid] || 0}`]));
     }
 
     spawnSync('tmux', ['send-keys', '-t', sessionName, 'Escape']);
 
-    const gammaSid = `gamma-${Date.now()}`;
-    const gammaDir = path.join(runsRoot, gammaSid);
-    fs.mkdirSync(path.join(gammaDir, 'channel'), { recursive: true });
-    fs.writeFileSync(path.join(gammaDir, 'meta.json'), JSON.stringify({ sid: gammaSid, agent: 'gamma' }));
-    fs.writeFileSync(path.join(gammaDir, 'channel', 'outbox.jsonl'), '');
-    fs.writeFileSync(path.join(gammaDir, 'synthesis.log'),
-      JSON.stringify({ seq: 2, sid: gammaSid, ts: Math.floor(Date.now() / 1000) }) + '\n');
+    // --- gamma: summon a third worker, verify synthesis.log suppresses wake -----
+    const gammaSummonPrompt = `Run exactly this bash command once: ${summonPath} gamma ; then reply with just the word summoned and stop.`;
+    spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', gammaSummonPrompt]);
+    spawnSync('sleep', ['0.5']);
+    spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
+    if (smoke.needsEnterRetry(tmuxCapture(sessionName), gammaSummonPrompt)) {
+      spawnSync('sleep', ['0.5']);
+      spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
+    }
+
+    const gammaRunDirs = pollUntil(() => {
+      const dirs = fs.readdirSync(runsRoot).filter((d) => d !== sid && d !== betaSid);
+      return dirs.length > 0 ? dirs : null;
+    }, 60000 * args.timeoutScale, 1000);
+    if (!gammaRunDirs) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['gamma run dir never created']));
+    }
+    const gammaSid = gammaRunDirs[0];
+    const gammaShortSid = gammaSid.split('-')[1];
+    if (!gammaShortSid) {
+      return fail('fleet-waker', t0, [`gamma sid missing hex suffix: ${gammaSid}`]);
+    }
+
+    const gammaBandSeen = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return smoke.findBandLine(pane, gammaShortSid, smoke.AGENTS.gamma) ? pane : null;
+    }, 15000 * args.timeoutScale, 500);
+    if (!gammaBandSeen) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['gamma not watched']));
+    }
+
+    const gammaOutboxPath = path.join(runsRoot, gammaSid, 'channel', 'outbox.jsonl');
+    const gammaMetaPath = path.join(runsRoot, gammaSid, 'meta.json');
+    const gammaSynthPath = path.join(runsRoot, gammaSid, 'synthesis.log');
+
+    // Write synthesis.log line BEFORE appending result
+    const gammaRawSynthesis = JSON.stringify({ seq: 2, sid: gammaSid, ts: Math.floor(Date.now() / 1000) });
+    fs.writeFileSync(gammaSynthPath, gammaRawSynthesis + '\n');
+
+    // Append backdated result
     const gammaResult = smoke.buildResultLine({
       seq: 2, sid: gammaSid, ts: Math.floor(Date.now() / 1000) - 60,
       summary: 'done', verdict: 'complete',
     });
-    fs.appendFileSync(path.join(gammaDir, 'channel', 'outbox.jsonl'), gammaResult + '\n');
+    fs.appendFileSync(gammaOutboxPath, gammaResult + '\n');
 
-    spawnSync('sleep', ['30']);
-    const paneAfterGamma = tmuxCapture(sessionName);
-    const countAfterGamma = smoke.countOccurrences(paneAfterGamma, 'Prompt from the fleet-waker');
-    if (countAfterGamma !== 1) {
-      return fail('fleet-waker', t0, captureAndSaveEvidence([`synthesis.log pre-write should suppress gamma's wake; saw ${countAfterGamma} prompts total`]));
+    // Assert gamma never woke and band line disappeared within 40s
+    const gammaDroppingDone = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      const wakeCount = smoke.countWakesBySid(pane)[gammaSid];
+      const bandGone = !smoke.findBandLine(pane, gammaShortSid, smoke.AGENTS.gamma);
+      return (wakeCount === undefined || wakeCount === 0) && bandGone ? pane : null;
+    }, 40000 * args.timeoutScale, 500);
+    if (!gammaDroppingDone) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence([`gamma woke despite synthesis.log or band never dropped (sid=${gammaSid})`]));
     }
 
     return pass('fleet-waker', t0);
