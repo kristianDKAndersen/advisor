@@ -41,6 +41,14 @@ file turns every mod off again.
   outright, and shows one toast per mod per session if that mod's
   `plugin.register` count hits 3, ahead of the 3-crash rule that disables
   every mod.
+- `fleet-waker/` — inside the Advisor's own session (inert inside a worker
+  session), watches `bin/summon` calls (via a `tool.call` scan plus a
+  runs-root `fs.list` of sid dirs created during the call) for their
+  `{sid, agent, outbox}`, polls each watched outbox every 5s for a terminal
+  (`result`/`error`) or `question` message at least 30s old and not already
+  recorded in that run's `synthesis.log`, and starts a new Advisor turn via
+  `$.prompt.submit` batching every worker that finished that tick - a true
+  fallback alongside `bin/advisor-observe`, never double-waking.
 
 ## Health
 

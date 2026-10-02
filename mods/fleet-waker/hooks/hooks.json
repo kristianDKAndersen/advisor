@@ -1,0 +1,4 @@
+{
+  "description": "The fleet-waker hooks module",
+  "modules": ["./register.js"]
+}

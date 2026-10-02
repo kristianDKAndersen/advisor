@@ -1,0 +1,7 @@
+{
+  "name": "fleet-waker",
+  "version": "0.1.0",
+  "description": "Watches summoned workers' outboxes for terminal messages and starts a new Advisor turn via $.prompt.submit, so the Advisor never sleeps through a finished worker",
+  "author": { "name": "Advisor" },
+  "types": "./types/index.d.ts"
+}
