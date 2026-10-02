@@ -1,0 +1,400 @@
+#!/usr/bin/env node
+// advisor-mods-smoke — live-test all advisor mods in throwaway Claude Code
+// sessions and print PASS/FAIL per check.
+//
+// Usage:
+//   advisor-mods-smoke [--only write-gate|canary|fleet-waker ...] [--model <name>]
+//                       [--keep] [--json] [--timeout-scale <n>]
+//
+// See `advisor-mods-smoke --help` for full flag docs. Never touches the
+// real ~/.advisor/runs — each check works in its own mkdtemp'd dir and
+// points ADVISOR_RUNS_ROOT (fleet-waker) at a throwaway root.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync, spawn } = require('child_process');
+
+const smoke = require(path.join(path.resolve(__dirname, '..'), 'lib', 'mods-smoke.js'));
+
+const REPO_ROOT = path.resolve(__dirname, '..');
+
+let args;
+try {
+  args = smoke.parseArgs(process.argv.slice(2));
+} catch (err) {
+  if (err instanceof smoke.UsageError) {
+    console.error(`advisor-mods-smoke: ${err.message}`);
+    console.error(smoke.usage());
+    process.exit(2);
+  }
+  throw err;
+}
+
+if (args.help) {
+  console.log(smoke.usage());
+  process.exit(0);
+}
+
+function checkPrereqs(needed) {
+  const missing = [];
+  for (const bin of needed) {
+    const r = spawnSync('which', [bin], { encoding: 'utf8' });
+    if (r.status !== 0) missing.push(bin);
+  }
+  if (missing.length > 0) {
+    console.error(`advisor-mods-smoke: missing prerequisite(s) on PATH: ${missing.join(', ')}`);
+    process.exit(4);
+  }
+}
+
+checkPrereqs(args.only.includes('fleet-waker') ? ['claude', 'tmux'] : ['claude']);
+
+function scrubbedEnv() {
+  const env = { ...process.env };
+  for (const k of smoke.ENV_SCRUB_VARS) delete env[k];
+  return env;
+}
+
+function mkTmp(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `mods-smoke-${prefix}-`));
+}
+
+function cleanup(dir, keep) {
+  if (keep) {
+    console.log(`  (kept temp dir: ${dir})`);
+    return;
+  }
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+}
+
+// --- write-gate -------------------------------------------------------
+
+function checkWriteGate() {
+  const t0 = Date.now();
+  const dir = mkTmp('write-gate');
+  try {
+    const sourceFull = fs.readFileSync(path.join(REPO_ROOT, 'claude.md'));
+    fs.writeFileSync(path.join(dir, 'source.md'), sourceFull.subarray(0, 56000));
+
+    const denyPrompt = `Read ${dir}/source.md, then use the Write tool ONCE to create ${dir}/copy.md with its exact full contents in a single call. Do not split it. If the Write is denied, quote the denial reason verbatim and stop - do not retry.`;
+    const denyTimeoutMs = 420000 * args.timeoutScale;
+    const deny = spawnSync('claude', [
+      '-p', '--plugin-dir', path.join(REPO_ROOT, 'mods', 'write-gate'),
+      '--model', args.model,
+      '--allowedTools', 'Read,Write',
+      '--permission-mode', 'acceptEdits',
+      '--max-turns', '4',
+      '--output-format', 'stream-json',
+      '--verbose',
+      denyPrompt,
+    ], { encoding: 'utf8', cwd: dir, env: scrubbedEnv(), timeout: denyTimeoutMs });
+
+    fs.writeFileSync(path.join(dir, 'stream.jsonl'), deny.stdout || '');
+    fs.writeFileSync(path.join(dir, 'stderr.txt'), deny.stderr || '');
+
+    const copyExists = fs.existsSync(path.join(dir, 'copy.md'));
+    const sawLimitMsg = smoke.streamContainsText(deny.stdout, 'over the 51200-byte limit');
+    const denyPass = !copyExists && sawLimitMsg;
+
+    if (!denyPass) {
+      const reason = smoke.timeoutReason(deny, denyTimeoutMs);
+      const evidence = [];
+      if (reason) evidence.push(reason);
+      evidence.push(
+        `copy.md exists: ${copyExists}`,
+        `saw "over the 51200-byte limit": ${sawLimitMsg}`,
+        ...tail(deny.stdout, 15),
+      );
+      return fail('write-gate', t0, evidence);
+    }
+
+    const allowDir = mkTmp('write-gate-allow');
+    try {
+      const allowPrompt = `Use the Write tool ONCE to create ${allowDir}/small.md containing a short, varied paragraph (not repeated filler text) of around 1KB about the history of the postal service.`;
+      const allow = spawnSync('claude', [
+        '-p', '--plugin-dir', path.join(REPO_ROOT, 'mods', 'write-gate'),
+        '--model', args.model,
+        '--allowedTools', 'Write',
+        '--permission-mode', 'acceptEdits',
+        '--max-turns', '4',
+        '--output-format', 'stream-json',
+        '--verbose',
+        allowPrompt,
+      ], { encoding: 'utf8', cwd: allowDir, env: scrubbedEnv(), timeout: 120000 * args.timeoutScale });
+
+      const allowExists = fs.existsSync(path.join(allowDir, 'small.md'));
+      if (!allowExists) {
+        return fail('write-gate', t0, [`small.md exists: false`, ...tail(allow.stdout, 15)]);
+      }
+      return pass('write-gate', t0);
+    } finally {
+      cleanup(allowDir, args.keep);
+    }
+  } finally {
+    cleanup(dir, args.keep);
+  }
+}
+
+// --- canary -------------------------------------------------------
+
+function checkCanary() {
+  const t0 = Date.now();
+  const r = spawnSync('claude', [
+    '-p', '--plugin-dir', path.join(REPO_ROOT, 'mods', 'canary'),
+    '--model', args.model,
+    '--max-turns', '1',
+    '--output-format', 'stream-json',
+    '--verbose',
+    'Reply with the single word ok.',
+  ], { encoding: 'utf8', env: scrubbedEnv(), timeout: 60000 * args.timeoutScale });
+
+  const events = smoke.parseStreamJson(r.stdout);
+  const sessionId = smoke.extractSessionId(events);
+  if (!sessionId) {
+    return fail('canary', t0, ['could not extract session_id from stream-json init event', ...tail(r.stdout, 15)]);
+  }
+
+  const storeDir = path.join(os.homedir(), '.claude', 'plugins', 'store');
+  let found = false;
+  let reason = 'no canary_*.json with a matching beats>=1 + endedAt record found';
+  try {
+    for (const name of fs.readdirSync(storeDir)) {
+      if (!name.startsWith('canary_')) continue;
+      let data;
+      try {
+        data = JSON.parse(fs.readFileSync(path.join(storeDir, name), 'utf8'));
+      } catch {
+        continue;
+      }
+      const rec = data[`hb:${sessionId}`];
+      if (rec && rec.beats >= 1 && rec.endedAt) {
+        found = true;
+        break;
+      }
+    }
+  } catch (err) {
+    reason = `store dir unreadable: ${err.message}`;
+  }
+
+  if (!found) return fail('canary', t0, [reason, `session_id: ${sessionId}`]);
+  return pass('canary', t0);
+}
+
+// --- fleet-waker -------------------------------------------------------
+
+function tmuxCapture(session) {
+  const r = spawnSync('tmux', ['capture-pane', '-p', '-t', session], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout : '';
+}
+
+function pollUntil(fn, timeoutMs, intervalMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const r = fn();
+    if (r) return r;
+    spawnSync('sleep', ['0.5']);
+  }
+  return null;
+}
+
+function checkFleetWaker() {
+  const t0 = Date.now();
+  const sessionName = `mods-smoke-fw-${process.pid}`;
+  const tmpRoot = mkTmp('fleet-waker');
+  const runsRoot = path.join(tmpRoot, 'runs');
+  const workDir = path.join(tmpRoot, 'work');
+  const binDir = path.join(tmpRoot, 'bin');
+  fs.mkdirSync(runsRoot, { recursive: true });
+  fs.mkdirSync(workDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const summonPath = path.join(binDir, 'summon');
+  fs.writeFileSync(summonPath, smoke.fakeSummonScript(runsRoot), { mode: 0o755 });
+
+  const killTmux = () => spawnSync('tmux', ['kill-session', '-t', sessionName]);
+
+  const paneEnvFile = path.join(tmpRoot, 'pane-env.txt');
+  let stepCounter = 0;
+  const captureAndSaveEvidence = (reasonLines) => {
+    const full = tmuxCapture(sessionName);
+    fs.writeFileSync(path.join(tmpRoot, `pane-${++stepCounter}.txt`), full);
+    const listPanes = spawnSync('tmux', ['list-panes', '-t', sessionName, '-F', '#{pane_dead} #{pane_dead_status}'], { encoding: 'utf8' });
+    return [...reasonLines, ...smoke.formatPaneEvidence(full, listPanes.stdout)];
+  };
+  const checkScrubLeak = () => {
+    if (!fs.existsSync(paneEnvFile)) return null;
+    const names = fs.readFileSync(paneEnvFile, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean);
+    const leaked = smoke.detectScrubLeak(names, smoke.ENV_SCRUB_VARS);
+    if (leaked.length === 0) return null;
+    return fail('fleet-waker', t0, captureAndSaveEvidence([`scrub leak: ${leaked.join(', ')}`]));
+  };
+
+  try {
+    const env = {};
+    env.ADVISOR_RUNS_ROOT = runsRoot;
+    env.PATH = `${binDir}:${process.env.PATH}`;
+
+    const claudeArgs = ['--plugin-dir', path.join(REPO_ROOT, 'mods', 'fleet-waker'),
+      '--model', args.model, '--allowedTools', 'Bash'];
+    const paneCommand = smoke.buildPaneCommand(smoke.ENV_SCRUB_VARS, env, claudeArgs, paneEnvFile);
+
+    const start = spawnSync('tmux', [
+      'new-session', '-d', '-s', sessionName, '-x', '220', '-y', '50', '-c', workDir,
+      ...paneCommand,
+    ]);
+    if (start.status !== 0) {
+      return fail('fleet-waker', t0, [`tmux new-session failed: ${start.stderr}`]);
+    }
+    spawnSync('tmux', ['set-option', '-t', sessionName, 'remain-on-exit', 'on']);
+
+    const leak = checkScrubLeak();
+    if (leak) return leak;
+
+    // Dismiss folder-trust dialog if shown. Sending Down the instant the
+    // dialog text first appears can race the TUI before it accepts input, so
+    // Enter fires while "No, exit" is still selected. Wait, nudge, then poll
+    // until "Yes" is actually highlighted before confirming.
+    const trustCheck = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return smoke.trustSelectionState(pane) !== 'absent' ? pane : null;
+    }, 10000 * args.timeoutScale, 500);
+    if (trustCheck) {
+      spawnSync('sleep', ['1.5']);
+      spawnSync('tmux', ['send-keys', '-t', sessionName, 'Down']);
+      const pollStart = Date.now();
+      let resent2s = false;
+      const yesSelected = pollUntil(() => {
+        if (!resent2s && Date.now() - pollStart >= 2000) {
+          resent2s = true;
+          spawnSync('tmux', ['send-keys', '-t', sessionName, 'Down']);
+        }
+        const pane = tmuxCapture(sessionName);
+        return smoke.trustSelectionState(pane) === 'yes' ? pane : null;
+      }, 5000, 500);
+      if (!yesSelected) {
+        return fail('fleet-waker', t0, captureAndSaveEvidence(['could not select trust option']));
+      }
+      spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
+    }
+
+    // Wait for the input box to be ready before typing (startup finished).
+    pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return smoke.isInputReady(pane) ? pane : null;
+    }, 30000 * args.timeoutScale, 500);
+
+    const mainPrompt = `Run exactly this bash command once: ${summonPath} alpha ; then reply with just the word summoned and stop.`;
+    spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', mainPrompt]);
+    spawnSync('sleep', ['0.5']);
+    spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
+    if (smoke.needsEnterRetry(tmuxCapture(sessionName), mainPrompt)) {
+      spawnSync('sleep', ['0.5']);
+      spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
+    }
+
+    const sawFleet = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return pane.includes('fleet: 1 in flight') ? pane : null;
+    }, 60000 * args.timeoutScale, 1000);
+    if (!sawFleet) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['never saw "fleet: 1 in flight"']));
+    }
+
+    const runDirs = fs.readdirSync(runsRoot);
+    if (runDirs.length === 0) {
+      return fail('fleet-waker', t0, ['no run dir created by fake summon']);
+    }
+    const sid = runDirs[0];
+    const outboxPath = path.join(runsRoot, sid, 'channel', 'outbox.jsonl');
+    const resultLine = smoke.buildResultLine({
+      seq: 2, sid, ts: Math.floor(Date.now() / 1000) - 60,
+      summary: 'done', verdict: 'complete',
+    });
+    fs.appendFileSync(outboxPath, resultLine + '\n');
+
+    const firstPrompt = pollUntil(() => {
+      const pane = tmuxCapture(sessionName);
+      return smoke.countOccurrences(pane, 'Prompt from the fleet-waker') >= 1 ? pane : null;
+    }, 45000 * args.timeoutScale, 1000);
+    if (!firstPrompt) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence(['never saw "Prompt from the fleet-waker"']));
+    }
+
+    spawnSync('sleep', ['20']);
+    const paneAfterWait = tmuxCapture(sessionName);
+    const countAfterWait = smoke.countOccurrences(paneAfterWait, 'Prompt from the fleet-waker');
+    if (countAfterWait !== 1) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence([`expected exactly 1 prompt after dedupe window, saw ${countAfterWait}`]));
+    }
+
+    spawnSync('tmux', ['send-keys', '-t', sessionName, 'Escape']);
+
+    const gammaSid = `gamma-${Date.now()}`;
+    const gammaDir = path.join(runsRoot, gammaSid);
+    fs.mkdirSync(path.join(gammaDir, 'channel'), { recursive: true });
+    fs.writeFileSync(path.join(gammaDir, 'meta.json'), JSON.stringify({ sid: gammaSid, agent: 'gamma' }));
+    fs.writeFileSync(path.join(gammaDir, 'channel', 'outbox.jsonl'), '');
+    fs.writeFileSync(path.join(gammaDir, 'synthesis.log'),
+      JSON.stringify({ seq: 2, sid: gammaSid, ts: Math.floor(Date.now() / 1000) }) + '\n');
+    const gammaResult = smoke.buildResultLine({
+      seq: 2, sid: gammaSid, ts: Math.floor(Date.now() / 1000) - 60,
+      summary: 'done', verdict: 'complete',
+    });
+    fs.appendFileSync(path.join(gammaDir, 'channel', 'outbox.jsonl'), gammaResult + '\n');
+
+    spawnSync('sleep', ['30']);
+    const paneAfterGamma = tmuxCapture(sessionName);
+    const countAfterGamma = smoke.countOccurrences(paneAfterGamma, 'Prompt from the fleet-waker');
+    if (countAfterGamma !== 1) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence([`synthesis.log pre-write should suppress gamma's wake; saw ${countAfterGamma} prompts total`]));
+    }
+
+    return pass('fleet-waker', t0);
+  } finally {
+    killTmux();
+    cleanup(tmpRoot, args.keep);
+  }
+}
+
+function tail(text, n) {
+  return String(text || '').split('\n').slice(-n);
+}
+
+function pass(name, t0) {
+  return { name, ok: true, durationMs: Date.now() - t0, evidence: [] };
+}
+
+function fail(name, t0, evidence) {
+  return { name, ok: false, durationMs: Date.now() - t0, evidence };
+}
+
+const RUNNERS = {
+  'write-gate': checkWriteGate,
+  canary: checkCanary,
+  'fleet-waker': checkFleetWaker,
+};
+
+const results = [];
+for (const name of args.only) {
+  results.push(RUNNERS[name]());
+}
+
+if (args.json) {
+  console.log(JSON.stringify(results, null, 2));
+} else {
+  for (const r of results) {
+    console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}  (${r.durationMs}ms)`);
+    if (!r.ok) {
+      for (const line of r.evidence) console.log(`    ${line}`);
+    }
+  }
+  const passed = results.filter((r) => r.ok).length;
+  console.log(`${passed} passed, ${results.length - passed} failed`);
+}
+
+process.exitCode = smoke.computeExitCode(results);
