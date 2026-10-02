@@ -1,0 +1,4 @@
+{
+  "description": "The write-gate hooks module",
+  "modules": ["./register.js"]
+}

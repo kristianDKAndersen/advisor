@@ -1,0 +1,6 @@
+{
+  "name": "write-gate",
+  "version": "0.1.0",
+  "description": "Denies Write tool calls whose content exceeds 50KB, mechanizing the large-artifact patch rule",
+  "author": { "name": "Advisor" }
+}
