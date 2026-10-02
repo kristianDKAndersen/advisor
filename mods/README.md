@@ -35,3 +35,8 @@ file turns every mod off again.
 ## Mods in this directory
 
 - `write-gate/` — denies any `Write` tool call whose content exceeds 50KB.
+- `canary/` — dead-man's switch: writes a per-session heartbeat to `$.store`
+  (`hb:<sessionId>`, refreshed every 30s) so a stale heartbeat is visible to
+  external tooling when the hooks worker dies outright, and shows one toast
+  per mod per session if that mod's `plugin.register` count hits 3, ahead of
+  the 3-crash rule that disables every mod.

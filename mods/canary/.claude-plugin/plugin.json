@@ -1,0 +1,7 @@
+{
+  "name": "canary",
+  "version": "0.1.0",
+  "description": "Dead-man's switch: per-session heartbeat in $.store and an in-session churn toast, so mod-layer failure is visible from inside and outside the session",
+  "author": { "name": "Advisor" },
+  "types": "./types/index.d.ts"
+}
