@@ -288,10 +288,13 @@ describe('cost-per-solved-task math (report.js)', () => {
 });
 
 describe('estimateRunCost / parseArgs', () => {
-  test('estimateRunCost scales with brief length and uses bin/advisor-cost rates', () => {
-    const kase = { brief: 'x'.repeat(4000), timeout_sec: 600 };
+  // Historical premise ("scales with brief length") no longer holds: with no history,
+  // estimateRunCost now uses a fixed multi-turn token model keyed by effort, not brief size.
+  test('estimateRunCost with no history falls back to the model and uses bin/advisor-cost rates', () => {
+    const kase = { id: 'case-test', brief: 'x'.repeat(4000), timeout_sec: 600 };
     const est = runner.estimateRunCost(kase, cfg);
     expect(est.cost).toBeGreaterThan(0);
+    expect(est.source).toBe('model');
   });
 
   test('parseArgs reads --configs, --cases, --trials, --concurrency, --dry-run, --confirm', () => {
@@ -308,6 +311,115 @@ describe('estimateRunCost / parseArgs', () => {
   test('parseArgs collects unrecognized flags for the caller to reject', () => {
     const args = runner.parseArgs(['--bogus']);
     expect(args.unknown).toEqual(['--bogus']);
+  });
+});
+
+describe('cost estimation: history vs fallback (red/green: evals/coder-cost/run.js)', () => {
+  test('loadHistory: uses cost_instrument_b.cost, falls back to cost_instrument_a.cost, skips _invalid dirs / no_attempt / <=3-turn rows', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-history-'));
+    const sub = path.join(dir, 'batch1');
+    const invalidSub = path.join(dir, '_invalid-batch');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.mkdirSync(invalidSub, { recursive: true });
+    const rows = [
+      { config: 'c1', case_id: 'case-a', outcome: 'pass', num_turns: 10, cost_instrument_b: { cost: 1.0 } },
+      { config: 'c1', case_id: 'case-a', outcome: 'pass', num_turns: 12, cost_instrument_a: { cost: 2.0 } }, // no instrument_b -> falls back to A
+      { config: 'c1', case_id: 'case-b', outcome: 'no_attempt', num_turns: 10, cost_instrument_b: { cost: 99 } }, // excluded
+      { config: 'c1', case_id: 'case-b', outcome: 'pass', num_turns: 2, cost_instrument_b: { cost: 99 } }, // excluded (<=3 turns)
+      { config: 'c1', case_id: 'case-b', outcome: 'timeout', cost_instrument_b: { cost: 3.0 } }, // no num_turns, timeout counts
+    ];
+    fs.writeFileSync(path.join(dir, 'top.jsonl'), rows.slice(0, 1).map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(sub, 'batch.jsonl'), rows.slice(1).map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(invalidSub, 'batch.jsonl'), JSON.stringify({ config: 'c1', case_id: 'case-z', outcome: 'pass', num_turns: 10, cost_instrument_b: { cost: 1000 } }) + '\n');
+
+    const history = runner.loadHistory(dir);
+    expect(history.c1.map((r) => r.cost).sort((a, b) => a - b)).toEqual([1.0, 2.0, 3.0]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('CODER_COST_HISTORY_FILES adds extra history files', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-history-env-'));
+    const extra = path.join(dir, 'extra.jsonl');
+    fs.writeFileSync(extra, JSON.stringify({ config: 'c2', case_id: 'case-x', outcome: 'pass', num_turns: 10, cost_instrument_b: { cost: 5.0 } }) + '\n');
+    const origEnv = process.env.CODER_COST_HISTORY_FILES;
+    process.env.CODER_COST_HISTORY_FILES = extra;
+    const history = runner.loadHistory(path.join(dir, 'nonexistent-results'));
+    expect(history.c2.map((r) => r.cost)).toEqual([5.0]);
+    if (origEnv === undefined) delete process.env.CODER_COST_HISTORY_FILES; else process.env.CODER_COST_HISTORY_FILES = origEnv;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('historyEstimate prefers same-case rows over the config-wide mean', () => {
+    const history = {
+      c1: [
+        { cost: 1.0, case_id: 'case-a' },
+        { cost: 3.0, case_id: 'case-a' },
+        { cost: 100.0, case_id: 'case-b' },
+      ],
+    };
+    const est = runner.historyEstimate(history, 'c1', 'case-a');
+    expect(est.cost).toBe(2.0);
+    expect(est.n).toBe(2);
+  });
+
+  test('historyEstimate falls back to the full config mean when no same-case rows exist', () => {
+    const history = { c1: [{ cost: 1.0, case_id: 'case-a' }, { cost: 3.0, case_id: 'case-a' }] };
+    const est = runner.historyEstimate(history, 'c1', 'case-unseen');
+    expect(est.cost).toBe(2.0);
+    expect(est.n).toBe(2);
+  });
+
+  test('estimateRunCost prefers history over the fallback model when history exists for the config', () => {
+    const history = { 'sonnet5-medium': [{ cost: 1.25, case_id: 'case-test' }] };
+    const est = runner.estimateRunCost({ id: 'case-test' }, cfg, 'sonnet5-medium', history);
+    expect(est.cost).toBe(1.25);
+    expect(est.source).toBe('history n=1');
+  });
+
+  test('estimateRunCost falls back to the model when the config has no history rows', () => {
+    const est = runner.estimateRunCost({ id: 'case-test' }, cfg, 'sonnet5-medium', {});
+    expect(est.source).toBe('model');
+    expect(est.cost).toBeGreaterThan(0);
+  });
+
+  // Measured means from calibration data (matrixA1-truncated-briefs.jsonl / smoke3.jsonl,
+  // >3-turn rows only): sonnet5-medium/medium ~$1.25/run (n=16), opus55-low/low ~$0.57/run (n=11).
+  const CALIBRATION_MEANS = { 'claude-sonnet-5:medium': 1.25, 'claude-opus-5-5:low': 0.57 };
+
+  test('fallback model lands within 30% of the measured calibration means', () => {
+    const sonnetMedium = runner.computeFallbackCost({ model: 'claude-sonnet-5', effort: 'medium' });
+    const opusLow = runner.computeFallbackCost({ model: 'claude-opus-5-5', effort: 'low' });
+    expect(Math.abs(sonnetMedium - CALIBRATION_MEANS['claude-sonnet-5:medium']) / CALIBRATION_MEANS['claude-sonnet-5:medium']).toBeLessThan(0.3);
+    expect(Math.abs(opusLow - CALIBRATION_MEANS['claude-opus-5-5:low']) / CALIBRATION_MEANS['claude-opus-5-5:low']).toBeLessThan(0.3);
+  });
+
+  test('fallback model cost is monotone in effort (low < medium < high) for both models', () => {
+    for (const model of ['claude-sonnet-5', 'claude-opus-5-5']) {
+      const low = runner.computeFallbackCost({ model, effort: 'low' });
+      const medium = runner.computeFallbackCost({ model, effort: 'medium' });
+      const high = runner.computeFallbackCost({ model, effort: 'high' });
+      expect(low).toBeLessThan(medium);
+      expect(medium).toBeLessThan(high);
+    }
+  });
+
+  test('buildPlan dry-run totals: history-backed configs use history, others use the fallback model, p90 total is at least the mean total', () => {
+    const history = {
+      'sonnet5-medium': [{ cost: 1.25, case_id: 'case-a' }, { cost: 1.0, case_id: 'case-b' }],
+    };
+    const allConfigs = {
+      'sonnet5-medium': { model: 'claude-sonnet-5', effort: 'medium' },
+      'sonnet5-high': { model: 'claude-sonnet-5', effort: 'high' },
+    };
+    const cases = [{ id: 'case-a' }, { id: 'case-b' }];
+    const plan = runner.buildPlan(['sonnet5-medium', 'sonnet5-high'], allConfigs, cases, 1, history);
+    const historyRows = plan.rows.filter((r) => r.config === 'sonnet5-medium');
+    const fallbackRows = plan.rows.filter((r) => r.config === 'sonnet5-high');
+    expect(historyRows.every((r) => r.source.startsWith('history'))).toBe(true);
+    expect(fallbackRows.every((r) => r.source === 'model')).toBe(true);
+    expect(plan.total).toBeGreaterThan(0);
+    expect(plan.p90Total).toBeGreaterThanOrEqual(plan.total * 0.9);
   });
 });
 

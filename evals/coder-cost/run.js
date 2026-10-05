@@ -94,35 +94,158 @@ function loadCompletedSet() {
 }
 
 // --- cost estimation (dry-run only; rough order-of-magnitude, NOT a billing figure) ---
-function estimateRunCost(kase, cfg) {
-  const BASE_CONTEXT_TOKENS = 15000; // repo/tooling overhead, heuristic
-  const inputTokens = BASE_CONTEXT_TOKENS + Math.ceil((kase.brief || '').length / 4);
-  const outputTokens = Math.min(20000, Math.max(1500, Math.round((kase.timeout_sec || 600) * 6)));
-  const rate = priceForModel(cfg.model);
-  const cost = (inputTokens / 1e6) * rate.input + (outputTokens / 1e6) * rate.output;
-  return { inputTokens, outputTokens, cost };
+//
+// Two sources, history first:
+//   (a) history: the mean of this config's own priced result rows (same-case rows
+//       preferred when present), read from results/*.jsonl, results/<subdir>/*.jsonl
+//       (skipping any `_invalid*` subdir) plus CODER_COST_HISTORY_FILES.
+//   (b) fallback: a multi-turn token model (context grows per turn, cached via 1h
+//       writes, re-read in full each subsequent turn) priced via bin/advisor-cost.
+//       Constants calibrated against measured matrixA1/smoke3 means (see changes.md).
+
+function rowCost(rec) {
+  const b = rec.cost_instrument_b && typeof rec.cost_instrument_b.cost === 'number' ? rec.cost_instrument_b.cost : null;
+  if (b != null) return b;
+  const a = rec.cost_instrument_a && typeof rec.cost_instrument_a.cost === 'number' ? rec.cost_instrument_a.cost : null;
+  return a;
 }
 
-function buildPlan(configNames, allConfigs, cases, trials) {
-  const rows = [];
-  let total = 0;
-  for (const cn of configNames) {
-    const cfg = allConfigs[cn];
-    if (!cfg) { console.error(`unknown config: ${cn}`); continue; }
-    for (const kase of cases) {
-      for (let t = 1; t <= trials; t++) {
-        const est = estimateRunCost(kase, cfg);
-        total += est.cost;
-        rows.push({ config: cn, case: kase.id, trial: t, est_cost_usd: Number(est.cost.toFixed(4)) });
+// Timeouts count (they are priced); no_attempt and trivial (<=3-turn, e.g. a clarifying
+// question with no real attempt) rows are excluded as not representative of a real run.
+function isRepresentativeRow(rec) {
+  if (!rec || rec.outcome === 'no_attempt') return false;
+  if (typeof rec.num_turns === 'number' && rec.num_turns <= 3) return false;
+  return true;
+}
+
+function listHistoryFiles(resultsDir = RESULTS_DIR) {
+  const files = [];
+  if (fs.existsSync(resultsDir)) {
+    for (const name of fs.readdirSync(resultsDir)) {
+      const full = path.join(resultsDir, name);
+      let stat;
+      try { stat = fs.statSync(full); } catch (e) { continue; }
+      if (stat.isDirectory()) {
+        if (name.startsWith('_invalid')) continue;
+        for (const sub of fs.readdirSync(full)) {
+          if (sub.endsWith('.jsonl')) files.push(path.join(full, sub));
+        }
+      } else if (name.endsWith('.jsonl')) {
+        files.push(full);
       }
     }
   }
-  return { rows, total };
+  if (process.env.CODER_COST_HISTORY_FILES) {
+    for (const p of process.env.CODER_COST_HISTORY_FILES.split(',').map((s) => s.trim()).filter(Boolean)) {
+      files.push(p);
+    }
+  }
+  return files;
+}
+
+// Map of configName -> [{cost, case_id}], built from every representative priced row found.
+function loadHistory(resultsDir = RESULTS_DIR) {
+  const byConfig = {};
+  for (const file of listHistoryFiles(resultsDir)) {
+    for (const rec of readJsonl(file)) {
+      if (!rec || !rec.config || !isRepresentativeRow(rec)) continue;
+      const cost = rowCost(rec);
+      if (cost == null) continue;
+      (byConfig[rec.config] = byConfig[rec.config] || []).push({ cost, case_id: rec.case_id });
+    }
+  }
+  return byConfig;
+}
+
+// Mean of a config's history rows, preferring rows for the same case id when present.
+function historyEstimate(history, configName, caseId) {
+  const rows = history[configName];
+  if (!rows || rows.length === 0) return null;
+  const sameCase = rows.filter((r) => r.case_id === caseId);
+  const pool = sameCase.length ? sameCase : rows;
+  const mean = pool.reduce((s, r) => s + r.cost, 0) / pool.length;
+  return { cost: mean, n: pool.length };
+}
+
+// Fallback params: T turns of growing context, each re-read in full (cache_read) and its
+// delta written once (cache_write_1h), plus per-turn output. Calibrated (see changes.md)
+// against measured means: sonnet5-medium/medium ~$1.25/run, opus55-low/low ~$0.57/run.
+const FALLBACK_PARAMS = {
+  turns: { low: 12, medium: 38, high: 55 },
+  outputPerTurn: { low: 350, medium: 450, high: 600 },
+  growthPerTurn: 4200,
+  baseContext: 15000,
+};
+
+function computeFallbackCost(cfg) {
+  const rate = priceForModel(cfg.model);
+  const effort = FALLBACK_PARAMS.turns[cfg.effort] ? cfg.effort : 'medium';
+  const T = FALLBACK_PARAMS.turns[effort];
+  const GROWTH = FALLBACK_PARAMS.growthPerTurn;
+  const BASE = FALLBACK_PARAMS.baseContext;
+  const outPerTurn = FALLBACK_PARAMS.outputPerTurn[effort];
+  let cost = (BASE / 1e6) * rate.cache_write_1h;
+  for (let t = 2; t <= T; t++) {
+    const priorContext = BASE + GROWTH * (t - 2);
+    cost += (priorContext / 1e6) * rate.cache_read + (GROWTH / 1e6) * rate.cache_write_1h;
+  }
+  cost += (T * outPerTurn / 1e6) * rate.output;
+  return cost;
+}
+
+function estimateRunCost(kase, cfg, configName, history) {
+  if (configName && history) {
+    const hist = historyEstimate(history, configName, kase.id);
+    if (hist) return { cost: hist.cost, source: `history n=${hist.n}` };
+  }
+  return { cost: computeFallbackCost(cfg), source: 'model' };
+}
+
+function percentile(sorted, p) {
+  if (sorted.length === 0) return null;
+  const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
+  return sorted[Math.max(0, idx)];
+}
+
+function buildPlan(configNames, allConfigs, cases, trials, history = loadHistory()) {
+  const rows = [];
+  let total = 0;
+  let p90Total = 0;
+  const configSummary = [];
+  for (const cn of configNames) {
+    const cfg = allConfigs[cn];
+    if (!cfg) { console.error(`unknown config: ${cn}`); continue; }
+    const histRows = history[cn] || [];
+    const p90 = percentile(histRows.map((r) => r.cost).sort((a, b) => a - b), 90);
+    let configTotal = 0, configP90Total = 0, historyRuns = 0;
+    for (const kase of cases) {
+      for (let t = 1; t <= trials; t++) {
+        const est = estimateRunCost(kase, cfg, cn, history);
+        total += est.cost;
+        configTotal += est.cost;
+        const upperPerRun = p90 != null ? p90 : est.cost * 1.5;
+        p90Total += upperPerRun;
+        configP90Total += upperPerRun;
+        if (est.source !== 'model') historyRuns++;
+        rows.push({ config: cn, case: kase.id, trial: t, est_cost_usd: Number(est.cost.toFixed(4)), source: est.source });
+      }
+    }
+    const runCount = cases.length * trials;
+    // Label the whole config, not whichever case happened to be estimated last.
+    const source = historyRuns === 0 ? 'model'
+      : `history n=${histRows.length}${historyRuns < runCount ? `, model for ${runCount - historyRuns} run(s)` : ''}`;
+    configSummary.push({ config: cn, perRunEst: runCount ? configTotal / runCount : 0, source, total: configTotal, p90Total: configP90Total });
+  }
+  return { rows, total, p90Total, configSummary };
 }
 
 function printDryRunPlan(plan, configNames, cases, trials) {
   console.log(`DRY RUN plan: ${plan.rows.length} runs across ${configNames.length} configs x ${cases.length} cases x ${trials} trial(s)`);
+  for (const s of plan.configSummary) {
+    console.log(`  ${s.config}: est $${s.perRunEst.toFixed(4)}/run (${s.source}), config total $${s.total.toFixed(2)}`);
+  }
   console.log(`Estimated total notional spend: $${plan.total.toFixed(2)} (rough order-of-magnitude, priced via bin/advisor-cost rates)`);
+  console.log(`Estimated p90 upper-bound total: $${plan.p90Total.toFixed(2)}`);
   console.log(JSON.stringify(plan.rows, null, 2));
 }
 
@@ -590,4 +713,5 @@ module.exports = {
   loadCompletedSet, completedKey, parseArgs, scrubEnv, runChecker, runOne, runPool,
   sweepStaleWorktrees, buildRunSettings, setupNeutralWorkspace, buildPlan, RESULTS_DIR, activeWorktrees,
   EVAL_DISALLOWED_TOOLS, NEUTRAL_CLAUDE_MD, worktreeChanged, IGNORED_CHANGE_PATHS,
+  loadHistory, historyEstimate, computeFallbackCost, rowCost, isRepresentativeRow, percentile, listHistoryFiles,
 };
