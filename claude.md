@@ -333,6 +333,13 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
 
 ## Context pressure response
 
+Don't wait for the auto-compact warning: `.claude/hooks/context-pressure.js` (PostToolUse)
+reads the last assistant turn's usage and injects one notice per 50K band once context
+reaches ADVISOR_HANDOVER_TOKENS (default 200K — measured 2026-10-05: orchestrator sessions
+are ~48% of spend, and a simulated 200K cap nets ~6.9% savings). Treat the notice like the
+auto-compact warning below. It fires at a task boundary only — never abandon an in-flight
+`advisor-observe` to `/clear` early; let it land or finish arming it first.
+
 If you receive a context-window warning (from Claude Code (auto-compact warning) or your
 own judgement (long session, many syntheses, repeated rework)), take these steps IN ORDER before issuing `/clear`:
 
