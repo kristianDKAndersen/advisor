@@ -470,3 +470,29 @@ test('AGENTS names match fakeSummonScript defaults and behavior', () => {
   // When invoked with no args, would use alpha; with 'alpha' arg, uses 'alpha';
   // with 'beta' arg, uses 'beta' — all match AGENTS constant
 });
+
+// --- noEarlyWakeWindowMs: must never outlive fleet-waker's real GRACE_MS ---------------------------
+
+test('noEarlyWakeWindowMs: stays under remaining grace regardless of timeout-scale', () => {
+  const resultTsMs = Date.now();
+  for (const timeoutScale of [1, 2, 2.5, 5]) {
+    const rawWindowMs = 20000 * timeoutScale; // old, unbounded formula
+    const cappedWindowMs = smoke.noEarlyWakeWindowMs(resultTsMs);
+    expect(cappedWindowMs).toBeLessThan(smoke.FLEET_WAKER_GRACE_MS);
+    if (rawWindowMs > smoke.FLEET_WAKER_GRACE_MS) {
+      // Demonstrates the bug the cap fixes: at scale >= 1.5, the old raw
+      // window polled past the real grace period and could catch a
+      // legitimate post-grace wake and misreport it as premature.
+      expect(cappedWindowMs).toBeLessThan(rawWindowMs);
+    }
+  }
+});
+
+test('noEarlyWakeWindowMs: shrinks as elapsed wall-clock time approaches grace', () => {
+  const now = Date.now();
+  const freshWindow = smoke.noEarlyWakeWindowMs(now, 30000, 3000);
+  const staleWindow = smoke.noEarlyWakeWindowMs(now - 20000, 30000, 3000);
+  expect(freshWindow).toBeGreaterThan(staleWindow);
+  expect(staleWindow).toBeCloseTo(7000, -2);
+  expect(smoke.noEarlyWakeWindowMs(now - 40000, 30000, 3000)).toBe(0);
+});

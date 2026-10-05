@@ -385,8 +385,10 @@ function checkFleetWaker() {
 
     // Fresh (ts=now) result puts beta inside the grace window.
     const betaOutboxPath = path.join(runsRoot, betaSid, 'channel', 'outbox.jsonl');
+    const betaResultTs = Math.floor(Date.now() / 1000);
+    const betaResultTsMs = betaResultTs * 1000;
     const betaResultLine = smoke.buildResultLine({
-      seq: 2, sid: betaSid, ts: Math.floor(Date.now() / 1000),
+      seq: 2, sid: betaSid, ts: betaResultTs,
       summary: 'done', verdict: 'complete',
     });
     fs.appendFileSync(betaOutboxPath, betaResultLine + '\n');
@@ -400,12 +402,28 @@ function checkFleetWaker() {
       return fail('fleet-waker', t0, captureAndSaveEvidence(['beta never showed "waiting grace"']));
     }
 
+    // GRACE_MS in mods/fleet-waker/hooks/register.js is a fixed wall-clock SLA,
+    // not scaled by --timeout-scale. Capping this window via noEarlyWakeWindowMs
+    // keeps it from outliving the real grace period at higher scales, which
+    // would otherwise misreport a legitimate post-grace wake as premature.
+    const earlyWakeWindowMs = smoke.noEarlyWakeWindowMs(betaResultTsMs);
+    const earlyWakeWindowComputedAtMs = Date.now();
+    let betaWakeSeenAtMs = null;
     const betaWokeEarly = pollUntil(() => {
       const pane = tmuxCapture(sessionName);
-      return smoke.countWakesBySid(pane)[betaSid] ? pane : null;
-    }, 20000 * args.timeoutScale, 1000);
+      if (smoke.countWakesBySid(pane)[betaSid]) {
+        betaWakeSeenAtMs = betaWakeSeenAtMs || Date.now();
+        return pane;
+      }
+      return null;
+    }, earlyWakeWindowMs, 1000);
     if (betaWokeEarly) {
-      return fail('fleet-waker', t0, captureAndSaveEvidence(['beta woke before grace elapsed']));
+      return fail('fleet-waker', t0, captureAndSaveEvidence([
+        'beta woke before grace elapsed',
+        `betaResultTsMs=${betaResultTsMs} earlyWakeWindowComputedAtMs=${earlyWakeWindowComputedAtMs} ` +
+          `earlyWakeWindowMs=${earlyWakeWindowMs} betaWakeSeenAtMs=${betaWakeSeenAtMs} ` +
+          `ageAtWakeMs=${betaWakeSeenAtMs !== null ? betaWakeSeenAtMs - betaResultTsMs : 'n/a'}`,
+      ]));
     }
 
     // --- alpha: backdated (already past grace) result wakes immediately -
