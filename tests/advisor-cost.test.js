@@ -186,6 +186,25 @@ describe('v2 row pricing (by_model, two models, exact dollar math)', () => {
   });
 });
 
+describe('v3 row pricing (advisor_message iterations folded into by_model)', () => {
+  it('prices a v3 row with both executor and advisor models', () => {
+    const row = {
+      sid: 'v3-exec-advisor',
+      counting: 'dedupe-v3',
+      total_used: 2_000_000,
+      breakdown: { input_tokens: 2_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      by_model: {
+        'claude-sonnet-5': { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_5m_input_tokens: 0, cache_creation_1h_input_tokens: 0 },
+        'claude-opus-5': { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_5m_input_tokens: 0, cache_creation_1h_input_tokens: 0 },
+      },
+    };
+    const n = normalizeEntry(row);
+    // sonnet-5 input: 1M * $2 = 2.00 ; opus-5 input: 1M * $5 = 5.00
+    expect(n.cost).toBeCloseTo(7.00, 4);
+    expect(n.legacy).toBe(false);
+  });
+});
+
 describe('legacy row pricing (no counting:dedupe-v2)', () => {
   it('still reads and prices a legacy row, marked legacy, without adjusting token counts', () => {
     const row = {

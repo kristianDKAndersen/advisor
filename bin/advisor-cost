@@ -98,7 +98,10 @@ function costForModelUsage(modelId, u) {
 // (sonnet-4-6 @ 5m write rate) so historical dollar figures don't move — marked
 // "legacy" rather than silently re-scaled.
 function normalizeEntry(e) {
-  const isV2 = e.counting === 'dedupe-v2';
+  // dedupe-v3 rows additionally fold advisor-tool iterations into by_model
+  // (see sumUsageFromLines/sumTranscriptUsage); same by_model shape as v2, so
+  // pricing is identical — just accept both tags.
+  const isV2 = e.counting === 'dedupe-v2' || e.counting === 'dedupe-v3';
   const base = e.breakdown
     ? {
         input_tokens: e.breakdown.input_tokens || 0,
