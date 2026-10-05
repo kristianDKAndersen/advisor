@@ -1,6 +1,6 @@
 // tests/summon-intelligence-map.test.js
 // Tests for adapter/intelligence-map.json band partition — intentional 7-band layout:
-// [0,29] haiku/low, [30,49] haiku/high, [50,69] sonnet-5/medium, [70,84] sonnet-5/high,
+// [0,29] haiku/low, [30,49] haiku/high, [50,69] sonnet-5-5/medium, [70,84] sonnet-5-5/high,
 // [85,89] opus-5-5/medium, [90,94] opus-5-5/high, [95,100] opus-5-5/max.
 
 import { test, expect } from 'bun:test';
@@ -35,26 +35,26 @@ test('score 49 resolves to haiku high band (upper boundary)', () => {
 // Band 3: sonnet medium [50, 69]
 test('score 50 resolves to sonnet medium band (lower boundary)', () => {
   const r = resolveIntelligence(50);
-  expect(r.model).toBe('claude-sonnet-5');
+  expect(r.model).toBe('claude-sonnet-5-5');
   expect(r.reasoning).toBe('medium');
 });
 
 test('score 69 resolves to sonnet medium band (upper boundary)', () => {
   const r = resolveIntelligence(69);
-  expect(r.model).toBe('claude-sonnet-5');
+  expect(r.model).toBe('claude-sonnet-5-5');
   expect(r.reasoning).toBe('medium');
 });
 
 // Band 4: sonnet high [70, 84]
 test('score 70 resolves to sonnet high band (lower boundary)', () => {
   const r = resolveIntelligence(70);
-  expect(r.model).toBe('claude-sonnet-5');
+  expect(r.model).toBe('claude-sonnet-5-5');
   expect(r.reasoning).toBe('high');
 });
 
 test('score 84 resolves to sonnet high band (upper boundary)', () => {
   const r = resolveIntelligence(84);
-  expect(r.model).toBe('claude-sonnet-5');
+  expect(r.model).toBe('claude-sonnet-5-5');
   expect(r.reasoning).toBe('high');
 });
 
