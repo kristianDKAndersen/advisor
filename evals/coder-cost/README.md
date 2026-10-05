@@ -19,7 +19,8 @@ For each `(config, case, trial)` tuple:
   1. **Instrument A** — `total_cost_usd` / `usage` as reported by the CLI's
      own `--output-format json` result.
   2. **Instrument B** — recomputed from the session transcript (deduped by
-     `message.id`) at the list rates in `rates.json`.
+     `message.id`) at the per-model list rates exported by
+     `bin/advisor-cost` (`priceForModel`), with the 5m/1h cache-write split.
   A run where A and B differ by more than 5% is flagged
   (`cost_disagreement_flag`).
 
@@ -37,13 +38,9 @@ see `report.js`'s "cost/solved task" column.
   disposable worktrees — see `case-mining-log.md` for the full kept/dropped
   table and reasons).
 - `configs.json` — model/effort/time-awareness configs under comparison.
-- `rates.json` — **placeholder, unverified** list pricing used for cost
-  instrument B. `verified: false` until someone updates it from the current
-  published Claude API pricing; `report.js` and `run.js` do not silently
-  pretend otherwise.
 - `run.js` — the runner (see Usage below).
 - `report.js` — aggregates `results/*.jsonl` into a markdown report.
-- `hooks/elapsed-time-hook.js` — UserPromptSubmit hook used by the
+- `hooks/elapsed-time-hook.js` — PostToolUse hook used by the
   `*-timeaware` config (see "Time-aware config" below).
 - `results/<run-id>.jsonl` — append-only result records, one run-id file per
   `run.js` invocation. Resuming re-scans **all** files in `results/`, so
@@ -101,8 +98,8 @@ Flags: `--configs <comma-list>` (default: all), `--cases <comma-list|all>`
    each of your turns."
 2. **Per-turn elapsed-time half** (implemented, **not empirically verified**
    beyond the approved smoke run, which only exercises `sonnet5-medium`):
-   `run.js` writes a `.eval-start-ts` marker into the worktree and a
-   project-level `.claude/settings.json` wiring a `UserPromptSubmit` hook
+   `run.js` passes a per-run `--settings` JSON (time-aware config only) wiring a
+   `PostToolUse` hook
    (`hooks/elapsed-time-hook.js`) that emits the documented
    `hookSpecificOutput.additionalContext` contract with the elapsed seconds.
    If this hook contract turns out not to fire in your CLI version, only the

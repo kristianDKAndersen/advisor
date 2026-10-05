@@ -2,15 +2,21 @@ import { test, expect, beforeAll, afterAll, describe } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execSync, spawn, spawnSync } from 'child_process';
 
 const FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-fixture-'));
 const RESULTS_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-results-'));
+const EVAL_FIXTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-evaldir-'));
 process.env.CODER_COST_REPO_ROOT = FIXTURE_ROOT;
 process.env.CODER_COST_RESULTS_DIR = RESULTS_ROOT;
+process.env.CODER_COST_CASES_FILE = path.join(EVAL_FIXTURE_DIR, 'cases.jsonl');
+process.env.CODER_COST_CONFIGS_FILE = path.join(EVAL_FIXTURE_DIR, 'configs.json');
 
 const runner = require('../evals/coder-cost/run.js');
 const reporter = require('../evals/coder-cost/report.js');
+const { priceForModel } = require('../bin/advisor-cost');
+
+const RUN_JS_PATH = path.join(__dirname, '..', 'evals', 'coder-cost', 'run.js');
 
 const STUB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-stub-'));
 const STUB_CLAUDE_PATH = path.join(STUB_DIR, 'claude');
@@ -41,12 +47,27 @@ beforeAll(() => {
   execSync('git add -A && git commit -q -m solution', { cwd: FIXTURE_ROOT });
   solutionSha = execSync('git rev-parse HEAD', { cwd: FIXTURE_ROOT }).toString().trim();
 
+  fs.writeFileSync(path.join(EVAL_FIXTURE_DIR, 'cases.jsonl'), JSON.stringify({
+    id: 'case-test', base_sha: baseSha, solution_sha: solutionSha,
+    brief: 'fix add()', hidden_tests: ['tests/add.test.js'], timeout_sec: 60,
+  }) + '\n');
+  fs.writeFileSync(path.join(EVAL_FIXTURE_DIR, 'configs.json'), JSON.stringify({
+    'sonnet5-medium': { model: 'claude-sonnet-5', effort: 'medium', time_aware: false },
+    'sonnet5-medium-timeaware': { model: 'claude-sonnet-5', effort: 'medium', time_aware: true, append_system_prompt: 'go fast' },
+  }));
+
   const stubSrc = [
     '#!/usr/bin/env bun',
     'const fs = require("fs");',
+    'if (process.env.STUB_INVOKED_LOG) { try { fs.appendFileSync(process.env.STUB_INVOKED_LOG, process.pid + "\\n"); } catch (e) {} }',
     'const mode = process.env.STUB_MODE;',
-    'if (mode === "slow") { execSleep(); }',
-    'function execSleep() { const start = Date.now(); while (Date.now() - start < 5000) {} }',
+    'function busySleep(ms) { const start = Date.now(); while (Date.now() - start < ms) {} }',
+    'if (mode === "slow") { busySleep(5000); }',
+    'if (mode === "track") {',
+    '  fs.appendFileSync(process.env.STUB_LOG_FILE, JSON.stringify({ event: "start", ts: Date.now(), pid: process.pid }) + "\\n");',
+    '  busySleep(1000);',
+    '  fs.appendFileSync(process.env.STUB_LOG_FILE, JSON.stringify({ event: "end", ts: Date.now(), pid: process.pid }) + "\\n");',
+    '}',
     'if (mode === "fix") { fs.writeFileSync("lib/add.js", process.env.STUB_FIX_CONTENT); }',
     'if (mode === "badjson") { process.stdout.write("not json"); process.exit(0); }',
     'process.stdout.write(JSON.stringify({ total_cost_usd: 0.0123, usage: { input_tokens: 100, output_tokens: 50 }, session_id: "stub-session" }));',
@@ -58,15 +79,15 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  for (const d of [FIXTURE_ROOT, RESULTS_ROOT, STUB_DIR]) {
+  for (const d of [FIXTURE_ROOT, RESULTS_ROOT, STUB_DIR, EVAL_FIXTURE_DIR]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) {}
   }
 });
 
-function withStubPath(fn) {
+async function withStubPath(fn) {
   const origPath = process.env.PATH;
   process.env.PATH = `${STUB_DIR}:${origPath}`;
-  try { return fn(); } finally { process.env.PATH = origPath; }
+  try { return await fn(); } finally { process.env.PATH = origPath; }
 }
 
 function makeCase(timeoutSec = 60) {
@@ -77,32 +98,38 @@ function makeCase(timeoutSec = 60) {
 }
 
 const cfg = { model: 'claude-sonnet-5', effort: 'medium' };
-const rates = { verified: false, models: { 'claude-sonnet-5': { input_per_mtok: 3, output_per_mtok: 15, cache_write_per_mtok: 3.75, cache_read_per_mtok: 0.3 } } };
+
+function runCli(args, env = {}) {
+  return spawnSync('bun', [RUN_JS_PATH, ...args], {
+    cwd: FIXTURE_ROOT, encoding: 'utf8', timeout: 20000,
+    env: { ...process.env, PATH: `${STUB_DIR}:${process.env.PATH}`, ...env },
+  });
+}
 
 describe('outcome classification (stubbed claude binary)', () => {
-  test('pass: agent fixes the file, hidden tests pass', () => {
+  test('pass: agent fixes the file, hidden tests pass', async () => {
     process.env.STUB_MODE = 'fix';
     process.env.STUB_FIX_CONTENT = RIGHT_IMPL;
-    const result = withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 1, rates));
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 1));
     expect(result.outcome).toBe('pass');
     expect(result.cost_instrument_a.cost).toBeCloseTo(0.0123, 5);
   });
 
-  test('fail: agent does not fix the file, hidden tests fail', () => {
+  test('fail: agent does not fix the file, hidden tests fail', async () => {
     process.env.STUB_MODE = 'nofix';
-    const result = withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 2, rates));
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 2));
     expect(result.outcome).toBe('fail');
   });
 
-  test('error: agent produces unparseable stdout', () => {
+  test('error: agent produces unparseable stdout', async () => {
     process.env.STUB_MODE = 'badjson';
-    const result = withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 3, rates));
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 3));
     expect(result.outcome).toBe('error');
   });
 
-  test('timeout: agent exceeds the case wall-clock budget', () => {
+  test('timeout: agent exceeds the case wall-clock budget', async () => {
     process.env.STUB_MODE = 'slow';
-    const result = withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(1), 4, rates));
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(1), 4));
     expect(result.outcome).toBe('timeout');
   }, 15000);
 });
@@ -137,7 +164,7 @@ describe('instrument-disagreement flag', () => {
   });
 });
 
-describe('costFromTranscript', () => {
+describe('costFromTranscript (priced via bin/advisor-cost)', () => {
   test('finds the transcript by scanning <projectsRoot>/*/<session_id>.jsonl and dedupes by message.id', () => {
     const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-projects-'));
     const projDir = path.join(projectsRoot, 'some-project-slug');
@@ -149,18 +176,42 @@ describe('costFromTranscript', () => {
     ];
     fs.writeFileSync(path.join(projDir, 'sess-abc.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
 
-    const result = runner.costFromTranscript('sess-abc', rates, 'claude-sonnet-5', projectsRoot);
+    const result = runner.costFromTranscript('sess-abc', 'claude-sonnet-5', projectsRoot);
+    const rate = priceForModel('claude-sonnet-5');
     const expectedInput = 1500, expectedOutput = 300;
-    const expectedCost = (expectedInput / 1e6) * 3 + (expectedOutput / 1e6) * 15;
-    expect(result.tokens).toEqual({ input: expectedInput, output: expectedOutput, cacheWrite: 0, cacheRead: 0 });
+    const expectedCost = (expectedInput / 1e6) * rate.input + (expectedOutput / 1e6) * rate.output;
+    expect(result.tokens).toEqual({ input: expectedInput, output: expectedOutput, cacheRead: 0, cache5m: 0, cache1h: 0 });
     expect(result.cost).toBeCloseTo(expectedCost, 8);
   });
 
   test('reports unavailable (not a silent zero) when no transcript matches', () => {
     const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-projects-empty-'));
-    const result = runner.costFromTranscript('missing-session', rates, 'claude-sonnet-5', projectsRoot);
+    const result = runner.costFromTranscript('missing-session', 'claude-sonnet-5', projectsRoot);
     expect(result.cost).toBeNull();
     expect(result.note).toMatch(/no transcript found/);
+  });
+
+  test('splits usage.cache_creation into ephemeral 5m/1h tiers, each priced at its own rate', () => {
+    const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-projects-cache-'));
+    const projDir = path.join(projectsRoot, 'slug');
+    fs.mkdirSync(projDir, { recursive: true });
+    const lines = [{
+      message: {
+        id: 'm1', model: 'claude-sonnet-5',
+        usage: {
+          input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 500,
+          cache_creation: { ephemeral_5m_input_tokens: 2000, ephemeral_1h_input_tokens: 1000 },
+        },
+      },
+    }];
+    fs.writeFileSync(path.join(projDir, 'sess-cache.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+    const result = runner.costFromTranscript('sess-cache', 'claude-sonnet-5', projectsRoot);
+    const rate = priceForModel('claude-sonnet-5');
+    const expectedCost = (1000 / 1e6) * rate.input + (200 / 1e6) * rate.output + (500 / 1e6) * rate.cache_read
+      + (2000 / 1e6) * rate.cache_creation + (1000 / 1e6) * rate.cache_write_1h;
+    expect(result.tokens).toEqual({ input: 1000, output: 200, cacheRead: 500, cache5m: 2000, cache1h: 1000 });
+    expect(result.cost).toBeCloseTo(expectedCost, 10);
   });
 });
 
@@ -181,19 +232,26 @@ describe('cost-per-solved-task math (report.js)', () => {
 });
 
 describe('estimateRunCost / parseArgs', () => {
-  test('estimateRunCost scales with brief length and uses the model rate table', () => {
+  test('estimateRunCost scales with brief length and uses bin/advisor-cost rates', () => {
     const kase = { brief: 'x'.repeat(4000), timeout_sec: 600 };
-    const est = runner.estimateRunCost(kase, cfg, rates);
+    const est = runner.estimateRunCost(kase, cfg);
     expect(est.cost).toBeGreaterThan(0);
   });
 
-  test('parseArgs reads --configs, --cases, --trials, --concurrency, --dry-run', () => {
-    const args = runner.parseArgs(['--configs', 'a,b', '--cases', 'case-001', '--trials', '3', '--concurrency', '4', '--dry-run']);
+  test('parseArgs reads --configs, --cases, --trials, --concurrency, --dry-run, --confirm', () => {
+    const args = runner.parseArgs(['--configs', 'a,b', '--cases', 'case-001', '--trials', '3', '--concurrency', '4', '--dry-run', '--confirm']);
     expect(args.configs).toEqual(['a', 'b']);
     expect(args.cases).toEqual(['case-001']);
     expect(args.trials).toBe(3);
     expect(args.concurrency).toBe(4);
     expect(args.dryRun).toBe(true);
+    expect(args.confirm).toBe(true);
+    expect(args.unknown).toEqual([]);
+  });
+
+  test('parseArgs collects unrecognized flags for the caller to reject', () => {
+    const args = runner.parseArgs(['--bogus']);
+    expect(args.unknown).toEqual(['--bogus']);
   });
 });
 
@@ -204,4 +262,87 @@ describe('env scrubbing', () => {
     expect(env.CLAUDE_CODE_SESSION_ID).toBeUndefined();
     delete process.env.CLAUDE_CODE_SESSION_ID;
   });
+});
+
+describe('setupTimeAware', () => {
+  test('writes a settings JSON wiring only the PostToolUse elapsed-time hook', () => {
+    const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-wt-'));
+    const settingsPath = runner.setupTimeAware(wt, { time_aware: true });
+    expect(settingsPath).toBe(path.join(wt, '.coder-cost-settings.json'));
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(Object.keys(settings.hooks)).toEqual(['PostToolUse']);
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toContain('elapsed-time-hook.js');
+    fs.rmSync(wt, { recursive: true, force: true });
+  });
+
+  test('is a no-op for non time-aware configs', () => {
+    const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-wt2-'));
+    const settingsPath = runner.setupTimeAware(wt, { time_aware: false });
+    expect(settingsPath).toBeNull();
+    expect(fs.existsSync(path.join(wt, '.coder-cost-settings.json'))).toBe(false);
+    fs.rmSync(wt, { recursive: true, force: true });
+  });
+});
+
+describe('spend guard (CLI)', () => {
+  test('--help prints usage, exits 0, and never invokes the claude stub', () => {
+    const invokedLog = path.join(EVAL_FIXTURE_DIR, 'invoked-help.log');
+    const res = runCli(['--help'], { STUB_INVOKED_LOG: invokedLog });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain('Usage:');
+    expect(fs.existsSync(invokedLog)).toBe(false);
+  });
+
+  test('missing --confirm prints the dry-run plan, exits 3, and never invokes the claude stub', () => {
+    const invokedLog = path.join(EVAL_FIXTURE_DIR, 'invoked-noconfirm.log');
+    const res = runCli(['--configs', 'sonnet5-medium', '--cases', 'case-test'], { STUB_INVOKED_LOG: invokedLog });
+    expect(res.status).toBe(3);
+    expect(res.stdout).toContain('DRY RUN plan');
+    expect(fs.existsSync(invokedLog)).toBe(false);
+  });
+
+  test('unknown flag exits 2', () => {
+    const res = runCli(['--bogus']);
+    expect(res.status).toBe(2);
+  });
+});
+
+describe('worktree cleanup on SIGTERM', () => {
+  test('a mid-run SIGTERM removes the worktree instead of leaking it', async () => {
+    const before = new Set(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('coder-cost-')));
+    const child = spawn('bun', [RUN_JS_PATH, '--configs', 'sonnet5-medium', '--cases', 'case-test', '--trials', '1', '--concurrency', '1', '--confirm'], {
+      cwd: FIXTURE_ROOT,
+      env: { ...process.env, PATH: `${STUB_DIR}:${process.env.PATH}`, STUB_MODE: 'slow' },
+    });
+    await new Promise((r) => setTimeout(r, 1500));
+    child.kill('SIGTERM');
+    await new Promise((resolve) => child.on('close', resolve));
+    const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('coder-cost-') && !before.has(n));
+    expect(after.length).toBe(0);
+  }, 20000);
+});
+
+describe('real concurrency', () => {
+  test('--concurrency 3 runs 3 jobs with overlapping execution windows and writes all 3 results', () => {
+    const logFile = path.join(EVAL_FIXTURE_DIR, 'concurrency.log');
+    fs.writeFileSync(logFile, '');
+    const beforeFiles = new Set(fs.readdirSync(RESULTS_ROOT));
+    const res = runCli(['--configs', 'sonnet5-medium', '--cases', 'case-test', '--trials', '3', '--concurrency', '3', '--confirm'],
+      { STUB_MODE: 'track', STUB_LOG_FILE: logFile });
+    expect(res.status).toBe(0);
+
+    const events = fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const starts = events.filter((e) => e.event === 'start').sort((a, b) => a.ts - b.ts);
+    const ends = events.filter((e) => e.event === 'end').sort((a, b) => a.ts - b.ts);
+    expect(starts.length).toBe(3);
+    expect(ends.length).toBe(3);
+    // Real concurrency: at least 2 jobs must have started before the first one ended.
+    const startsBeforeFirstEnd = starts.filter((s) => s.ts <= ends[0].ts).length;
+    expect(startsBeforeFirstEnd).toBeGreaterThanOrEqual(2);
+
+    const newFile = [...fs.readdirSync(RESULTS_ROOT)].find((f) => !beforeFiles.has(f));
+    expect(newFile).toBeDefined();
+    const lines = fs.readFileSync(path.join(RESULTS_ROOT, newFile), 'utf8').trim().split('\n').filter(Boolean);
+    expect(lines.length).toBe(3);
+  }, 30000);
 });

@@ -1,8 +1,0 @@
-{
-  "_note": "PLACEHOLDER list rates in USD per million tokens. These are NOT verified against current published pricing for claude-sonnet-5 / claude-opus-5-5 (this eval's author had no verified source at write time). Update from the live Claude API pricing page before trusting instrument (b) (transcript recomputation) or any report comparison that flags instrument disagreement. Until updated, 'verified' stays false and report.js prints a loud warning.",
-  "verified": false,
-  "models": {
-    "claude-sonnet-5": { "input_per_mtok": 3, "output_per_mtok": 15, "cache_write_per_mtok": 3.75, "cache_read_per_mtok": 0.3 },
-    "claude-opus-5-5": { "input_per_mtok": 15, "output_per_mtok": 75, "cache_write_per_mtok": 18.75, "cache_read_per_mtok": 1.5 }
-  }
-}
