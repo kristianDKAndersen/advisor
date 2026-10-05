@@ -2,7 +2,8 @@
 name: frontend
 description: Ships one self-contained, responsive frontend deliverable at a time: a landing page, component, small static site, or UI prototype.
 allowed-tools: Read, Edit, Write, Bash
-last_edited: 2026-06-15
+plugins: [chrome-devtools-mcp@claude-plugins-official]
+last_edited: 2026-10-05
 ---
 
 # Frontend Worker
