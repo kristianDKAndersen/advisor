@@ -5,6 +5,12 @@ import path from 'path';
 import { execSync, spawn, spawnSync } from 'child_process';
 
 const FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-fixture-'));
+// Private TMPDIR for this file: run.js (in-process and every spawned child) sweeps
+// coder-cost-* dirs under os.tmpdir(), which must never be the shared one.
+const ORIGINAL_TMPDIR = process.env.TMPDIR;
+const ISOLATED_TMP = path.join(FIXTURE_ROOT, 'tmp');
+fs.mkdirSync(ISOLATED_TMP);
+process.env.TMPDIR = ISOLATED_TMP;
 const RESULTS_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-results-'));
 const EVAL_FIXTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-evaldir-'));
 process.env.CODER_COST_REPO_ROOT = FIXTURE_ROOT;
@@ -86,6 +92,7 @@ beforeAll(() => {
     '  fs.writeFileSync(process.env.STUB_LOG_FILE, JSON.stringify({ argv, claudeMd, hasDotClaude: fs.existsSync(".claude"), settingsContent }));',
     '}',
     'if (mode === "evil") { require("child_process").spawnSync("git", ["branch", "evil"]); }',
+    'if (mode === "vanish") { fs.rmSync(process.cwd(), { recursive: true, force: true }); }',
     'process.stdout.write(JSON.stringify({ total_cost_usd: 0.0123, usage: { input_tokens: 100, output_tokens: 50 }, session_id: "stub-session", num_turns: 3 }));',
     'process.exit(0);',
     '',
@@ -95,6 +102,8 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  // bun runs every test file in one process: don't leave later files a deleted TMPDIR.
+  if (ORIGINAL_TMPDIR === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = ORIGINAL_TMPDIR;
   for (const d of [FIXTURE_ROOT, RESULTS_ROOT, STUB_DIR, EVAL_FIXTURE_DIR]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) {}
   }
@@ -165,6 +174,63 @@ describe('outcome classification (stubbed claude binary)', () => {
     const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(1), 4));
     expect(result.outcome).toBe('timeout');
   }, 15000);
+});
+
+describe('worktree vanished', () => {
+  test('worktree deleted under the run -> error / "worktree vanished", still priced, not no_attempt', async () => {
+    process.env.STUB_MODE = 'vanish';
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 1));
+    expect(result.outcome).toBe('error');
+    expect(result.error_reason).toBe('worktree vanished');
+    expect(result.cost_instrument_a.cost).toBeCloseTo(0.0123, 5);
+  });
+});
+
+describe('sweepStaleWorktrees ownership', () => {
+  function makeRunDir(name, owner) {
+    const dir = path.join(os.tmpdir(), name);
+    fs.mkdirSync(path.join(dir, 'repo'), { recursive: true });
+    if (owner) fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify(owner));
+    return dir;
+  }
+
+  test('os.tmpdir() is the isolated TMPDIR', () => {
+    expect(os.tmpdir()).toBe(ISOLATED_TMP);
+  });
+
+  test('a dir owned by a live pid survives the sweep', () => {
+    const dir = makeRunDir('coder-cost-live', { pid: process.pid, started: Date.now() });
+    runner.sweepStaleWorktrees();
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  test('a dir owned by a dead pid is removed', () => {
+    const deadPid = spawnSync('true').pid;
+    const dir = makeRunDir('coder-cost-dead', { pid: deadPid, started: Date.now() });
+    runner.sweepStaleWorktrees();
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  test('a legacy dir (no owner record) younger than 6h survives; older than 6h is removed', () => {
+    const young = makeRunDir('coder-cost-legacy-young', null);
+    const old = makeRunDir('coder-cost-legacy-old', null);
+    const sevenHoursAgo = new Date(Date.now() - 7 * 3600 * 1000);
+    fs.utimesSync(old, sevenHoursAgo, sevenHoursAgo);
+    runner.sweepStaleWorktrees();
+    expect(fs.existsSync(young)).toBe(true);
+    expect(fs.existsSync(old)).toBe(false);
+  });
+
+  test('run.js --confirm never touches a coder-cost-* dir in a different tmpdir', () => {
+    const otherTmp = path.join(FIXTURE_ROOT, 'other-tmp');
+    const bystander = path.join(otherTmp, 'coder-cost-bystander');
+    fs.mkdirSync(path.join(bystander, 'repo'), { recursive: true });
+    fs.writeFileSync(path.join(bystander, 'owner.json'), JSON.stringify({ pid: spawnSync('true').pid, started: 0 }));
+    process.env.STUB_MODE = 'nofix';
+    const res = runCli(['--configs', 'sonnet5-medium', '--cases', 'case-test', '--trials', '1', '--concurrency', '1', '--confirm'], { TMPDIR: ISOLATED_TMP, CODER_COST_RESULTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-bystander-results-')) });
+    expect(res.status).toBe(0);
+    expect(fs.existsSync(bystander)).toBe(true);
+  });
 });
 
 describe('resume / skip', () => {

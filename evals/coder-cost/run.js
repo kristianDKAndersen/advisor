@@ -318,6 +318,7 @@ const activeWorktrees = new Set();
 function makeWorktree(baseSha) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-'));
   const wt = path.join(dir, 'repo');
+  fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ pid: process.pid, started: Date.now() }));
   const clone = spawnSync('git', ['clone', '--shared', '--no-checkout', '-q', REPO_ROOT, wt], { encoding: 'utf8' });
   if (clone.status !== 0) throw new Error(`git clone failed: ${clone.stderr}`);
   const checkout = spawnSync('git', ['checkout', '--detach', '-q', baseSha], { cwd: wt, encoding: 'utf8' });
@@ -342,6 +343,19 @@ function removeAllActiveWorktrees() {
 // and pre-migration `git worktree add` dirs (still need `git worktree remove`
 // or the source repo's .git/worktrees metadata leaks). Scans $TMPDIR for
 // coder-cost-* containers.
+const LEGACY_DIR_MAX_AGE_MS = 6 * 3600 * 1000;
+
+// A dir is stale only if its owner pid is dead; dirs without an owner.json
+// (pre-ownership runs) are stale only once older than LEGACY_DIR_MAX_AGE_MS.
+function isStaleRunDir(dir) {
+  let owner = null;
+  try { owner = JSON.parse(fs.readFileSync(path.join(dir, 'owner.json'), 'utf8')); } catch (e) {}
+  if (owner && Number.isInteger(owner.pid)) {
+    try { process.kill(owner.pid, 0); return false; } catch (e) { return e.code === 'ESRCH'; }
+  }
+  try { return Date.now() - fs.statSync(dir).mtimeMs > LEGACY_DIR_MAX_AGE_MS; } catch (e) { return false; }
+}
+
 function sweepStaleWorktrees() {
   const tmp = os.tmpdir();
   let entries = [];
@@ -350,6 +364,7 @@ function sweepStaleWorktrees() {
   for (const name of entries) {
     if (!name.startsWith('coder-cost-')) continue;
     const dir = path.join(tmp, name);
+    if (!isStaleRunDir(dir)) continue;
     const legacyWt = path.join(dir, 'wt');
     const cloneDir = path.join(dir, 'repo');
     if (fs.existsSync(legacyWt)) {
@@ -579,6 +594,14 @@ async function runOne(configName, cfg, kase, trial) {
     // Distinguish "the model made no edits at all" from a genuine failed attempt:
     // a no_attempt run is still priced (both instruments) and still records
     // num_turns, but is never run through the hidden-test checker.
+    const gitDir = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: wt, encoding: 'utf8' });
+    if (!fs.existsSync(path.join(wt, '.git')) || gitDir.status !== 0) {
+      return {
+        ...record, outcome: 'error', error_reason: 'worktree vanished', wall_clock_sec: wallSec, claude_exit_code: claudeExitCode,
+        session_id: sessionId, num_turns: numTurns, cost_instrument_a: instrumentA, cost_instrument_b: instrumentB,
+        cost_disagreement_pct: diag.pct, cost_disagreement_flag: diag.flag, cost_disagreement_reason: diag.reason,
+      };
+    }
     if (!worktreeChanged(wt, neutralSha)) {
       return {
         ...record, outcome: 'no_attempt', wall_clock_sec: wallSec, claude_exit_code: claudeExitCode,
