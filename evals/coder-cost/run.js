@@ -254,6 +254,23 @@ function copyHiddenTests(wt, solutionSha, hiddenTests, baseSha) {
   }
 }
 
+// Files/paths the harness itself writes into the worktree that must never count
+// as a "model made changes" signal.
+const IGNORED_CHANGE_PATHS = new Set(['.coder-cost-settings.json']);
+
+// True if anything changed in the worktree since `sinceSha` (the commit right
+// after setupNeutralWorkspace's own swap-commit), covering both committed diffs
+// and uncommitted/untracked files, minus the harness's own housekeeping files.
+function worktreeChanged(wt, sinceSha) {
+  const diff = spawnSync('git', ['diff', '--name-only', sinceSha], { cwd: wt, encoding: 'utf8' });
+  const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: wt, encoding: 'utf8' });
+  const files = new Set();
+  for (const l of (diff.stdout || '').split('\n')) { const f = l.trim(); if (f) files.add(f); }
+  for (const l of (status.stdout || '').split('\n')) { const f = l.slice(3).trim(); if (f) files.add(f); }
+  for (const ignored of IGNORED_CHANGE_PATHS) files.delete(ignored);
+  return files.size > 0;
+}
+
 function runChecker(wt, hiddenTests) {
   const res = spawnSync('bun', ['test', ...hiddenTests], { cwd: wt, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL' });
   if (res.error && res.error.code === 'ETIMEDOUT') return { outcome: 'timeout', raw: res };
@@ -391,6 +408,8 @@ async function runOne(configName, cfg, kase, trial) {
   const { wt } = wtInfo;
   try {
     setupNeutralWorkspace(wt);
+    const neutralShaRes = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wt, encoding: 'utf8' });
+    const neutralSha = neutralShaRes.stdout.trim();
     const settingsPath = buildRunSettings(wt, cfg);
     const args = ['-p', kase.brief, '--model', cfg.model, '--effort', cfg.effort,
       '--permission-mode', 'auto', '--strict-mcp-config', '--output-format', 'json',
@@ -433,6 +452,17 @@ async function runOne(configName, cfg, kase, trial) {
     const diag = disagreement(instrumentA && instrumentA.cost, instrumentB && instrumentB.cost);
     const sessionId = (instrumentA && instrumentA.session_id) || null;
     const numTurns = typeof parsed.num_turns === 'number' ? parsed.num_turns : null;
+
+    // Distinguish "the model made no edits at all" from a genuine failed attempt:
+    // a no_attempt run is still priced (both instruments) and still records
+    // num_turns, but is never run through the hidden-test checker.
+    if (!worktreeChanged(wt, neutralSha)) {
+      return {
+        ...record, outcome: 'no_attempt', wall_clock_sec: wallSec, claude_exit_code: claudeExitCode,
+        session_id: sessionId, num_turns: numTurns, cost_instrument_a: instrumentA, cost_instrument_b: instrumentB,
+        cost_disagreement_pct: diag.pct, cost_disagreement_flag: diag.flag, cost_disagreement_reason: diag.reason,
+      };
+    }
 
     let checkerResult;
     try {
@@ -559,5 +589,5 @@ module.exports = {
   estimateRunCost, costFromAgentJson, costFromTranscript, findTranscript, disagreement,
   loadCompletedSet, completedKey, parseArgs, scrubEnv, runChecker, runOne, runPool,
   sweepStaleWorktrees, buildRunSettings, setupNeutralWorkspace, buildPlan, RESULTS_DIR, activeWorktrees,
-  EVAL_DISALLOWED_TOOLS, NEUTRAL_CLAUDE_MD,
+  EVAL_DISALLOWED_TOOLS, NEUTRAL_CLAUDE_MD, worktreeChanged, IGNORED_CHANGE_PATHS,
 };

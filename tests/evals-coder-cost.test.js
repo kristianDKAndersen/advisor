@@ -74,6 +74,7 @@ beforeAll(() => {
     '  fs.appendFileSync(process.env.STUB_LOG_FILE, JSON.stringify({ event: "end", ts: Date.now(), pid: process.pid }) + "\\n");',
     '}',
     'if (mode === "fix") { fs.writeFileSync("lib/add.js", process.env.STUB_FIX_CONTENT); }',
+    'if (mode === "wrongfix") { fs.writeFileSync("lib/add.js", "function add(a, b) { return a + b + 1; }\\nmodule.exports = { add };\\n"); }',
     'if (mode === "badjson") { process.stdout.write("not json"); process.exit(0); }',
     'if (mode === "inspect") {',
     '  let claudeMd = null;',
@@ -130,9 +131,20 @@ describe('outcome classification (stubbed claude binary)', () => {
     expect(result.cost_instrument_a.cost).toBeCloseTo(0.0123, 5);
   });
 
-  test('fail: agent does not fix the file, hidden tests fail, and the record carries checker_output_tail', async () => {
+  test('no_attempt: agent makes zero worktree changes, distinct from a genuine failed attempt', async () => {
     process.env.STUB_MODE = 'nofix';
     const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 2));
+    expect(result.outcome).toBe('no_attempt');
+    expect(result.checker_exit_code).toBeUndefined();
+    expect(result.session_id).toBe('stub-session');
+    expect(result.num_turns).toBe(3);
+    expect(result.claude_exit_code).toBe(0);
+    expect(result.cost_instrument_a.cost).toBeCloseTo(0.0123, 5);
+  });
+
+  test('fail: agent attempts a fix but gets it wrong, hidden tests fail, and the record carries checker_output_tail', async () => {
+    process.env.STUB_MODE = 'wrongfix';
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 2.5));
     expect(result.outcome).toBe('fail');
     expect(result.checker_exit_code).not.toBe(0);
     expect(typeof result.checker_output_tail).toBe('string');
@@ -349,7 +361,7 @@ describe('isolation (clone-based, not git worktree)', () => {
     process.env.STUB_MODE = 'inspect';
     process.env.STUB_LOG_FILE = logFile;
     const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 10));
-    expect(result.outcome).toBe('fail'); // 'inspect' mode never touches lib/add.js
+    expect(result.outcome).toBe('no_attempt'); // 'inspect' mode never touches lib/add.js
     const seen = JSON.parse(fs.readFileSync(logFile, 'utf8'));
     expect(seen.claudeMd.trim()).toBe(runner.NEUTRAL_CLAUDE_MD);
     expect(seen.hasDotClaude).toBe(false);
@@ -406,6 +418,50 @@ describe('worktree cleanup on SIGTERM', () => {
     const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('coder-cost-') && !before.has(n));
     expect(after.length).toBe(0);
   }, 20000);
+});
+
+describe('build-briefs.js (real cases.jsonl, real repo history)', () => {
+  const buildBriefs = require('../evals/coder-cost/build-briefs.js');
+  const REAL_REPO_ROOT = path.join(__dirname, '..');
+  const realCases = fs.readFileSync(path.join(REAL_REPO_ROOT, 'evals', 'coder-cost', 'cases.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+  test('every case brief has 26 entries to check', () => {
+    expect(realCases.length).toBe(26);
+  });
+
+  for (const kase of realCases) {
+    test(`${kase.id}: brief carries the preamble and the full, untruncated solution-commit message`, () => {
+      expect(kase.brief.startsWith(buildBriefs.PREAMBLE)).toBe(true);
+      const expectedMessage = buildBriefs.stripTrailers(
+        execSync(`git log -1 --format=%B ${kase.solution_sha}`, { cwd: REAL_REPO_ROOT, encoding: 'utf8' }).replace(/\n$/, '')
+      );
+      const actualMessage = kase.brief.slice(buildBriefs.PREAMBLE.length);
+      expect(actualMessage).toBe(expectedMessage);
+      const subjectLine = expectedMessage.split('\n')[0];
+      expect(actualMessage).toContain(subjectLine);
+      // Not a prefix-truncation: the real message's last line must appear in full.
+      const expectedLastLine = expectedMessage.split('\n').filter(Boolean).pop();
+      expect(actualMessage).toContain(expectedLastLine);
+    });
+  }
+});
+
+describe('report.js renders no_attempt', () => {
+  test('no_attempt gets its own counted column, separate from fail/pass', () => {
+    const results = [
+      { config: 'c1', outcome: 'pass', cost_instrument_a: { cost: 1.0 } },
+      { config: 'c1', outcome: 'no_attempt', cost_instrument_a: { cost: 0.2 } },
+      { config: 'c1', outcome: 'no_attempt', cost_instrument_a: { cost: 0.2 } },
+    ];
+    const md = reporter.buildReport(results);
+    expect(md).toContain('no_attempt');
+    const row = md.split('\n').find((l) => l.startsWith('| c1 |'));
+    const cells = row.split('|').map((c) => c.trim());
+    // cells: ['', config, runs, pass, fail, timeout, error, no_attempt, ...]
+    expect(cells[7]).toBe('2'); // no_attempt count
+    expect(cells[3]).toBe('1'); // pass count unaffected
+  });
 });
 
 describe('real concurrency', () => {
