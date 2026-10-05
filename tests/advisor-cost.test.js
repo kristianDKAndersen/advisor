@@ -9,38 +9,54 @@ const REPO = path.resolve(import.meta.dir, '..');
 const BIN = path.join(REPO, 'bin', 'advisor-cost');
 
 describe('priceForModel', () => {
-  it('returns haiku rates including cache rates', () => {
+  it('returns haiku rates including cache rates (date-suffixed id resolves)', () => {
     const p = priceForModel('claude-haiku-4-5-20251001');
-    expect(p.input).toBe(1.00);
-    expect(p.output).toBe(5.00);
+    expect(p.input).toBe(1);
+    expect(p.output).toBe(5);
     expect(p.cache_read).toBe(0.10);
-    expect(p.cache_creation).toBe(1.25);
+    expect(p.cache_creation).toBe(1.25); // 5m write rate (back-compat field)
+    expect(p.cache_write_1h).toBe(2);
+    expect(p.known).toBe(true);
   });
-  it('returns sonnet rates including cache rates', () => {
-    const p = priceForModel('claude-sonnet-5-5');
-    expect(p.input).toBe(2.00);
-    expect(p.output).toBe(10.00);
-    expect(p.cache_read).toBe(0.20);
-    expect(p.cache_creation).toBe(2.50);
+  it('returns sonnet-4-6 rates including cache rates', () => {
+    const p = priceForModel('claude-sonnet-4-6');
+    expect(p.input).toBe(3);
+    expect(p.output).toBe(15);
+    expect(p.cache_read).toBe(0.30);
+    expect(p.cache_creation).toBe(3.75);
+    expect(p.cache_write_1h).toBe(6);
   });
-  it('returns opus rates including cache rates', () => {
-    const p = priceForModel('claude-opus-5-5');
-    expect(p.input).toBe(4.00);
-    expect(p.output).toBe(20.00);
-    expect(p.cache_read).toBe(0.20);
-    expect(p.cache_creation).toBe(5.00);
+  it('returns opus-4-8 rates including cache rates', () => {
+    const p = priceForModel('claude-opus-4-8');
+    expect(p.input).toBe(5);
+    expect(p.output).toBe(25);
+    expect(p.cache_read).toBe(0.50);
+    expect(p.cache_creation).toBe(6.25);
+    expect(p.cache_write_1h).toBe(10);
   });
-  it('returns default (sonnet) rates for unknown model', () => {
+  it('flags an unknown model and prices it at the sonnet-5 row', () => {
     const p = priceForModel('unknown-model');
-    expect(p.input).toBe(2.00);
-    expect(p.output).toBe(10.00);
+    expect(p.input).toBe(2);
+    expect(p.output).toBe(10);
+    expect(p.known).toBe(false);
   });
-  it('returns fable rates', () => {
+  it('returns fable-5 rates', () => {
+    const p = priceForModel('claude-fable-5');
+    expect(p.input).toBe(10);
+    expect(p.output).toBe(50);
+    expect(p.cache_read).toBe(1);
+  });
+  it('longest-prefix match: claude-opus-5-5 resolves to its own row, not claude-opus-5', () => {
+    const p = priceForModel('claude-opus-5-5');
+    expect(p.input).toBe(4);
+    expect(p.cache_read).toBe(0.20);
+    expect(p.known).toBe(true);
+  });
+  it('longest-prefix match: claude-fable-5-1 resolves to its own row, not claude-fable-5', () => {
     const p = priceForModel('claude-fable-5-1');
-    expect(p.input).toBe(10.00);
-    expect(p.output).toBe(50.00);
+    expect(p.input).toBe(10);
     expect(p.cache_read).toBe(0.25);
-    expect(p.cache_creation).toBe(12.50);
+    expect(p.known).toBe(true);
   });
 });
 
@@ -96,24 +112,93 @@ describe('normalizeEntry', () => {
 });
 
 describe('estimateCost (cache-aware)', () => {
-  it('calculates cost for 1M input + 1M output at sonnet rates', () => {
-    const cost = estimateCost(1_000_000, 1_000_000, 0, 0, 'claude-sonnet-5-5');
-    expect(cost).toBeCloseTo(12.00, 4);
+  it('calculates cost for 1M input + 1M output at sonnet-4-6 rates', () => {
+    const cost = estimateCost(1_000_000, 1_000_000, 0, 0, 'claude-sonnet-4-6');
+    expect(cost).toBeCloseTo(18.00, 4);
   });
   it('calculates zero for zero tokens', () => {
     expect(estimateCost(0, 0, 0, 0, 'claude-sonnet-4-6')).toBe(0);
   });
-  it('uses haiku rates for haiku model', () => {
+  it('uses haiku-4-5 rates for haiku model', () => {
     const cost = estimateCost(1_000_000, 0, 0, 0, 'claude-haiku-4-5-20251001');
     expect(cost).toBeCloseTo(1.00, 4);
   });
-  it('includes cache_read in cost at discounted rate (sonnet: $0.20/MTok)', () => {
-    const cost = estimateCost(0, 0, 1_000_000, 0, 'claude-sonnet-5-5');
-    expect(cost).toBeCloseTo(0.20, 4);
+  it('includes cache_read in cost at discounted rate (sonnet-4-6: $0.30/MTok)', () => {
+    const cost = estimateCost(0, 0, 1_000_000, 0, 'claude-sonnet-4-6');
+    expect(cost).toBeCloseTo(0.30, 4);
   });
-  it('includes cache_creation in cost at premium rate (sonnet: $2.50/MTok)', () => {
-    const cost = estimateCost(0, 0, 0, 1_000_000, 'claude-sonnet-5-5');
-    expect(cost).toBeCloseTo(2.50, 4);
+  it('includes cache_creation (5m write) in cost at the 5m rate (sonnet-4-6: $3.75/MTok)', () => {
+    const cost = estimateCost(0, 0, 0, 1_000_000, 'claude-sonnet-4-6');
+    expect(cost).toBeCloseTo(3.75, 4);
+  });
+});
+
+describe('priceForModel: 5m vs 1h cache write', () => {
+  it('sonnet-4-6: 1M 5m-write tokens cost 3.75, 1M 1h-write tokens cost 6.00', () => {
+    const p = priceForModel('claude-sonnet-4-6');
+    expect((1_000_000 / 1_000_000) * p.cache_creation).toBeCloseTo(3.75, 4);
+    expect((1_000_000 / 1_000_000) * p.cache_write_1h).toBeCloseTo(6.00, 4);
+  });
+});
+
+describe('v2 row pricing (by_model, two models, exact dollar math)', () => {
+  it('prices a v2 row by summing per-model costs from by_model', () => {
+    const row = {
+      sid: 'v2-two-model',
+      counting: 'dedupe-v2',
+      total_used: 4_000_000,
+      breakdown: { input_tokens: 999, output_tokens: 999, cache_read_input_tokens: 999, cache_creation_input_tokens: 999 },
+      by_model: {
+        'claude-opus-4-8': {
+          input_tokens: 1_000_000, output_tokens: 1_000_000,
+          cache_read_input_tokens: 1_000_000,
+          cache_creation_5m_input_tokens: 1_000_000,
+          cache_creation_1h_input_tokens: 1_000_000,
+        },
+        'claude-haiku-4-5-20251001': {
+          input_tokens: 1_000_000, output_tokens: 1_000_000,
+          cache_read_input_tokens: 1_000_000,
+          cache_creation_5m_input_tokens: 1_000_000,
+          cache_creation_1h_input_tokens: 1_000_000,
+        },
+      },
+    };
+    const n = normalizeEntry(row);
+    // opus-4-8: 5 + 25 + 0.50 + 6.25 + 10 = 46.75
+    // haiku-4-5: 1 + 5 + 0.10 + 1.25 + 2 = 9.35
+    expect(n.cost).toBeCloseTo(56.10, 6);
+    expect(n.legacy).toBe(false);
+  });
+
+  it('flags an unknown model inside by_model and prices it at the sonnet-5 row', () => {
+    const row = {
+      sid: 'v2-unpriced',
+      counting: 'dedupe-v2',
+      total_used: 1_000_000,
+      breakdown: { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      by_model: {
+        'claude-foo-9': { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_5m_input_tokens: 0, cache_creation_1h_input_tokens: 0 },
+      },
+    };
+    const n = normalizeEntry(row);
+    expect(n.cost).toBeCloseTo(2.00, 4); // sonnet-5 input rate
+    expect(n.unpriced).toEqual(['claude-foo-9']);
+  });
+});
+
+describe('legacy row pricing (no counting:dedupe-v2)', () => {
+  it('still reads and prices a legacy row, marked legacy, without adjusting token counts', () => {
+    const row = {
+      sid: 'legacy-1', total_used: 2_000_000,
+      breakdown: { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    };
+    const n = normalizeEntry(row);
+    expect(n.legacy).toBe(true);
+    expect(n.input_tokens).toBe(1_000_000);
+    expect(n.output_tokens).toBe(1_000_000);
+    // Legacy rows carry no model: priced at the same default (sonnet-4-6 @ 5m
+    // write rate) today's code already used, so historical $ figures don't move.
+    expect(n.cost).toBeCloseTo(18.00, 4);
   });
 });
 
@@ -339,6 +424,30 @@ describe('CLI: positional sid + --sid resolution (bug fix)', () => {
     // into a single garbled run like "1,250,000,00300".
     expect(numbers).toContain('1,250,000,000');
     expect(numbers).toContain('300');
+  });
+});
+
+describe('CLI: unpriced model flag surfaces in stdout', () => {
+  let stateDir;
+
+  beforeAll(() => {
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'advisor-cost-unpriced-test-'));
+    const row = {
+      sid: 'unpriced-sid', counting: 'dedupe-v2', total_used: 1_000_000,
+      breakdown: { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      by_model: { 'claude-foo-9': { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_5m_input_tokens: 0, cache_creation_1h_input_tokens: 0 } },
+    };
+    fs.writeFileSync(path.join(stateDir, 'token-usage.jsonl'), JSON.stringify(row) + '\n');
+  });
+
+  afterAll(() => {
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it('prints unpriced:<model> rather than silently defaulting', () => {
+    const r = spawnSync('bun', [BIN], { encoding: 'utf8', env: { ...process.env, ADVISOR_STATE_DIR: stateDir }, timeout: 15000 });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('unpriced:claude-foo-9');
   });
 });
 

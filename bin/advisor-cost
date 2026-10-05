@@ -11,30 +11,45 @@
 // Override state path with ADVISOR_STATE_DIR for testing.
 //
 // Pricing: cache_read and cache_creation are priced at published discounted rates,
-// not excluded — they are real costs. Source: claude.com/pricing 2026-10-05
+// not excluded — they are real costs. Source: platform.claude.com/docs pricing page, fetched 2026-10-05.
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const telemetryBackfill = require('../lib/telemetry-backfill');
 
-// Price per million tokens, USD.
-// cache_read is carried per model (10% haiku/sonnet, 5% opus, 2.5% fable);
-// cache_creation = 125% of input; Source: claude.com/pricing 2026-10-05
+// Price per million tokens, USD, by exact model id (longest-prefix match so
+// date-suffixed ids like claude-haiku-4-5-20251001 resolve to claude-haiku-4-5).
+// cache_creation = 5m cache write rate (kept for back-compat with the old field name).
+// cache_write_1h = 1h TTL cache write rate (distinct from the 5m rate; do not conflate).
 const PRICE_TABLE = {
-  'claude-haiku':  { input: 1.00,  output: 5.00,  cache_read: 0.10, cache_creation: 1.25  },
-  'claude-sonnet': { input: 2.00,  output: 10.00, cache_read: 0.20, cache_creation: 2.50  },
-  'claude-opus':   { input: 4.00,  output: 20.00, cache_read: 0.20, cache_creation: 5.00  },
-  'claude-fable':  { input: 10.00, output: 50.00, cache_read: 0.25, cache_creation: 12.50 },
+  'claude-opus-5-5':   { input: 4,  output: 20, cache_read: 0.20, cache_creation: 5,    cache_write_1h: 8  },
+  'claude-opus-5':     { input: 5,  output: 25, cache_read: 0.50, cache_creation: 6.25, cache_write_1h: 10 },
+  'claude-opus-4-8':   { input: 5,  output: 25, cache_read: 0.50, cache_creation: 6.25, cache_write_1h: 10 },
+  'claude-opus-4-7':   { input: 5,  output: 25, cache_read: 0.50, cache_creation: 6.25, cache_write_1h: 10 },
+  'claude-opus-4-6':   { input: 5,  output: 25, cache_read: 0.50, cache_creation: 6.25, cache_write_1h: 10 },
+  'claude-sonnet-5-5': { input: 2,  output: 10, cache_read: 0.20, cache_creation: 2.5,  cache_write_1h: 4  },
+  'claude-sonnet-5':   { input: 2,  output: 10, cache_read: 0.20, cache_creation: 2.5,  cache_write_1h: 4  },
+  'claude-sonnet-4-6': { input: 3,  output: 15, cache_read: 0.30, cache_creation: 3.75, cache_write_1h: 6  },
+  'claude-haiku-4-5':  { input: 1,  output: 5,  cache_read: 0.10, cache_creation: 1.25, cache_write_1h: 2  },
+  'claude-fable-5-1':  { input: 10, output: 50, cache_read: 0.25, cache_creation: 12.5, cache_write_1h: 20 },
+  'claude-fable-5':    { input: 10, output: 50, cache_read: 1,    cache_creation: 12.5, cache_write_1h: 20 },
 };
-const DEFAULT_PRICE = { input: 2.00, output: 10.00, cache_read: 0.20, cache_creation: 2.50 };
+// Default/unknown-model fallback: priced at the sonnet-5 row, flagged (never silent).
+const DEFAULT_PRICE = PRICE_TABLE['claude-sonnet-5'];
+
+// Longest key first so e.g. "claude-opus-5-5" is tried before "claude-opus-5".
+const PRICE_KEYS = Object.keys(PRICE_TABLE).sort((a, b) => b.length - a.length);
 
 function priceForModel(modelId) {
-  if (!modelId) return { ...DEFAULT_PRICE };
-  for (const [prefix, rates] of Object.entries(PRICE_TABLE)) {
-    if (modelId.startsWith(prefix)) return { ...rates };
+  if (modelId) {
+    for (const key of PRICE_KEYS) {
+      if (modelId === key || modelId.startsWith(key + '-')) {
+        return { ...PRICE_TABLE[key], known: true };
+      }
+    }
   }
-  return { ...DEFAULT_PRICE };
+  return { ...DEFAULT_PRICE, known: false };
 }
 
 function stateDir() {
@@ -65,26 +80,68 @@ function lastPerSid(entries) {
   return [...map.values()];
 }
 
+// Prices one by_model entry's five fields against its model's rates.
+function costForModelUsage(modelId, u) {
+  const r = priceForModel(modelId);
+  const cost =
+    ((u.input_tokens || 0) / 1_000_000) * r.input +
+    ((u.output_tokens || 0) / 1_000_000) * r.output +
+    ((u.cache_read_input_tokens || 0) / 1_000_000) * r.cache_read +
+    ((u.cache_creation_5m_input_tokens || 0) / 1_000_000) * r.cache_creation +
+    ((u.cache_creation_1h_input_tokens || 0) / 1_000_000) * r.cache_write_1h;
+  return { cost, known: r.known };
+}
+
+// v2 rows (counting:"dedupe-v2") carry by_model and are priced per-model with
+// separate 5m/1h cache-write rates. Legacy rows (no "counting" field) have no
+// model, are over-counted ~2.14x median, and are priced at today's default
+// (sonnet-4-6 @ 5m write rate) so historical dollar figures don't move — marked
+// "legacy" rather than silently re-scaled.
 function normalizeEntry(e) {
-  if (e.breakdown) {
-    return {
-      sid: e.sid,
-      input_tokens: e.breakdown.input_tokens || 0,
-      output_tokens: e.breakdown.output_tokens || 0,
-      cache_read: e.breakdown.cache_read_input_tokens || 0,
-      cache_creation: e.breakdown.cache_creation_input_tokens || 0,
-      total: e.total_used || 0,
-      ts: e.ts || null,
-    };
+  const isV2 = e.counting === 'dedupe-v2';
+  const base = e.breakdown
+    ? {
+        input_tokens: e.breakdown.input_tokens || 0,
+        output_tokens: e.breakdown.output_tokens || 0,
+        cache_read: e.breakdown.cache_read_input_tokens || 0,
+        cache_creation: e.breakdown.cache_creation_input_tokens || 0,
+        total: e.total_used || 0,
+      }
+    : {
+        input_tokens: e.input_tokens || 0,
+        output_tokens: e.output_tokens || 0,
+        cache_read: e.cache_read || 0,
+        cache_creation: e.cache_creation || 0,
+        total: e.total || 0,
+      };
+
+  let cost;
+  let unpriced = [];
+  if (isV2 && e.by_model && Object.keys(e.by_model).length > 0) {
+    cost = 0;
+    for (const [modelId, u] of Object.entries(e.by_model)) {
+      const r = costForModelUsage(modelId, u);
+      cost += r.cost;
+      if (!r.known) unpriced.push(modelId);
+    }
+  } else {
+    // legacy shape (and v2 rows missing by_model): price breakdown totals at
+    // the legacy default rate — no model is available to resolve per-model rates.
+    const legacyRate = { input: 3, output: 15, cache_read: 0.30, cache_creation: 3.75 };
+    cost =
+      (base.input_tokens / 1_000_000) * legacyRate.input +
+      (base.output_tokens / 1_000_000) * legacyRate.output +
+      (base.cache_read / 1_000_000) * legacyRate.cache_read +
+      (base.cache_creation / 1_000_000) * legacyRate.cache_creation;
   }
+
   return {
     sid: e.sid,
-    input_tokens: e.input_tokens || 0,
-    output_tokens: e.output_tokens || 0,
-    cache_read: e.cache_read || 0,
-    cache_creation: e.cache_creation || 0,
-    total: e.total || 0,
+    ...base,
     ts: e.ts || null,
+    cost,
+    legacy: !isV2,
+    unpriced,
   };
 }
 
@@ -154,7 +211,6 @@ function buildRows({ stateDirectory, sidFilter, lastN, byAgent } = {}) {
 
   const rows = sessions.map(e => {
     const n = normalizeEntry(e);
-    const cost = estimateCost(n.input_tokens, n.output_tokens, n.cache_read, n.cache_creation, null);
     return {
       sid: n.sid,
       input: n.input_tokens,
@@ -162,7 +218,9 @@ function buildRows({ stateDirectory, sidFilter, lastN, byAgent } = {}) {
       cache_read: n.cache_read,
       cache_creation: n.cache_creation,
       total: n.total,
-      cost,
+      cost: n.cost,
+      legacy: n.legacy,
+      unpriced: n.unpriced,
     };
   });
 
@@ -174,7 +232,7 @@ function buildRows({ stateDirectory, sidFilter, lastN, byAgent } = {}) {
     for (const r of rows) {
       const agent = sessionMap.get(r.sid) || 'unknown';
       if (!agents.has(agent)) {
-        agents.set(agent, { agent, input: 0, output: 0, cache_read: 0, cache_creation: 0, cost: 0, count: 0 });
+        agents.set(agent, { agent, input: 0, output: 0, cache_read: 0, cache_creation: 0, cost: 0, count: 0, legacyCount: 0, unpriced: [] });
       }
       const a = agents.get(agent);
       a.input       += r.input;
@@ -182,6 +240,8 @@ function buildRows({ stateDirectory, sidFilter, lastN, byAgent } = {}) {
       a.cache_read  += r.cache_read;
       a.cache_creation += r.cache_creation;
       a.cost        += r.cost;
+      if (r.legacy) a.legacyCount++;
+      for (const m of r.unpriced) if (!a.unpriced.includes(m)) a.unpriced.push(m);
       a.count++;
     }
     return { rows: [...agents.values()].sort((a, b) => b.cost - a.cost), noMap: false };
@@ -202,6 +262,16 @@ function padNum(s, n) {
   return str.length < n ? str.padEnd(n) : str + '  ';
 }
 
+// Trailing per-row annotation. Never appended to a TOTAL line — downstream
+// consumers (lib/loop-driver.js parseCostFromOutput) take the last $amount on
+// the TOTAL line as the cost, and this must stay the only $ token there.
+function rowFlags(r) {
+  const flags = [];
+  if (r.legacy) flags.push('legacy(~2.14x over-counted, cost not adjusted)');
+  for (const m of r.unpriced || []) flags.push(`unpriced:${m}`);
+  return flags.length ? '  ' + flags.join(' ') : '';
+}
+
 function printTable({ rows, noMap }, byAgent) {
   if (noMap) {
     console.log('session-map not populated yet — per-agent cost unavailable; run more sessions after the worker-session-map hook ships.');
@@ -216,7 +286,10 @@ function printTable({ rows, noMap }, byAgent) {
     console.log(pad('AGENT', 16) + pad('INPUT', 12) + pad('OUTPUT', 12) + pad('CACHE_READ', 12) + pad('CACHE_WR', 12) + pad('EST COST', 12) + 'SESSIONS');
     console.log('─'.repeat(88));
     for (const r of rows) {
-      console.log(pad(r.agent, 16) + padNum(fmt(r.input), 12) + padNum(fmt(r.output), 12) + padNum(fmt(r.cache_read), 12) + padNum(fmt(r.cache_creation), 12) + padNum(fmtCost(r.cost), 12) + r.count);
+      const flags = [];
+      if (r.legacyCount) flags.push(`legacy(${r.legacyCount}, ~2.14x over-counted, cost not adjusted)`);
+      for (const m of r.unpriced || []) flags.push(`unpriced:${m}`);
+      console.log(pad(r.agent, 16) + padNum(fmt(r.input), 12) + padNum(fmt(r.output), 12) + padNum(fmt(r.cache_read), 12) + padNum(fmt(r.cache_creation), 12) + padNum(fmtCost(r.cost), 12) + r.count + (flags.length ? '  ' + flags.join(' ') : ''));
     }
     const totInput = rows.reduce((s, r) => s + r.input, 0);
     const totOutput = rows.reduce((s, r) => s + r.output, 0);
@@ -230,7 +303,7 @@ function printTable({ rows, noMap }, byAgent) {
     console.log(pad('SID', 38) + pad('INPUT', 12) + pad('OUTPUT', 12) + pad('CACHE_READ', 12) + pad('CACHE_WR', 12) + 'EST COST');
     console.log('─'.repeat(92));
     for (const r of rows) {
-      console.log(pad(r.sid, 38) + padNum(fmt(r.input), 12) + padNum(fmt(r.output), 12) + padNum(fmt(r.cache_read), 12) + padNum(fmt(r.cache_creation), 12) + fmtCost(r.cost));
+      console.log(pad(r.sid, 38) + padNum(fmt(r.input), 12) + padNum(fmt(r.output), 12) + padNum(fmt(r.cache_read), 12) + padNum(fmt(r.cache_creation), 12) + fmtCost(r.cost) + rowFlags(r));
     }
     const totInput = rows.reduce((s, r) => s + r.input, 0);
     const totOutput = rows.reduce((s, r) => s + r.output, 0);
@@ -240,8 +313,9 @@ function printTable({ rows, noMap }, byAgent) {
     console.log('─'.repeat(92));
     console.log(pad('TOTAL', 38) + padNum(fmt(totInput), 12) + padNum(fmt(totOutput), 12) + padNum(fmt(totRead), 12) + padNum(fmt(totWr), 12) + fmtCost(totCost));
   }
-  console.log('\nPricing (per MTok): haiku $1.00in/$5.00out/$0.10cr/$1.25cw  sonnet $2.00in/$10.00out/$0.20cr/$2.50cw  opus $4.00in/$20.00out/$0.20cr/$5.00cw  fable $10.00in/$50.00out/$0.25cr/$12.50cw');
-  console.log('cr=cache_read  cw=cache_creation  default: sonnet');
+  console.log('\nPricing (per MTok, input/output/cache_read/cache_write_5m/cache_write_1h): haiku-4-5 1/5/0.10/1.25/2  sonnet-4-6 3/15/0.30/3.75/6  sonnet-5(.5) 2/10/0.20/2.5/4  opus-5(.5)/4-8/4-7/4-6 4-5/20-25/0.20-0.50/5-6.25/8-10  fable-5(.1) 10/50/0.25-1/12.5/20');
+  console.log('cr=cache_read  cw=cache_creation(5m write)  default for unknown model: sonnet-5, flagged unpriced:<model>');
+  console.log('legacy = pre-dedupe-v2 row, no model; tokens over-counted ~2.14x median; cost NOT adjusted (priced at the legacy default rate)');
 }
 
 function parseArgs(argv) {
@@ -325,15 +399,22 @@ Options:
 If the file is absent or empty, a note is printed and no table is shown.
 The session-map writer (worker-session-map hook) must ship first.
 
-Pricing (per million tokens):
-  Model         input    output   cache_read  cache_creation
-  haiku         $1.00    $5.00    $0.10       $1.25
-  sonnet        $2.00    $10.00   $0.20       $2.50
-  opus          $4.00    $20.00   $0.20       $5.00
-  fable         $10.00   $50.00   $0.25       $12.50
-  default       $2.00    $10.00   $0.20       $2.50  (sonnet, when model unknown)
+Pricing (per million tokens; cache_write_5m / cache_write_1h are separate rates):
+  Model                        input   output  cache_read  cache_write_5m  cache_write_1h
+  claude-haiku-4-5             $1      $5      $0.10       $1.25           $2
+  claude-sonnet-4-6            $3      $15     $0.30       $3.75           $6
+  claude-sonnet-5(.5)          $2      $10     $0.20       $2.50           $4
+  claude-opus-5                $5      $25     $0.50       $6.25           $10
+  claude-opus-5-5              $4      $20     $0.20       $5              $8
+  claude-opus-4-8/4-7/4-6      $5      $25     $0.50       $6.25           $10
+  claude-fable-5               $10     $50     $1          $12.50          $20
+  claude-fable-5-1             $10     $50     $0.25       $12.50          $20
+  default (unknown model)      $2      $10     $0.20       $2.50           $4   (sonnet-5; flagged unpriced:<model>)
 
-Model is not stored in token-usage.jsonl; sonnet rates are the default.
+v2 rows (token-usage.jsonl "counting":"dedupe-v2") carry per-model usage in
+by_model and are priced exactly above. Legacy rows (no "counting" field) carry
+no model, are over-counted ~2.14x median, and are priced at today's legacy
+default (sonnet-4-6 @ 5m write rate) — marked "legacy" in the output.
 Set ADVISOR_STATE_DIR to override ~/.advisor/state.
 `);
     process.exit(0);

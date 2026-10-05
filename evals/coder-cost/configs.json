@@ -1,0 +1,28 @@
+{
+  "sonnet5-medium": {
+    "model": "claude-sonnet-5",
+    "effort": "medium",
+    "time_aware": false
+  },
+  "sonnet5-high": {
+    "model": "claude-sonnet-5",
+    "effort": "high",
+    "time_aware": false
+  },
+  "opus55-low": {
+    "model": "claude-opus-5-5",
+    "effort": "low",
+    "time_aware": false
+  },
+  "opus55-medium": {
+    "model": "claude-opus-5-5",
+    "effort": "medium",
+    "time_aware": false
+  },
+  "sonnet5-medium-timeaware": {
+    "model": "claude-sonnet-5",
+    "effort": "medium",
+    "time_aware": true,
+    "append_system_prompt": "Time matters here: do not spend time that can be avoided, and the earlier a correct result is obtained, the better. The elapsed time so far is shown before each of your turns."
+  }
+}

@@ -39,40 +39,82 @@ async function main() {
     lines = transcriptContent.split('\n').filter(Boolean);
   } catch { process.exit(0); }
 
-  // Bound work: only the tail of the transcript needs to be scanned for the
-  // most recent assistant usage record. Prevents O(n) cost as transcripts grow.
-  if (lines.length > 1000) lines = lines.slice(-1000);
   debugLog({ ts: new Date().toISOString(), sid: 'pending', phase: 'transcript_loaded', size_bytes: transcriptContent.length, line_count: lines.length, elapsed_ms: Date.now() - t0 });
 
-  const breakdown = {
-    input_tokens: 0,
-    output_tokens: 0,
-    cache_read_input_tokens: 0,
-    cache_creation_input_tokens: 0
-  };
-
-  for (const line of lines) {
-    try {
-      const msg = JSON.parse(line);
-      const inner = msg.message;
-      if (!inner || inner.role !== 'assistant' || !inner.usage) continue;
-      const u = inner.usage;
-      breakdown.input_tokens += (u.input_tokens || 0);
-      breakdown.output_tokens += (u.output_tokens || 0);
-      breakdown.cache_read_input_tokens += (u.cache_read_input_tokens || 0);
-      breakdown.cache_creation_input_tokens += (u.cache_creation_input_tokens || 0);
-    } catch { /* skip malformed lines */ }
-  }
-
-  const total_used = Object.values(breakdown).reduce((a, b) => a + b, 0);
+  const { breakdown, by_model, total_used } = sumUsageFromLines(lines);
 
   const outDir = stateDir();
   fs.mkdirSync(outDir, { recursive: true });
   debugLog({ ts: new Date().toISOString(), sid, phase: 'done', total_used, elapsed_ms: Date.now() - t0 });
   fs.appendFileSync(
     path.join(outDir, 'token-usage.jsonl'),
-    JSON.stringify({ sid, total_used, breakdown }) + '\n'
+    JSON.stringify({ sid, counting: 'dedupe-v2', total_used, breakdown, by_model }) + '\n'
   );
+}
+
+// Sums usage across transcript lines, deduping by message.id (Claude Code
+// repeats the same message.usage on one JSONL line per content block) and
+// skipping message.model === "<synthetic>" (non-billable synthetic turns).
+function sumUsageFromLines(lines) {
+  const seen = new Set();
+  const breakdown = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0
+  };
+  const by_model = {};
+
+  for (const line of lines) {
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    const inner = msg.message;
+    if (!inner || inner.role !== 'assistant' || !inner.usage) continue;
+    if (inner.model === '<synthetic>') continue;
+    if (inner.id) {
+      if (seen.has(inner.id)) continue;
+      seen.add(inner.id);
+    }
+
+    const u = inner.usage;
+    const input_tokens = u.input_tokens || 0;
+    const output_tokens = u.output_tokens || 0;
+    const cache_read_input_tokens = u.cache_read_input_tokens || 0;
+    let cache_5m = 0;
+    let cache_1h = 0;
+    if (u.cache_creation) {
+      cache_5m = u.cache_creation.ephemeral_5m_input_tokens || 0;
+      cache_1h = u.cache_creation.ephemeral_1h_input_tokens || 0;
+    } else {
+      cache_5m = u.cache_creation_input_tokens || 0;
+    }
+
+    breakdown.input_tokens += input_tokens;
+    breakdown.output_tokens += output_tokens;
+    breakdown.cache_read_input_tokens += cache_read_input_tokens;
+    breakdown.cache_creation_input_tokens += (cache_5m + cache_1h);
+
+    const model = inner.model || 'unknown';
+    if (!by_model[model]) {
+      by_model[model] = {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_5m_input_tokens: 0,
+        cache_creation_1h_input_tokens: 0
+      };
+    }
+    by_model[model].input_tokens += input_tokens;
+    by_model[model].output_tokens += output_tokens;
+    by_model[model].cache_read_input_tokens += cache_read_input_tokens;
+    by_model[model].cache_creation_5m_input_tokens += cache_5m;
+    by_model[model].cache_creation_1h_input_tokens += cache_1h;
+  }
+
+  const total_used = breakdown.input_tokens + breakdown.output_tokens +
+    breakdown.cache_read_input_tokens + breakdown.cache_creation_input_tokens;
+
+  return { breakdown, by_model, total_used };
 }
 
 main().catch(() => process.exit(0));

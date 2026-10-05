@@ -79,3 +79,86 @@ test('stop-telemetry: ADVISOR_DEBUG=1 → debug log written', () => {
   const lines = fs.readFileSync(debugLog, 'utf8').trim().split('\n').filter(Boolean);
   expect(lines.length).toBeGreaterThan(0);
 });
+
+function runHook(tmpDir, transcriptPath, sessionId = 'test-sid-001') {
+  const result = spawnSync('node', [STOP_TELEMETRY], {
+    input: makeInput(transcriptPath, sessionId),
+    encoding: 'utf8',
+    env: { ...process.env, HOME: tmpDir, ADVISOR_DEBUG: '' },
+  });
+  expect(result.status).toBe(0);
+  const tokenLog = path.join(tmpDir, '.advisor', 'state', 'token-usage.jsonl');
+  const rows = fs.readFileSync(tokenLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  return rows[rows.length - 1];
+}
+
+test('stop-telemetry: repeated message.id counted once (dedupe-v2)', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  const line = JSON.stringify({
+    message: { role: 'assistant', id: 'msg_abc', model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 5 } },
+  });
+  // 3 content-block lines repeating the same message.id/usage.
+  fs.writeFileSync(transcriptPath, [line, line, line].join('\n') + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(row.counting).toBe('dedupe-v2');
+  expect(row.total_used).toBe(15);
+  expect(row.breakdown.input_tokens).toBe(10);
+  expect(row.breakdown.output_tokens).toBe(5);
+  expect(row.by_model['claude-sonnet-5'].input_tokens).toBe(10);
+});
+
+test('stop-telemetry: <synthetic> model message is ignored', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  const synthetic = JSON.stringify({
+    message: { role: 'assistant', id: 'msg_synth', model: '<synthetic>', usage: { input_tokens: 999, output_tokens: 999 } },
+  });
+  const real = JSON.stringify({
+    message: { role: 'assistant', id: 'msg_real', model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 5 } },
+  });
+  fs.writeFileSync(transcriptPath, [synthetic, real].join('\n') + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(row.total_used).toBe(15);
+  expect(row.by_model['<synthetic>']).toBeUndefined();
+});
+
+test('stop-telemetry: two-model transcript produces two by_model entries with 5m/1h split', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  const modelA = JSON.stringify({
+    message: {
+      role: 'assistant', id: 'msg_a', model: 'claude-sonnet-5',
+      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 2, cache_creation: { ephemeral_5m_input_tokens: 3, ephemeral_1h_input_tokens: 7 } },
+    },
+  });
+  const modelB = JSON.stringify({
+    message: {
+      role: 'assistant', id: 'msg_b', model: 'claude-haiku-4-5',
+      usage: { input_tokens: 20, output_tokens: 8, cache_creation_input_tokens: 4 },
+    },
+  });
+  fs.writeFileSync(transcriptPath, [modelA, modelB].join('\n') + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(Object.keys(row.by_model).sort()).toEqual(['claude-haiku-4-5', 'claude-sonnet-5']);
+  expect(row.by_model['claude-sonnet-5'].cache_creation_5m_input_tokens).toBe(3);
+  expect(row.by_model['claude-sonnet-5'].cache_creation_1h_input_tokens).toBe(7);
+  // No usage.cache_creation object -> all counted as 5m.
+  expect(row.by_model['claude-haiku-4-5'].cache_creation_5m_input_tokens).toBe(4);
+  expect(row.by_model['claude-haiku-4-5'].cache_creation_1h_input_tokens).toBe(0);
+  expect(row.breakdown.cache_creation_input_tokens).toBe(3 + 7 + 4);
+});
+
+test('stop-telemetry: transcript over 1000 lines is counted in full', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  const linesArr = [];
+  for (let i = 0; i < 1200; i++) {
+    linesArr.push(JSON.stringify({
+      message: { role: 'assistant', id: `msg_${i}`, model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } },
+    }));
+  }
+  fs.writeFileSync(transcriptPath, linesArr.join('\n') + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(row.total_used).toBe(1200 * 2);
+});

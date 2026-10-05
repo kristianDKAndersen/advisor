@@ -1174,6 +1174,63 @@ test('pollSentinel: without ownerDir arg (back-compat), returns true on first ex
   expect(result).toBe(true);
 });
 
+// ── pollSentinel: session_id ownership beats same-cwd nested claude (bug fix) ─
+
+test('pollSentinel: discards sentinel with cwd==ownerDir but foreign session_id when ownerSessionId is known', async () => {
+  const sentinel = path.join(tmpDir, 'claude-i-same-cwd-foreign-sid.done');
+  const ownerDir = path.join(tmpDir, 'runs', 'sid-nested', 'workspace');
+  fs.mkdirSync(ownerDir, { recursive: true });
+
+  // Nested `claude -p` run from inside the worker's own workspace: cwd matches
+  // ownerDir exactly (the 2026-07-07 fix does not catch this), but its
+  // session_id is not the worker's own.
+  fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: ownerDir, session_id: 'nested-child' }));
+  fs.writeFileSync(sentinel, '');
+
+  setTimeout(() => {
+    fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: ownerDir, session_id: 'owner-uuid' }));
+    fs.writeFileSync(sentinel, '');
+  }, 60);
+
+  const result = await pollSentinel(sentinel, 2000, 20, ownerDir, null, 5000, 'owner-uuid');
+  expect(result).toBe(true);
+  const payload = JSON.parse(fs.readFileSync(sentinel + '.json', 'utf8'));
+  expect(payload.session_id).toBe('owner-uuid');
+});
+
+test('pollSentinel: accepts sentinel whose payload session_id matches ownerSessionId', async () => {
+  const sentinel = path.join(tmpDir, 'claude-i-matching-sid.done');
+  const ownerDir = path.join(tmpDir, 'runs', 'sid-match', 'workspace');
+  fs.mkdirSync(ownerDir, { recursive: true });
+  fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: ownerDir, session_id: 'owner-uuid-2' }));
+  fs.writeFileSync(sentinel, '');
+
+  const result = await pollSentinel(sentinel, 1000, 20, ownerDir, null, 5000, 'owner-uuid-2');
+  expect(result).toBe(true);
+  expect(fs.existsSync(sentinel + '.json')).toBe(true);
+});
+
+test('pollSentinel: no expected session id -> falls back to cwd-only check (old behaviour unchanged)', async () => {
+  const sentinel = path.join(tmpDir, 'claude-i-no-expected-sid.done');
+  const ownerDir = path.join(tmpDir, 'runs', 'sid-fallback', 'workspace');
+  const foreignDir = path.join(tmpDir, 'runs', 'sid-fallback-child', 'workspace');
+  fs.mkdirSync(ownerDir, { recursive: true });
+
+  fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: foreignDir, session_id: 'child' }));
+  fs.writeFileSync(sentinel, '');
+
+  setTimeout(() => {
+    fs.writeFileSync(sentinel + '.json', JSON.stringify({ cwd: ownerDir, session_id: 'owner' }));
+    fs.writeFileSync(sentinel, '');
+  }, 60);
+
+  // ownerSessionId omitted (null default) — must still catch the foreign-cwd leak via cwd.
+  const result = await pollSentinel(sentinel, 2000, 20, ownerDir);
+  expect(result).toBe(true);
+  const payload = JSON.parse(fs.readFileSync(sentinel + '.json', 'utf8'));
+  expect(payload.cwd).toBe(ownerDir);
+});
+
 // ── reaperSweepOrphanSessions: 2h grace floor (FIX 2a) ───────────────────────
 
 test('reaperSweepOrphanSessions: spares a session younger than 2h even with no session.json and no live process', () => {
