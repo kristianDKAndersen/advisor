@@ -143,6 +143,52 @@ function getWorkers(sid) {
   return result;
 }
 
+// ── Cost/token totals (reuses bin/advisor-cost's helpers; no price duplication) ──
+const advisorCost = require('./advisor-cost');
+
+function costStateDir() {
+  return process.env.ADVISOR_STATE_DIR || path.join(os.homedir(), '.advisor', 'state');
+}
+
+// Worker sids for a session: session.json decomposition[].sid (deduped), or
+// the session's own sid when it has no decomposition (single-worker session).
+function getWorkerSids(sid) {
+  const sessionPath = path.join(RUNS_DIR, sid, 'session.json');
+  let session = null;
+  try { session = JSON.parse(fs.readFileSync(sessionPath, 'utf8')); } catch (_) {}
+  const decomposition = (session && session.decomposition) || [];
+  const sids = [...new Set(decomposition.map(d => d.sid).filter(Boolean))];
+  return sids.length ? sids : [sid];
+}
+
+function getTotals(sid) {
+  const sd = costStateDir();
+  const bySid = new Map(advisorCost.lastPerSid(advisorCost.readTokenUsage(sd)).map(e => [e.sid, e]));
+
+  const totals = {
+    input_tokens: 0, output_tokens: 0, cache_read: 0, cache_creation: 0,
+    cost_usd: 0, elapsed_ms: 0, workers_counted: 0, workers_missing: 0
+  };
+
+  for (const workerSid of getWorkerSids(sid)) {
+    const claudeUuid = advisorCost.resolveRunSid(sd, workerSid);
+    const entry = claudeUuid ? bySid.get(claudeUuid) : null;
+    if (!entry) { totals.workers_missing++; continue; }
+    const n = advisorCost.normalizeEntry(entry);
+    totals.input_tokens += n.input_tokens;
+    totals.output_tokens += n.output_tokens;
+    totals.cache_read += n.cache_read;
+    totals.cache_creation += n.cache_creation;
+    totals.cost_usd += advisorCost.estimateCost(n.input_tokens, n.output_tokens, n.cache_read, n.cache_creation, null);
+    totals.workers_counted++;
+  }
+
+  const tss = getMessages(sid).map(m => m.ts || 0).filter(Boolean);
+  if (tss.length) totals.elapsed_ms = Math.round((Math.max(...tss) - Math.min(...tss)) * 1000);
+
+  return totals;
+}
+
 // ── SSE client registry ───────────────────────────────────────────────────────
 // Map<sid, Map<clientId, {res, afterSeq}>>
 const sseClients = new Map();
@@ -271,10 +317,10 @@ function typeClass(t){var ok=["task","progress","result","guidance","terminate",
 function renderMd(text){if(!text)return '';var s=String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');s=s.replace(/\`\`\`[\\w]*\\n([\\s\\S]*?)\`\`\`/g,'<pre><code>\$1</code></pre>');s=s.replace(/\`([^\`]+)\`/g,'<code>\$1</code>');s=s.replace(/^### (.+)\$/gm,'<h3>\$1</h3>');s=s.replace(/^## (.+)\$/gm,'<h2>\$1</h2>');s=s.replace(/^# (.+)\$/gm,'<h1>\$1</h1>');s=s.replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>\$1</strong>');s=s.replace(/\\*([^*]+)\\*/g,'<em>\$1</em>');s=s.replace(/((?:^[ \\t]*[-*] .+\\n?)+)/gm,function(block){var items=block.trim().split('\\n').map(function(l){return '<li>'+l.replace(/^[ \\t]*[-*] /,'')+'</li>'}).join('');return '<ul>'+items+'</ul>'});s=s.split(/\\n\\n+/).map(function(p){if(/^<(pre|ul|h[123])/.test(p.trim()))return p;return '<p>'+p.replace(/\\n/g,'<br>')+'</p>'}).join('\\n');return s}
 var currentSid=null;
 var evtSrc=null;
-function loadWorkers(sid){fetch('/api/sessions/'+encodeURIComponent(sid)+'/workers').then(function(r){return r.json();}).then(function(workers){renderWorkerCards(workers,sid);})}
+function loadWorkers(sid){fetch('/api/sessions/'+encodeURIComponent(sid)+'/workers').then(function(r){return r.json();}).then(function(d){renderWorkerCards(d.workers,sid);})}
 function renderWorkerCards(workers,sid){var grid=document.getElementById('workersGrid');if(!grid)return;grid.innerHTML='';if(!workers.length){grid.innerHTML='<div class="empty"><div class="icon">&#128237;</div>No messages yet</div>';return;}workers.forEach(function(w){var card=buildWorkerCard(w,sid);grid.appendChild(card);})}
 function buildWorkerCard(w,sid){var div=document.createElement('div');div.className='worker-card';div.dataset.agent=w.agent;var hdr=document.createElement('div');hdr.className='worker-card-header';hdr.innerHTML='<span class="worker-name">'+esc(w.agent||'unknown')+'</span><span class="badge '+typeClass(w.status)+'">'+esc(w.status||'?')+'</span><span class="worker-ts">'+esc(w.lastTs?fmt(w.lastTs):'')+'</span>';div.appendChild(hdr);var progressDiv=document.createElement('div');progressDiv.className='worker-progress-body';progressDiv.innerHTML=renderMd(w.lastProgressBody||'');div.appendChild(progressDiv);if(w.resultEnvelope){var re=w.resultEnvelope;var resultDiv=document.createElement('div');resultDiv.className='worker-result';var verdictColor=re.verdict==='complete'?'var(--c-result)':re.verdict==='partial'?'var(--c-progress)':'var(--c-terminate)';resultDiv.innerHTML='<div class="worker-result-verdict"><span class="badge" style="background:'+verdictColor+'">'+esc(re.verdict||'result')+'</span></div><div class="worker-result-summary">'+esc(re.summary||'')+'</div>'+(re.paths&&re.paths.length?'<div class="worker-result-paths">'+re.paths.map(function(p){return '<code>'+esc(p)+'</code>'}).join('')+'</div>':'');div.appendChild(resultDiv);if(re.sub_team_run_id){var stDiv=document.createElement('div');stDiv.className='worker-subteam';stDiv.innerHTML='<div class="subteam-title">Sub-team: '+esc(re.sub_team_run_id)+'</div><div class="subteam-cards" id="st-'+esc(re.sub_team_run_id)+'">Loading...</div>';div.appendChild(stDiv);fetch('/api/sessions/'+encodeURIComponent(sid)+'/sub-team-run/'+encodeURIComponent(re.sub_team_run_id)).then(function(r){return r.json();}).then(function(data){var container=document.getElementById('st-'+re.sub_team_run_id);if(!container)return;if(data.error){container.textContent=data.error;return;}var summaries=(data.state&&data.state.final_result&&data.state.final_result.summaries)||[];if(!summaries.length){container.textContent='No completed tasks yet.';return;}container.innerHTML='';summaries.forEach(function(s){var sc=document.createElement('div');sc.className='subteam-card';var result=s.output&&s.output.result?String(s.output.result):'';sc.innerHTML='<div class="subteam-card-header"><span class="subteam-role">'+esc(s.task_id)+'</span>'+(s.input&&s.input.description?'<span style="font-size:11px;color:var(--muted)">'+esc(s.input.description.slice(0,60))+'</span>':'')+'</div><div class="subteam-summary">'+esc(result.slice(0,300))+'</div>';container.appendChild(sc);});}).catch(function(){});}}}return div}
-function loadSession(sid){currentSid=sid;document.getElementById('mainTitle').textContent=sid;document.querySelectorAll('.session-item').forEach(function(el){el.classList.toggle('active',el.dataset.sid===sid);});if(evtSrc){evtSrc.close();evtSrc=null;}var liveDot=document.getElementById('liveDot');liveDot.className='live-dot';document.getElementById('liveLabel').textContent='connecting…';loadWorkers(sid);setTimeout(function(){var maxSeq=0;fetch('/api/sessions/'+encodeURIComponent(sid)+'/workers').then(function(r){return r.json();}).then(function(workers){for(var i=0;i<workers.length;i++){for(var j=0;j<workers[i].messages.length;j++){var seq=workers[i].messages[j].seq||0;if(seq>maxSeq)maxSeq=seq;}}connectSse(sid,maxSeq);});},100);}
+function loadSession(sid){currentSid=sid;document.getElementById('mainTitle').textContent=sid;document.querySelectorAll('.session-item').forEach(function(el){el.classList.toggle('active',el.dataset.sid===sid);});if(evtSrc){evtSrc.close();evtSrc=null;}var liveDot=document.getElementById('liveDot');liveDot.className='live-dot';document.getElementById('liveLabel').textContent='connecting…';loadWorkers(sid);setTimeout(function(){var maxSeq=0;fetch('/api/sessions/'+encodeURIComponent(sid)+'/workers').then(function(r){return r.json();}).then(function(d){var workers=d.workers;for(var i=0;i<workers.length;i++){for(var j=0;j<workers[i].messages.length;j++){var seq=workers[i].messages[j].seq||0;if(seq>maxSeq)maxSeq=seq;}}connectSse(sid,maxSeq);});},100);}
 function connectSse(sid,afterSeq){var url='/events?sid='+encodeURIComponent(sid)+'&after='+afterSeq;evtSrc=new EventSource(url);evtSrc.onopen=function(){document.getElementById('liveDot').className='live-dot on';document.getElementById('liveLabel').textContent='live';};evtSrc.onmessage=function(e){try{var ev=JSON.parse(e.data);if(ev.event==='messages')loadWorkers(sid);}catch(_){}};evtSrc.onerror=function(){document.getElementById('liveDot').className='live-dot';document.getElementById('liveLabel').textContent='reconnecting…';};}
 function loadSessions(){fetch('/api/sessions').then(function(r){return r.json();}).then(function(sessions){var list=document.getElementById('sessionList');if(!sessions.length){list.innerHTML='<div class="empty"><div class="icon">&#128193;</div>No sessions found</div>';return;}list.innerHTML='';for(var i=0;i<sessions.length;i++){var s=sessions[i];var el=document.createElement('div');el.className='session-item';el.dataset.sid=s.sid;el.innerHTML='<div class="session-sid">'+esc(s.sid)+'</div><div class="session-agent">'+esc(s.agent||'unknown')+'</div><div class="session-count">'+s.count+' message'+(s.count!==1?'s':'')+'</div>';el.onclick=(function(id){return function(){loadSession(id);}})(s.sid);list.appendChild(el);}})}
 var TYPE_COLORS={"task":"var(--c-task)","progress":"var(--c-progress)","result":"var(--c-result)","guidance":"var(--c-guidance)","terminate":"var(--c-terminate)","question":"var(--c-question)"};
@@ -776,7 +822,7 @@ const server = http.createServer((req, res) => {
   const workersMatch = urlPath.match(/^\/api\/sessions\/([^/]+)\/workers$/);
   if (req.method === 'GET' && workersMatch) {
     const sid = decodeURIComponent(workersMatch[1]);
-    jsonRes(res, getWorkers(sid));
+    jsonRes(res, { workers: getWorkers(sid), totals: getTotals(sid) });
     return;
   }
 

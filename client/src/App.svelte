@@ -12,6 +12,24 @@
   let edges = $state.raw<Edge[]>([]);
   let savedPositions = $state<Record<string, { x: number; y: number }>>({});
 
+  type Totals = {
+    input_tokens: number; output_tokens: number; cache_read: number; cache_creation: number;
+    cost_usd: number; elapsed_ms: number; workers_counted: number; workers_missing: number;
+  };
+  let totals = $state<Totals | null>(null);
+
+  $effect(() => {
+    const sid = dashboardStore.selectedSid;
+    totals = null;
+    if (!sid) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${sid}/workers`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) totals = (d && d.totals) || null; })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  });
+
   $effect(() => {
     try {
       const raw = localStorage.getItem('advisor-canvas-positions');
@@ -93,6 +111,14 @@
 
     {#if dashboardStore.selectedSid !== null}
       <aside class="detail-panel">
+        {#if totals}
+          <div class="totals-row">
+            <span>${totals.cost_usd.toFixed(4)}</span>
+            <span>{(totals.input_tokens + totals.output_tokens).toLocaleString()} tok</span>
+            <span>{(totals.elapsed_ms / 1000).toFixed(0)}s</span>
+            {#if totals.workers_missing > 0}<span class="totals-partial">partial</span>{/if}
+          </div>
+        {/if}
         <MessageList sid={dashboardStore.selectedSid} onClose={() => dashboardStore.setSelected(null)} />
       </aside>
     {/if}
@@ -215,6 +241,21 @@
     font-size: 18px;
     cursor: pointer;
     padding: 0 4px;
+  }
+
+  .totals-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    font-size: 12px;
+    color: #9ca3af;
+    border-bottom: 1px solid #2a2d35;
+  }
+
+  .totals-partial {
+    color: #f59e0b;
+    font-weight: 600;
   }
 
   .panel-sid {
