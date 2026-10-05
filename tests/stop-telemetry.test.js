@@ -149,6 +149,36 @@ test('stop-telemetry: two-model transcript produces two by_model entries with 5m
   expect(row.breakdown.cache_creation_input_tokens).toBe(3 + 7 + 4);
 });
 
+test('stop-telemetry: advisor_message iteration folds into by_model[iteration.model], tagged dedupe-v3, repeated message.id not double-counted', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  const line = JSON.stringify({
+    message: {
+      role: 'assistant', id: 'msg_advisor', model: 'claude-sonnet-5',
+      usage: {
+        input_tokens: 10, output_tokens: 5,
+        iterations: [
+          { type: 'message', model: 'claude-sonnet-5', input_tokens: 10, output_tokens: 5 },
+          {
+            type: 'advisor_message', model: 'claude-opus-5',
+            input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 2,
+            cache_creation: { ephemeral_5m_input_tokens: 1, ephemeral_1h_input_tokens: 0 },
+          },
+        ],
+      },
+    },
+  });
+  // Same message.id repeated (one JSONL line per content block) must not double-count.
+  fs.writeFileSync(transcriptPath, [line, line].join('\n') + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(row.counting).toBe('dedupe-v3');
+  expect(Object.keys(row.by_model).sort()).toEqual(['claude-opus-5', 'claude-sonnet-5']);
+  expect(row.by_model['claude-opus-5'].input_tokens).toBe(100);
+  expect(row.by_model['claude-opus-5'].output_tokens).toBe(50);
+  expect(row.by_model['claude-sonnet-5'].input_tokens).toBe(10);
+  expect(row.breakdown.input_tokens).toBe(110); // 10 executor + 100 advisor, each counted once
+});
+
 test('stop-telemetry: transcript over 1000 lines is counted in full', () => {
   const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
   const linesArr = [];

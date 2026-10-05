@@ -35,8 +35,8 @@ const PRICE_TABLE = {
   'claude-fable-5-1':  { input: 10, output: 50, cache_read: 0.25, cache_creation: 12.5, cache_write_1h: 20 },
   'claude-fable-5':    { input: 10, output: 50, cache_read: 1,    cache_creation: 12.5, cache_write_1h: 20 },
 };
-// Default/unknown-model fallback: priced at the sonnet-5 row, flagged (never silent).
-const DEFAULT_PRICE = PRICE_TABLE['claude-sonnet-5'];
+// Default/unknown-model fallback: priced at the sonnet-5-5 row, flagged (never silent).
+const DEFAULT_PRICE = PRICE_TABLE['claude-sonnet-5-5'];
 
 // Longest key first so e.g. "claude-opus-5-5" is tried before "claude-opus-5".
 const PRICE_KEYS = Object.keys(PRICE_TABLE).sort((a, b) => b.length - a.length);
@@ -98,7 +98,10 @@ function costForModelUsage(modelId, u) {
 // (sonnet-4-6 @ 5m write rate) so historical dollar figures don't move — marked
 // "legacy" rather than silently re-scaled.
 function normalizeEntry(e) {
-  const isV2 = e.counting === 'dedupe-v2';
+  // dedupe-v3 rows additionally fold advisor-tool iterations into by_model
+  // (see sumUsageFromLines/sumTranscriptUsage); same by_model shape as v2, so
+  // pricing is identical — just accept both tags.
+  const isV2 = e.counting === 'dedupe-v2' || e.counting === 'dedupe-v3';
   const base = e.breakdown
     ? {
         input_tokens: e.breakdown.input_tokens || 0,
@@ -314,7 +317,7 @@ function printTable({ rows, noMap }, byAgent) {
     console.log(pad('TOTAL', 38) + padNum(fmt(totInput), 12) + padNum(fmt(totOutput), 12) + padNum(fmt(totRead), 12) + padNum(fmt(totWr), 12) + fmtCost(totCost));
   }
   console.log('\nPricing (per MTok, input/output/cache_read/cache_write_5m/cache_write_1h): haiku-4-5 1/5/0.10/1.25/2  sonnet-4-6 3/15/0.30/3.75/6  sonnet-5(.5) 2/10/0.20/2.5/4  opus-5(.5)/4-8/4-7/4-6 4-5/20-25/0.20-0.50/5-6.25/8-10  fable-5(.1) 10/50/0.25-1/12.5/20');
-  console.log('cr=cache_read  cw=cache_creation(5m write)  default for unknown model: sonnet-5, flagged unpriced:<model>');
+  console.log('cr=cache_read  cw=cache_creation(5m write)  default for unknown model: sonnet-5-5, flagged unpriced:<model>');
   console.log('legacy = pre-dedupe-v2 row, no model; tokens over-counted ~2.14x median; cost NOT adjusted (priced at the legacy default rate)');
 }
 

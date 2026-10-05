@@ -5,12 +5,23 @@ import path from 'path';
 import { execSync, spawn, spawnSync } from 'child_process';
 
 const FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-fixture-'));
+// Private TMPDIR for this file: run.js (in-process and every spawned child) sweeps
+// coder-cost-* dirs under os.tmpdir(), which must never be the shared one.
+const ORIGINAL_TMPDIR = process.env.TMPDIR;
+const ISOLATED_TMP = path.join(FIXTURE_ROOT, 'tmp');
+fs.mkdirSync(ISOLATED_TMP);
+process.env.TMPDIR = ISOLATED_TMP;
 const RESULTS_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-results-'));
 const EVAL_FIXTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-evaldir-'));
 process.env.CODER_COST_REPO_ROOT = FIXTURE_ROOT;
 process.env.CODER_COST_RESULTS_DIR = RESULTS_ROOT;
 process.env.CODER_COST_CASES_FILE = path.join(EVAL_FIXTURE_DIR, 'cases.jsonl');
 process.env.CODER_COST_CONFIGS_FILE = path.join(EVAL_FIXTURE_DIR, 'configs.json');
+// Deterministic stand-in for ~/.claude/settings.json (real enabledPlugins vary
+// machine to machine) so buildRunSettings' plugin-override output is stable.
+const USER_SETTINGS_FIXTURE = path.join(EVAL_FIXTURE_DIR, 'user-settings.json');
+fs.writeFileSync(USER_SETTINGS_FIXTURE, JSON.stringify({ enabledPlugins: { 'some-plugin': true, 'another-plugin': false } }));
+process.env.CODER_COST_USER_SETTINGS_FILE = USER_SETTINGS_FIXTURE;
 
 const runner = require('../evals/coder-cost/run.js');
 const reporter = require('../evals/coder-cost/report.js');
@@ -69,8 +80,20 @@ beforeAll(() => {
     '  fs.appendFileSync(process.env.STUB_LOG_FILE, JSON.stringify({ event: "end", ts: Date.now(), pid: process.pid }) + "\\n");',
     '}',
     'if (mode === "fix") { fs.writeFileSync("lib/add.js", process.env.STUB_FIX_CONTENT); }',
+    'if (mode === "wrongfix") { fs.writeFileSync("lib/add.js", "function add(a, b) { return a + b + 1; }\\nmodule.exports = { add };\\n"); }',
     'if (mode === "badjson") { process.stdout.write("not json"); process.exit(0); }',
-    'process.stdout.write(JSON.stringify({ total_cost_usd: 0.0123, usage: { input_tokens: 100, output_tokens: 50 }, session_id: "stub-session" }));',
+    'if (mode === "inspect") {',
+    '  let claudeMd = null;',
+    '  try { claudeMd = fs.readFileSync("CLAUDE.md", "utf8"); } catch (e) {}',
+    '  const argv = process.argv.slice(2);',
+    '  const settingsIdx = argv.indexOf("--settings");',
+    '  let settingsContent = null;',
+    '  if (settingsIdx !== -1) { try { settingsContent = fs.readFileSync(argv[settingsIdx + 1], "utf8"); } catch (e) {} }',
+    '  fs.writeFileSync(process.env.STUB_LOG_FILE, JSON.stringify({ argv, claudeMd, hasDotClaude: fs.existsSync(".claude"), settingsContent }));',
+    '}',
+    'if (mode === "evil") { require("child_process").spawnSync("git", ["branch", "evil"]); }',
+    'if (mode === "vanish") { fs.rmSync(process.cwd(), { recursive: true, force: true }); }',
+    'process.stdout.write(JSON.stringify({ total_cost_usd: 0.0123, usage: { input_tokens: 100, output_tokens: 50 }, session_id: "stub-session", num_turns: 3 }));',
     'process.exit(0);',
     '',
   ].join('\n');
@@ -79,6 +102,8 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  // bun runs every test file in one process: don't leave later files a deleted TMPDIR.
+  if (ORIGINAL_TMPDIR === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = ORIGINAL_TMPDIR;
   for (const d of [FIXTURE_ROOT, RESULTS_ROOT, STUB_DIR, EVAL_FIXTURE_DIR]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) {}
   }
@@ -115,10 +140,27 @@ describe('outcome classification (stubbed claude binary)', () => {
     expect(result.cost_instrument_a.cost).toBeCloseTo(0.0123, 5);
   });
 
-  test('fail: agent does not fix the file, hidden tests fail', async () => {
+  test('no_attempt: agent makes zero worktree changes, distinct from a genuine failed attempt', async () => {
     process.env.STUB_MODE = 'nofix';
     const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 2));
+    expect(result.outcome).toBe('no_attempt');
+    expect(result.checker_exit_code).toBeUndefined();
+    expect(result.session_id).toBe('stub-session');
+    expect(result.num_turns).toBe(3);
+    expect(result.claude_exit_code).toBe(0);
+    expect(result.cost_instrument_a.cost).toBeCloseTo(0.0123, 5);
+  });
+
+  test('fail: agent attempts a fix but gets it wrong, hidden tests fail, and the record carries checker_output_tail', async () => {
+    process.env.STUB_MODE = 'wrongfix';
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 2.5));
     expect(result.outcome).toBe('fail');
+    expect(result.checker_exit_code).not.toBe(0);
+    expect(typeof result.checker_output_tail).toBe('string');
+    expect(result.checker_output_tail.length).toBeGreaterThan(0);
+    expect(result.session_id).toBe('stub-session');
+    expect(result.num_turns).toBe(3);
+    expect(result.claude_exit_code).toBe(0);
   });
 
   test('error: agent produces unparseable stdout', async () => {
@@ -132,6 +174,63 @@ describe('outcome classification (stubbed claude binary)', () => {
     const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(1), 4));
     expect(result.outcome).toBe('timeout');
   }, 15000);
+});
+
+describe('worktree vanished', () => {
+  test('worktree deleted under the run -> error / "worktree vanished", still priced, not no_attempt', async () => {
+    process.env.STUB_MODE = 'vanish';
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 1));
+    expect(result.outcome).toBe('error');
+    expect(result.error_reason).toBe('worktree vanished');
+    expect(result.cost_instrument_a.cost).toBeCloseTo(0.0123, 5);
+  });
+});
+
+describe('sweepStaleWorktrees ownership', () => {
+  function makeRunDir(name, owner) {
+    const dir = path.join(os.tmpdir(), name);
+    fs.mkdirSync(path.join(dir, 'repo'), { recursive: true });
+    if (owner) fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify(owner));
+    return dir;
+  }
+
+  test('os.tmpdir() is the isolated TMPDIR', () => {
+    expect(os.tmpdir()).toBe(ISOLATED_TMP);
+  });
+
+  test('a dir owned by a live pid survives the sweep', () => {
+    const dir = makeRunDir('coder-cost-live', { pid: process.pid, started: Date.now() });
+    runner.sweepStaleWorktrees();
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  test('a dir owned by a dead pid is removed', () => {
+    const deadPid = spawnSync('true').pid;
+    const dir = makeRunDir('coder-cost-dead', { pid: deadPid, started: Date.now() });
+    runner.sweepStaleWorktrees();
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  test('a legacy dir (no owner record) younger than 6h survives; older than 6h is removed', () => {
+    const young = makeRunDir('coder-cost-legacy-young', null);
+    const old = makeRunDir('coder-cost-legacy-old', null);
+    const sevenHoursAgo = new Date(Date.now() - 7 * 3600 * 1000);
+    fs.utimesSync(old, sevenHoursAgo, sevenHoursAgo);
+    runner.sweepStaleWorktrees();
+    expect(fs.existsSync(young)).toBe(true);
+    expect(fs.existsSync(old)).toBe(false);
+  });
+
+  test('run.js --confirm never touches a coder-cost-* dir in a different tmpdir', () => {
+    const otherTmp = path.join(FIXTURE_ROOT, 'other-tmp');
+    const bystander = path.join(otherTmp, 'coder-cost-bystander');
+    fs.mkdirSync(path.join(bystander, 'repo'), { recursive: true });
+    fs.writeFileSync(path.join(bystander, 'owner.json'), JSON.stringify({ pid: spawnSync('true').pid, started: 0 }));
+    process.env.STUB_MODE = 'nofix';
+    const res = runCli(['--configs', 'sonnet5-medium', '--cases', 'case-test', '--trials', '1', '--concurrency', '1', '--confirm'], { TMPDIR: ISOLATED_TMP, CODER_COST_RESULTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-bystander-results-')) });
+    expect(res.status).toBe(0);
+    expect(fs.existsSync(bystander)).toBe(true);
+  });
 });
 
 describe('resume / skip', () => {
@@ -184,6 +283,29 @@ describe('costFromTranscript (priced via bin/advisor-cost)', () => {
     expect(result.cost).toBeCloseTo(expectedCost, 8);
   });
 
+  test('includes advisor_message iterations from usage.iterations, priced at their own model', () => {
+    const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-projects-advisor-'));
+    const projDir = path.join(projectsRoot, 'slug');
+    fs.mkdirSync(projDir, { recursive: true });
+    const lines = [{
+      message: {
+        id: 'm1', model: 'claude-sonnet-5',
+        usage: {
+          input_tokens: 1000, output_tokens: 200,
+          iterations: [{ type: 'advisor_message', model: 'claude-opus-5', input_tokens: 500, output_tokens: 100 }],
+        },
+      },
+    }];
+    fs.writeFileSync(path.join(projDir, 'sess-advisor.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+    const result = runner.costFromTranscript('sess-advisor', 'claude-sonnet-5', projectsRoot);
+    const sonnetRate = priceForModel('claude-sonnet-5');
+    const opusRate = priceForModel('claude-opus-5');
+    const expectedCost = (1000 / 1e6) * sonnetRate.input + (200 / 1e6) * sonnetRate.output
+      + (500 / 1e6) * opusRate.input + (100 / 1e6) * opusRate.output;
+    expect(result.cost).toBeCloseTo(expectedCost, 10);
+  });
+
   test('reports unavailable (not a silent zero) when no transcript matches', () => {
     const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-projects-empty-'));
     const result = runner.costFromTranscript('missing-session', 'claude-sonnet-5', projectsRoot);
@@ -232,10 +354,13 @@ describe('cost-per-solved-task math (report.js)', () => {
 });
 
 describe('estimateRunCost / parseArgs', () => {
-  test('estimateRunCost scales with brief length and uses bin/advisor-cost rates', () => {
-    const kase = { brief: 'x'.repeat(4000), timeout_sec: 600 };
+  // Historical premise ("scales with brief length") no longer holds: with no history,
+  // estimateRunCost now uses a fixed multi-turn token model keyed by effort, not brief size.
+  test('estimateRunCost with no history falls back to the model and uses bin/advisor-cost rates', () => {
+    const kase = { id: 'case-test', brief: 'x'.repeat(4000), timeout_sec: 600 };
     const est = runner.estimateRunCost(kase, cfg);
     expect(est.cost).toBeGreaterThan(0);
+    expect(est.source).toBe('model');
   });
 
   test('parseArgs reads --configs, --cases, --trials, --concurrency, --dry-run, --confirm', () => {
@@ -255,6 +380,115 @@ describe('estimateRunCost / parseArgs', () => {
   });
 });
 
+describe('cost estimation: history vs fallback (red/green: evals/coder-cost/run.js)', () => {
+  test('loadHistory: uses cost_instrument_b.cost, falls back to cost_instrument_a.cost, skips _invalid dirs / no_attempt / <=3-turn rows', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-history-'));
+    const sub = path.join(dir, 'batch1');
+    const invalidSub = path.join(dir, '_invalid-batch');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.mkdirSync(invalidSub, { recursive: true });
+    const rows = [
+      { config: 'c1', case_id: 'case-a', outcome: 'pass', num_turns: 10, cost_instrument_b: { cost: 1.0 } },
+      { config: 'c1', case_id: 'case-a', outcome: 'pass', num_turns: 12, cost_instrument_a: { cost: 2.0 } }, // no instrument_b -> falls back to A
+      { config: 'c1', case_id: 'case-b', outcome: 'no_attempt', num_turns: 10, cost_instrument_b: { cost: 99 } }, // excluded
+      { config: 'c1', case_id: 'case-b', outcome: 'pass', num_turns: 2, cost_instrument_b: { cost: 99 } }, // excluded (<=3 turns)
+      { config: 'c1', case_id: 'case-b', outcome: 'timeout', cost_instrument_b: { cost: 3.0 } }, // no num_turns, timeout counts
+    ];
+    fs.writeFileSync(path.join(dir, 'top.jsonl'), rows.slice(0, 1).map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(sub, 'batch.jsonl'), rows.slice(1).map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(invalidSub, 'batch.jsonl'), JSON.stringify({ config: 'c1', case_id: 'case-z', outcome: 'pass', num_turns: 10, cost_instrument_b: { cost: 1000 } }) + '\n');
+
+    const history = runner.loadHistory(dir);
+    expect(history.c1.map((r) => r.cost).sort((a, b) => a - b)).toEqual([1.0, 2.0, 3.0]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('CODER_COST_HISTORY_FILES adds extra history files', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-history-env-'));
+    const extra = path.join(dir, 'extra.jsonl');
+    fs.writeFileSync(extra, JSON.stringify({ config: 'c2', case_id: 'case-x', outcome: 'pass', num_turns: 10, cost_instrument_b: { cost: 5.0 } }) + '\n');
+    const origEnv = process.env.CODER_COST_HISTORY_FILES;
+    process.env.CODER_COST_HISTORY_FILES = extra;
+    const history = runner.loadHistory(path.join(dir, 'nonexistent-results'));
+    expect(history.c2.map((r) => r.cost)).toEqual([5.0]);
+    if (origEnv === undefined) delete process.env.CODER_COST_HISTORY_FILES; else process.env.CODER_COST_HISTORY_FILES = origEnv;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('historyEstimate prefers same-case rows over the config-wide mean', () => {
+    const history = {
+      c1: [
+        { cost: 1.0, case_id: 'case-a' },
+        { cost: 3.0, case_id: 'case-a' },
+        { cost: 100.0, case_id: 'case-b' },
+      ],
+    };
+    const est = runner.historyEstimate(history, 'c1', 'case-a');
+    expect(est.cost).toBe(2.0);
+    expect(est.n).toBe(2);
+  });
+
+  test('historyEstimate falls back to the full config mean when no same-case rows exist', () => {
+    const history = { c1: [{ cost: 1.0, case_id: 'case-a' }, { cost: 3.0, case_id: 'case-a' }] };
+    const est = runner.historyEstimate(history, 'c1', 'case-unseen');
+    expect(est.cost).toBe(2.0);
+    expect(est.n).toBe(2);
+  });
+
+  test('estimateRunCost prefers history over the fallback model when history exists for the config', () => {
+    const history = { 'sonnet5-medium': [{ cost: 1.25, case_id: 'case-test' }] };
+    const est = runner.estimateRunCost({ id: 'case-test' }, cfg, 'sonnet5-medium', history);
+    expect(est.cost).toBe(1.25);
+    expect(est.source).toBe('history n=1');
+  });
+
+  test('estimateRunCost falls back to the model when the config has no history rows', () => {
+    const est = runner.estimateRunCost({ id: 'case-test' }, cfg, 'sonnet5-medium', {});
+    expect(est.source).toBe('model');
+    expect(est.cost).toBeGreaterThan(0);
+  });
+
+  // Measured means from calibration data (matrixA1-truncated-briefs.jsonl / smoke3.jsonl,
+  // >3-turn rows only): sonnet5-medium/medium ~$1.25/run (n=16), opus55-low/low ~$0.57/run (n=11).
+  const CALIBRATION_MEANS = { 'claude-sonnet-5:medium': 1.25, 'claude-opus-5-5:low': 0.57 };
+
+  test('fallback model lands within 30% of the measured calibration means', () => {
+    const sonnetMedium = runner.computeFallbackCost({ model: 'claude-sonnet-5', effort: 'medium' });
+    const opusLow = runner.computeFallbackCost({ model: 'claude-opus-5-5', effort: 'low' });
+    expect(Math.abs(sonnetMedium - CALIBRATION_MEANS['claude-sonnet-5:medium']) / CALIBRATION_MEANS['claude-sonnet-5:medium']).toBeLessThan(0.3);
+    expect(Math.abs(opusLow - CALIBRATION_MEANS['claude-opus-5-5:low']) / CALIBRATION_MEANS['claude-opus-5-5:low']).toBeLessThan(0.3);
+  });
+
+  test('fallback model cost is monotone in effort (low < medium < high) for both models', () => {
+    for (const model of ['claude-sonnet-5', 'claude-opus-5-5']) {
+      const low = runner.computeFallbackCost({ model, effort: 'low' });
+      const medium = runner.computeFallbackCost({ model, effort: 'medium' });
+      const high = runner.computeFallbackCost({ model, effort: 'high' });
+      expect(low).toBeLessThan(medium);
+      expect(medium).toBeLessThan(high);
+    }
+  });
+
+  test('buildPlan dry-run totals: history-backed configs use history, others use the fallback model, p90 total is at least the mean total', () => {
+    const history = {
+      'sonnet5-medium': [{ cost: 1.25, case_id: 'case-a' }, { cost: 1.0, case_id: 'case-b' }],
+    };
+    const allConfigs = {
+      'sonnet5-medium': { model: 'claude-sonnet-5', effort: 'medium' },
+      'sonnet5-high': { model: 'claude-sonnet-5', effort: 'high' },
+    };
+    const cases = [{ id: 'case-a' }, { id: 'case-b' }];
+    const plan = runner.buildPlan(['sonnet5-medium', 'sonnet5-high'], allConfigs, cases, 1, history);
+    const historyRows = plan.rows.filter((r) => r.config === 'sonnet5-medium');
+    const fallbackRows = plan.rows.filter((r) => r.config === 'sonnet5-high');
+    expect(historyRows.every((r) => r.source.startsWith('history'))).toBe(true);
+    expect(fallbackRows.every((r) => r.source === 'model')).toBe(true);
+    expect(plan.total).toBeGreaterThan(0);
+    expect(plan.p90Total).toBeGreaterThanOrEqual(plan.total * 0.9);
+  });
+});
+
 describe('env scrubbing', () => {
   test('scrubEnv removes session/runner-identifying vars', () => {
     process.env.CLAUDE_CODE_SESSION_ID = 'should-not-leak';
@@ -264,23 +498,65 @@ describe('env scrubbing', () => {
   });
 });
 
-describe('setupTimeAware', () => {
-  test('writes a settings JSON wiring only the PostToolUse elapsed-time hook', () => {
+describe('buildRunSettings', () => {
+  test('always writes merged settings with plugin overrides, plus the elapsed-time hook for time_aware configs', () => {
     const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-wt-'));
-    const settingsPath = runner.setupTimeAware(wt, { time_aware: true });
+    const settingsPath = runner.buildRunSettings(wt, { time_aware: true });
     expect(settingsPath).toBe(path.join(wt, '.coder-cost-settings.json'));
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(settings.enabledPlugins).toEqual({ 'some-plugin': false });
     expect(Object.keys(settings.hooks)).toEqual(['PostToolUse']);
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toContain('elapsed-time-hook.js');
     fs.rmSync(wt, { recursive: true, force: true });
   });
 
-  test('is a no-op for non time-aware configs', () => {
+  test('omits hooks for non time-aware configs but still writes the plugin overrides', () => {
     const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-wt2-'));
-    const settingsPath = runner.setupTimeAware(wt, { time_aware: false });
-    expect(settingsPath).toBeNull();
-    expect(fs.existsSync(path.join(wt, '.coder-cost-settings.json'))).toBe(false);
+    const settingsPath = runner.buildRunSettings(wt, { time_aware: false });
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(settings.enabledPlugins).toEqual({ 'some-plugin': false });
+    expect(settings.hooks).toBeUndefined();
     fs.rmSync(wt, { recursive: true, force: true });
+  });
+});
+
+describe('setupNeutralWorkspace', () => {
+  test('strips claude.md/.claude and writes the exact neutral CLAUDE.md text', () => {
+    const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-neutral-'));
+    fs.writeFileSync(path.join(wt, 'CLAUDE.md'), '# Advisor doctrine: delegate everything');
+    fs.mkdirSync(path.join(wt, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(wt, '.claude', 'settings.json'), '{}');
+    runner.setupNeutralWorkspace(wt);
+    expect(fs.existsSync(path.join(wt, '.claude'))).toBe(false);
+    expect(fs.readFileSync(path.join(wt, 'CLAUDE.md'), 'utf8').trim()).toBe(runner.NEUTRAL_CLAUDE_MD);
+    fs.rmSync(wt, { recursive: true, force: true });
+  });
+});
+
+describe('isolation (clone-based, not git worktree)', () => {
+  test('the clone has no claude.md/.claude and the neutral CLAUDE.md, and the stub receives --setting-sources user, --disallowedTools and the merged --settings', async () => {
+    const logFile = path.join(EVAL_FIXTURE_DIR, 'inspect.log');
+    process.env.STUB_MODE = 'inspect';
+    process.env.STUB_LOG_FILE = logFile;
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 10));
+    expect(result.outcome).toBe('no_attempt'); // 'inspect' mode never touches lib/add.js
+    const seen = JSON.parse(fs.readFileSync(logFile, 'utf8'));
+    expect(seen.claudeMd.trim()).toBe(runner.NEUTRAL_CLAUDE_MD);
+    expect(seen.hasDotClaude).toBe(false);
+    expect(seen.argv).toContain('--setting-sources');
+    expect(seen.argv[seen.argv.indexOf('--setting-sources') + 1]).toBe('user');
+    expect(seen.argv).toContain('--disallowedTools');
+    expect(seen.argv[seen.argv.indexOf('--disallowedTools') + 1]).toBe(runner.EVAL_DISALLOWED_TOOLS.join(','));
+    expect(seen.argv).toContain('--settings');
+    const settings = JSON.parse(seen.settingsContent);
+    expect(settings.enabledPlugins).toEqual({ 'some-plugin': false });
+  });
+
+  test("the clone's refs are independent: a stub that runs `git branch evil` in its cwd leaves no evil branch in the source repo", async () => {
+    process.env.STUB_MODE = 'evil';
+    await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 11));
+    const branches = execSync('git branch --list evil', { cwd: FIXTURE_ROOT }).toString().trim();
+    expect(branches).toBe('');
   });
 });
 
@@ -320,6 +596,50 @@ describe('worktree cleanup on SIGTERM', () => {
     const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('coder-cost-') && !before.has(n));
     expect(after.length).toBe(0);
   }, 20000);
+});
+
+describe('build-briefs.js (real cases.jsonl, real repo history)', () => {
+  const buildBriefs = require('../evals/coder-cost/build-briefs.js');
+  const REAL_REPO_ROOT = path.join(__dirname, '..');
+  const realCases = fs.readFileSync(path.join(REAL_REPO_ROOT, 'evals', 'coder-cost', 'cases.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+  test('every case brief has 26 entries to check', () => {
+    expect(realCases.length).toBe(26);
+  });
+
+  for (const kase of realCases) {
+    test(`${kase.id}: brief carries the preamble and the full, untruncated solution-commit message`, () => {
+      expect(kase.brief.startsWith(buildBriefs.PREAMBLE)).toBe(true);
+      const expectedMessage = buildBriefs.stripTrailers(
+        execSync(`git log -1 --format=%B ${kase.solution_sha}`, { cwd: REAL_REPO_ROOT, encoding: 'utf8' }).replace(/\n$/, '')
+      );
+      const actualMessage = kase.brief.slice(buildBriefs.PREAMBLE.length);
+      expect(actualMessage).toBe(expectedMessage);
+      const subjectLine = expectedMessage.split('\n')[0];
+      expect(actualMessage).toContain(subjectLine);
+      // Not a prefix-truncation: the real message's last line must appear in full.
+      const expectedLastLine = expectedMessage.split('\n').filter(Boolean).pop();
+      expect(actualMessage).toContain(expectedLastLine);
+    });
+  }
+});
+
+describe('report.js renders no_attempt', () => {
+  test('no_attempt gets its own counted column, separate from fail/pass', () => {
+    const results = [
+      { config: 'c1', outcome: 'pass', cost_instrument_a: { cost: 1.0 } },
+      { config: 'c1', outcome: 'no_attempt', cost_instrument_a: { cost: 0.2 } },
+      { config: 'c1', outcome: 'no_attempt', cost_instrument_a: { cost: 0.2 } },
+    ];
+    const md = reporter.buildReport(results);
+    expect(md).toContain('no_attempt');
+    const row = md.split('\n').find((l) => l.startsWith('| c1 |'));
+    const cells = row.split('|').map((c) => c.trim());
+    // cells: ['', config, runs, pass, fail, timeout, error, no_attempt, ...]
+    expect(cells[7]).toBe('2'); // no_attempt count
+    expect(cells[3]).toBe('1'); // pass count unaffected
+  });
 });
 
 describe('real concurrency', () => {

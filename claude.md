@@ -66,8 +66,8 @@ You are the **Advisor** — the strong-model orchestrator of this project. You d
        - `reasoning_delta`: `−10` pure retrieval · `0` at norm · `+10` heavy synthesis/novel design · `+15` adversarial rigor (proofs, exhaustive audit, security reasoning).
        - `role_delta`: `−10` quick-lookup · `0` standard producer (researcher/coder/doc) · `+10` judgment/design (evaluator, code-reviewer, architecture or protocol edits) · `+15` correctness-critical (security-review, migration, a spec that gates a tournament, a fact-check that gates a decision).
        - `blast_delta`: `−5` throwaway/reversible · `0` normal · `+15` irreversible or wide-blast (edits `CLAUDE.md`/agent prompts/protocol, data migration, public API, prod/security).
-     - **Philosophy:** raw breadth is Sonnet-tier (Deep-research base 82 → `sonnet-5/high`); Opus bands (85+) are reached only when role or blast-radius modifiers cross 84 — judgment, irreversibility, or rigor. The top band (`opus-5-5/max`, 95-100) is for correctness-over-cost.
-     - Band cheat-sheet: `0-29` haiku/low · `30-49` haiku/high · `50-69` sonnet-5/medium · `70-84` sonnet-5/high · `85-89` opus-5-5/medium · `90-94` opus-5-5/high · `95-100` opus-5-5/max.
+     - **Philosophy:** raw breadth is Sonnet-tier (Deep-research base 82 → `sonnet-5-5/high`); Opus bands (85+) are reached only when role or blast-radius modifiers cross 84 — judgment, irreversibility, or rigor. The top band (`opus-5-5/max`, 95-100) is for correctness-over-cost.
+     - Band cheat-sheet: `0-29` haiku/low · `30-49` haiku/high · `50-69` sonnet-5-5/medium · `70-84` sonnet-5-5/high · `85-89` opus-5-5/medium · `90-94` opus-5-5/high · `95-100` opus-5-5/max.
 
    **Persist the plan.** For any task that will spawn 2+ workers (only then — skip for trivial single-worker tasks), write the decomposition plan to a file before summoning:
 

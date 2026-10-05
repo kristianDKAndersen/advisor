@@ -46,12 +46,12 @@ function buildReport(results) {
   let md = '# Coder-cost eval report\n\n';
   md += `Total runs recorded: ${results.length}\n\n`;
   md += '## Per-config summary\n\n';
-  md += '| config | runs | pass | fail | timeout | error | pass rate | mean cost/run | p90 cost/run | cost/solved task | disagreement>5% |\n';
-  md += '|---|---|---|---|---|---|---|---|---|---|---|\n';
+  md += '| config | runs | pass | fail | timeout | error | no_attempt | pass rate | mean cost/run | p90 cost/run | cost/solved task | disagreement>5% |\n';
+  md += '|---|---|---|---|---|---|---|---|---|---|---|---|\n';
 
   const paretoRows = [];
   for (const [config, recs] of Object.entries(byConfig)) {
-    const counts = { pass: 0, fail: 0, timeout: 0, error: 0 };
+    const counts = { pass: 0, fail: 0, timeout: 0, error: 0, no_attempt: 0 };
     const costs = [];
     const solvedCosts = [];
     let disagreements = 0;
@@ -68,7 +68,7 @@ function buildReport(results) {
     const passRate = recs.length ? counts.pass / recs.length : null;
     const costPerSolved = solvedCosts.length ? solvedCosts.reduce((a, b) => a + b, 0) / solvedCosts.length : null;
 
-    md += `| ${config} | ${recs.length} | ${counts.pass} | ${counts.fail || 0} | ${counts.timeout || 0} | ${counts.error || 0} | ${passRate != null ? (passRate * 100).toFixed(1) + '%' : 'n/a'} | ${mean != null ? '$' + mean.toFixed(4) : 'n/a'} | ${p90 != null ? '$' + p90.toFixed(4) : 'n/a'} | ${costPerSolved != null ? '$' + costPerSolved.toFixed(4) : 'n/a'} | ${disagreements} |\n`;
+    md += `| ${config} | ${recs.length} | ${counts.pass} | ${counts.fail || 0} | ${counts.timeout || 0} | ${counts.error || 0} | ${counts.no_attempt || 0} | ${passRate != null ? (passRate * 100).toFixed(1) + '%' : 'n/a'} | ${mean != null ? '$' + mean.toFixed(4) : 'n/a'} | ${p90 != null ? '$' + p90.toFixed(4) : 'n/a'} | ${costPerSolved != null ? '$' + costPerSolved.toFixed(4) : 'n/a'} | ${disagreements} |\n`;
 
     paretoRows.push({ config, passRate: passRate || 0, mean: mean || Infinity, costPerSolved });
   }

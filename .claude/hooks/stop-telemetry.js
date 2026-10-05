@@ -41,20 +41,24 @@ async function main() {
 
   debugLog({ ts: new Date().toISOString(), sid: 'pending', phase: 'transcript_loaded', size_bytes: transcriptContent.length, line_count: lines.length, elapsed_ms: Date.now() - t0 });
 
-  const { breakdown, by_model, total_used } = sumUsageFromLines(lines);
+  const { breakdown, by_model, total_used, counting } = sumUsageFromLines(lines);
 
   const outDir = stateDir();
   fs.mkdirSync(outDir, { recursive: true });
   debugLog({ ts: new Date().toISOString(), sid, phase: 'done', total_used, elapsed_ms: Date.now() - t0 });
   fs.appendFileSync(
     path.join(outDir, 'token-usage.jsonl'),
-    JSON.stringify({ sid, counting: 'dedupe-v2', total_used, breakdown, by_model }) + '\n'
+    JSON.stringify({ sid, counting, total_used, breakdown, by_model }) + '\n'
   );
 }
 
 // Sums usage across transcript lines, deduping by message.id (Claude Code
 // repeats the same message.usage on one JSONL line per content block) and
 // skipping message.model === "<synthetic>" (non-billable synthetic turns).
+// usage.iterations[] (when present) carries sub-calls nested inside this
+// turn's usage. Known iteration types seen in real transcripts: "message"
+// (the executor's own usage, already counted above — ignored here) and
+// "advisor_message" (the advisor-tool model's own tokens — folded in below).
 function sumUsageFromLines(lines) {
   const seen = new Set();
   const breakdown = {
@@ -64,6 +68,7 @@ function sumUsageFromLines(lines) {
     cache_creation_input_tokens: 0
   };
   const by_model = {};
+  let sawAdvisorIteration = false;
 
   for (const line of lines) {
     let msg;
@@ -109,12 +114,52 @@ function sumUsageFromLines(lines) {
     by_model[model].cache_read_input_tokens += cache_read_input_tokens;
     by_model[model].cache_creation_5m_input_tokens += cache_5m;
     by_model[model].cache_creation_1h_input_tokens += cache_1h;
+
+    if (Array.isArray(u.iterations)) {
+      for (const it of u.iterations) {
+        if (it.type !== 'advisor_message') continue;
+        sawAdvisorIteration = true;
+
+        const aInput = it.input_tokens || 0;
+        const aOutput = it.output_tokens || 0;
+        const aCacheRead = it.cache_read_input_tokens || 0;
+        let aCache5m = 0;
+        let aCache1h = 0;
+        if (it.cache_creation) {
+          aCache5m = it.cache_creation.ephemeral_5m_input_tokens || 0;
+          aCache1h = it.cache_creation.ephemeral_1h_input_tokens || 0;
+        } else {
+          aCache5m = it.cache_creation_input_tokens || 0;
+        }
+
+        breakdown.input_tokens += aInput;
+        breakdown.output_tokens += aOutput;
+        breakdown.cache_read_input_tokens += aCacheRead;
+        breakdown.cache_creation_input_tokens += (aCache5m + aCache1h);
+
+        const aModel = it.model || 'unknown';
+        if (!by_model[aModel]) {
+          by_model[aModel] = {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_5m_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0
+          };
+        }
+        by_model[aModel].input_tokens += aInput;
+        by_model[aModel].output_tokens += aOutput;
+        by_model[aModel].cache_read_input_tokens += aCacheRead;
+        by_model[aModel].cache_creation_5m_input_tokens += aCache5m;
+        by_model[aModel].cache_creation_1h_input_tokens += aCache1h;
+      }
+    }
   }
 
   const total_used = breakdown.input_tokens + breakdown.output_tokens +
     breakdown.cache_read_input_tokens + breakdown.cache_creation_input_tokens;
 
-  return { breakdown, by_model, total_used };
+  return { breakdown, by_model, total_used, counting: sawAdvisorIteration ? 'dedupe-v3' : 'dedupe-v2' };
 }
 
 main().catch(() => process.exit(0));
