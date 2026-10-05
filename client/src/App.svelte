@@ -15,6 +15,7 @@
   type Totals = {
     input_tokens: number; output_tokens: number; cache_read: number; cache_creation: number;
     cost_usd: number; elapsed_ms: number; workers_counted: number; workers_missing: number;
+    legacy_workers: number;
   };
   let totals = $state<Totals | null>(null);
 
@@ -117,6 +118,7 @@
             <span>{(totals.input_tokens + totals.output_tokens).toLocaleString()} tok</span>
             <span>{(totals.elapsed_ms / 1000).toFixed(0)}s</span>
             {#if totals.workers_missing > 0}<span class="totals-partial">partial</span>{/if}
+            {#if totals.legacy_workers > 0}<span class="totals-legacy">legacy rates</span>{/if}
           </div>
         {/if}
         <MessageList sid={dashboardStore.selectedSid} onClose={() => dashboardStore.setSelected(null)} />
@@ -254,6 +256,11 @@
   }
 
   .totals-partial {
+    color: #f59e0b;
+    font-weight: 600;
+  }
+
+  .totals-legacy {
     color: #f59e0b;
     font-weight: 600;
   }

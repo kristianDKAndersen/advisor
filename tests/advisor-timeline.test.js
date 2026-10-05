@@ -98,7 +98,7 @@ fs.writeFileSync(path.join(tmpAssetsDir, 'foo.js'), 'console.log("test asset");'
 // ── Totals fixtures (state dir + a session with a mapped and an unmapped worker) ──
 
 const tmpState = fs.mkdtempSync(path.join(os.tmpdir(), 'adv-test-state-'));
-const { estimateCost } = require('../bin/advisor-cost');
+const { normalizeEntry, buildRows } = require('../bin/advisor-cost');
 
 const totalsSid = 'totals-sid-0001';
 const totalsSidDir = path.join(tmpHome, '.advisor', 'runs', totalsSid);
@@ -118,14 +118,72 @@ fs.writeFileSync(path.join(totalsSidDir, 'channel', 'outbox.jsonl'),
   JSON.stringify({ type: 'result', body: { verdict: 'complete' }, from: 'coder', seq: 2, ts: 1012.5 }) + '\n'
 );
 
+// Legacy row (no "counting" field) — the mapped worker for the main totals test.
+const legacyRow = { sid: 'mapped-claude-uuid', input_tokens: 1000, output_tokens: 500, cache_read: 200, cache_creation: 50, total: 1750, ts: 1000 };
+
 fs.writeFileSync(path.join(tmpState, 'session-map.jsonl'),
   JSON.stringify({ run_sid: 'mapped-worker-sid', claude_uuid: 'mapped-claude-uuid', agent: 'coder' }) + '\n'
 );
 fs.writeFileSync(path.join(tmpState, 'token-usage.jsonl'),
-  JSON.stringify({ sid: 'mapped-claude-uuid', input_tokens: 1000, output_tokens: 500, cache_read: 200, cache_creation: 50, total: 1750, ts: 1000 }) + '\n'
+  JSON.stringify(legacyRow) + '\n'
 );
 
-const expectedCost = estimateCost(1000, 500, 200, 50, null);
+const expectedCost = normalizeEntry(legacyRow).cost;
+
+// ── Mixed-model (v2 by_model) + legacy fixture, for a second session, used by
+// the per-model and parity tests. ─────────────────────────────────────────
+const mixedSid = 'mixed-sid-0001';
+const mixedSidDir = path.join(tmpHome, '.advisor', 'runs', mixedSid);
+fs.mkdirSync(path.join(mixedSidDir, 'channel'), { recursive: true });
+fs.writeFileSync(path.join(mixedSidDir, 'meta.json'),
+  JSON.stringify({ agent: 'advisor', goal: 'mixed totals test' }));
+fs.writeFileSync(path.join(mixedSidDir, 'session.json'), JSON.stringify({
+  sid: mixedSid,
+  tier: 1,
+  decomposition: [
+    { sid: 'v2-worker-sid', agent: 'coder', synthesis_seq: 1 },
+    { sid: 'legacy-worker-sid', agent: 'coder', synthesis_seq: 2 }
+  ]
+}));
+fs.writeFileSync(path.join(mixedSidDir, 'channel', 'outbox.jsonl'),
+  JSON.stringify({ type: 'result', body: { verdict: 'complete' }, from: 'coder', seq: 1, ts: 1000 }) + '\n'
+);
+
+const v2Row = {
+  sid: 'v2-claude-uuid', counting: 'dedupe-v2', total_used: 4_000_000,
+  breakdown: { input_tokens: 999, output_tokens: 999, cache_read_input_tokens: 999, cache_creation_input_tokens: 999 },
+  by_model: {
+    'claude-opus-5-5': {
+      input_tokens: 1_000_000, output_tokens: 1_000_000,
+      cache_read_input_tokens: 1_000_000,
+      cache_creation_5m_input_tokens: 1_000_000,
+      cache_creation_1h_input_tokens: 0,
+    },
+    'claude-sonnet-5-5': {
+      input_tokens: 1_000_000, output_tokens: 1_000_000,
+      cache_read_input_tokens: 1_000_000,
+      cache_creation_5m_input_tokens: 1_000_000,
+      cache_creation_1h_input_tokens: 0,
+    },
+  },
+  ts: 2000,
+};
+const legacyRow2 = {
+  sid: 'legacy-claude-uuid', total_used: 2_000_000,
+  breakdown: { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  ts: 2000,
+};
+
+fs.writeFileSync(path.join(tmpState, 'session-map.jsonl'),
+  JSON.stringify({ run_sid: 'mapped-worker-sid', claude_uuid: 'mapped-claude-uuid', agent: 'coder' }) + '\n' +
+  JSON.stringify({ run_sid: 'v2-worker-sid', claude_uuid: 'v2-claude-uuid', agent: 'coder' }) + '\n' +
+  JSON.stringify({ run_sid: 'legacy-worker-sid', claude_uuid: 'legacy-claude-uuid', agent: 'coder' }) + '\n'
+);
+fs.writeFileSync(path.join(tmpState, 'token-usage.jsonl'),
+  JSON.stringify(legacyRow) + '\n' +
+  JSON.stringify(v2Row) + '\n' +
+  JSON.stringify(legacyRow2) + '\n'
+);
 
 // ── Server lifecycle ──────────────────────────────────────────────────────────
 
@@ -156,7 +214,7 @@ test('GET /api/sessions/:sid/workers returns {workers, totals} with correct shap
   assert.ok(Array.isArray(body.workers), 'workers is an array');
   assert.ok('totals' in body, 'body has totals key');
   const t = body.totals;
-  for (const key of ['input_tokens', 'output_tokens', 'cache_read', 'cache_creation', 'cost_usd', 'elapsed_ms', 'workers_counted', 'workers_missing']) {
+  for (const key of ['input_tokens', 'output_tokens', 'cache_read', 'cache_creation', 'cost_usd', 'elapsed_ms', 'workers_counted', 'workers_missing', 'legacy_workers']) {
     assert.ok(key in t, `totals has ${key}`);
   }
 });
@@ -168,10 +226,38 @@ test('GET /api/sessions/:sid/workers totals sum only the mapped worker and count
   assert.strictEqual(t.output_tokens, 500, 'output_tokens from mapped worker only');
   assert.strictEqual(t.cache_read, 200, 'cache_read from mapped worker only');
   assert.strictEqual(t.cache_creation, 50, 'cache_creation from mapped worker only');
-  assert.ok(Math.abs(t.cost_usd - expectedCost) < 1e-9, `cost_usd matches estimateCost (got ${t.cost_usd}, expected ${expectedCost})`);
+  assert.ok(Math.abs(t.cost_usd - expectedCost) < 1e-9, `cost_usd matches normalizeEntry (got ${t.cost_usd}, expected ${expectedCost})`);
   assert.strictEqual(t.workers_counted, 1, 'one worker counted');
   assert.strictEqual(t.workers_missing, 1, 'one worker missing (no session-map entry)');
   assert.strictEqual(t.elapsed_ms, 12500, 'elapsed_ms from min/max message ts, in ms');
+  assert.strictEqual(t.legacy_workers, 1, 'the mapped worker is a legacy row');
+});
+
+test('GET /api/sessions/:sid/workers totals: per-model by_model breakdown (opus+sonnet) plus a legacy row, summed correctly', async () => {
+  const r = await httpGet(serverWithDist.port, `/api/sessions/${mixedSid}/workers`);
+  const t = JSON.parse(r.body).totals;
+
+  assert.strictEqual(t.workers_counted, 2, 'both workers mapped and counted');
+  assert.strictEqual(t.workers_missing, 0, 'no missing workers');
+  assert.strictEqual(t.legacy_workers, 1, 'one of the two workers is a legacy row');
+
+  const v2Cost = normalizeEntry(v2Row).cost;
+  const legacyCost = normalizeEntry(legacyRow2).cost;
+  assert.ok(Math.abs(t.cost_usd - (v2Cost + legacyCost)) < 1e-9,
+    `cost_usd sums per-model v2 cost + legacy cost (got ${t.cost_usd}, expected ${v2Cost + legacyCost})`);
+});
+
+test('parity: timeline totals.cost_usd equals the sum of advisor-cost buildRows cost for the same worker sids', async () => {
+  const r = await httpGet(serverWithDist.port, `/api/sessions/${mixedSid}/workers`);
+  const t = JSON.parse(r.body).totals;
+
+  const { rows } = buildRows({ stateDirectory: tmpState });
+  const expected = rows
+    .filter(row => row.sid === 'v2-claude-uuid' || row.sid === 'legacy-claude-uuid')
+    .reduce((s, row) => s + row.cost, 0);
+
+  assert.ok(Math.abs(t.cost_usd - expected) < 1e-9,
+    `timeline totals match advisor-cost buildRows (got ${t.cost_usd}, expected ${expected})`);
 });
 
 test('GET /api/sessions/:sid/workers totals for unknown sid: all workers missing, zero cost', async () => {
