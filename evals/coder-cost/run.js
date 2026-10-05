@@ -397,6 +397,10 @@ async function runOne(configName, cfg, kase, trial) {
       '--setting-sources', 'user', '--settings', settingsPath,
       '--disallowedTools', EVAL_DISALLOWED_TOOLS.join(',')];
     if (cfg.append_system_prompt) args.push('--append-system-prompt', cfg.append_system_prompt);
+    // Pinned so a killed (timed-out) run's transcript can still be priced: those are
+    // the most expensive runs and the CLI emits no JSON for them.
+    const pinnedSessionId = require('crypto').randomUUID();
+    args.push('--session-id', pinnedSessionId);
 
     const env = scrubEnv();
     env.ADVISOR_STATE_DIR = path.join(wtInfo.dir, 'state');
@@ -411,10 +415,12 @@ async function runOne(configName, cfg, kase, trial) {
     const claudeExitCode = res.status != null ? res.status : null;
 
     if (res.error && res.error.code === 'ETIMEDOUT') {
-      return { ...record, outcome: 'timeout', wall_clock_sec: wallSec, claude_exit_code: claudeExitCode };
+      return { ...record, outcome: 'timeout', wall_clock_sec: wallSec, claude_exit_code: claudeExitCode,
+        session_id: pinnedSessionId, cost_instrument_a: null, cost_instrument_b: costFromTranscript(pinnedSessionId, cfg.model) };
     }
     if (res.error) {
-      return { ...record, outcome: 'error', error: String(res.error.message || res.error), wall_clock_sec: wallSec, claude_exit_code: claudeExitCode };
+      return { ...record, outcome: 'error', error: String(res.error.message || res.error), wall_clock_sec: wallSec, claude_exit_code: claudeExitCode,
+        session_id: pinnedSessionId, cost_instrument_a: null, cost_instrument_b: costFromTranscript(pinnedSessionId, cfg.model) };
     }
 
     let parsed = null;
