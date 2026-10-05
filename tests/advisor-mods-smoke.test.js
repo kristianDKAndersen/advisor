@@ -388,30 +388,30 @@ test('formatPaneEvidence: non-blank capture returns last 20 non-blank lines', ()
 // --- findBandLine / countWakesBySid (captured-style pane samples) -----
 
 test('findBandLine: matches band with no trailing event type', () => {
-  const pane = '  some chrome\ne9b957 fake-alpha 0m\n──────\n❯ \n';
-  expect(smoke.findBandLine(pane, 'e9b957', 'fake-alpha')).toBe('e9b957 fake-alpha 0m');
+  const pane = '  some chrome\n346fc3 alpha 0m\n──────\n❯ \n';
+  expect(smoke.findBandLine(pane, '346fc3', 'alpha')).toBe('346fc3 alpha 0m');
 });
 
 test('findBandLine: matches band with trailing event type', () => {
-  const pane = 'header\n7793f3 fake-alpha 1m progress\nfooter\n';
-  expect(smoke.findBandLine(pane, '7793f3', 'fake-alpha')).toBe('7793f3 fake-alpha 1m progress');
+  const pane = 'header\n346fc3 alpha 1m progress\nfooter\n';
+  expect(smoke.findBandLine(pane, '346fc3', 'alpha')).toBe('346fc3 alpha 1m progress');
 });
 
 test('findBandLine: matches band with " waiting grace" suffix', () => {
-  const pane = 'header\n7793f3 fake-beta 2m progress waiting grace\nfooter\n';
-  const line = smoke.findBandLine(pane, '7793f3', 'fake-beta');
-  expect(line).toBe('7793f3 fake-beta 2m progress waiting grace');
+  const pane = 'header\n346fc3 beta 0m progress waiting grace\nfooter\n';
+  const line = smoke.findBandLine(pane, '346fc3', 'beta');
+  expect(line).toBe('346fc3 beta 0m progress waiting grace');
   expect(line).toContain('waiting grace');
 });
 
 test('findBandLine: returns null when sid does not match', () => {
-  const pane = 'e9b957 fake-alpha 0m\n';
-  expect(smoke.findBandLine(pane, 'aaaaaa', 'fake-alpha')).toBeNull();
+  const pane = '346fc3 alpha 0m\n';
+  expect(smoke.findBandLine(pane, 'aaaaaa', 'alpha')).toBeNull();
 });
 
 test('findBandLine: returns null when agent does not match', () => {
-  const pane = 'e9b957 fake-alpha 0m\n';
-  expect(smoke.findBandLine(pane, 'e9b957', 'fake-beta')).toBeNull();
+  const pane = '346fc3 alpha 0m\n';
+  expect(smoke.findBandLine(pane, '346fc3', 'beta')).toBeNull();
 });
 
 test('countWakesBySid: counts one sid= line per woken worker', () => {
@@ -439,6 +439,16 @@ test('countWakesBySid: empty object for pane text with no wake lines', () => {
   expect(smoke.countWakesBySid('nothing here\n')).toEqual({});
 });
 
+test('countWakesBySid: does not count a prose reply merely echoing "sid=X"', () => {
+  const pane = [
+    'fleet-waker: 1 worker finished:',
+    '- sid=abc123 agent=alpha type=result seq=2 verdict=complete summary="done" outbox=/x',
+    '',
+    '❯ The worker with sid=abc123 already reported in, so I will not re-summon it.',
+  ].join('\n');
+  expect(smoke.countWakesBySid(pane)).toEqual({ abc123: 1 });
+});
+
 // --- bin: --help and usage error (no live sessions) -------------------------------------------------------
 
 test('bin --help: exits 0, prints usage, no side effects', () => {
@@ -458,17 +468,24 @@ test('bin: --only with bad value exits 2', () => {
   expect(r.status).toBe(2);
 });
 
-// --- AGENTS agreement with fakeSummonScript -------------------------------------------------------
+// --- AGENTS agreement with fakeSummonScript and bin call sites -------------------------------------------------------
 
 test('AGENTS names match fakeSummonScript defaults and behavior', () => {
   const script = smoke.fakeSummonScript('/tmp/runs');
   // The script uses: agent="${1:-alpha}" — so default is 'alpha'
   expect(script).toContain('agent="${1:-alpha}');
-  // Verify AGENTS has the expected names that match summon call sites
   expect(smoke.AGENTS.alpha).toBe('alpha');
   expect(smoke.AGENTS.beta).toBe('beta');
-  // When invoked with no args, would use alpha; with 'alpha' arg, uses 'alpha';
-  // with 'beta' arg, uses 'beta' — all match AGENTS constant
+  expect(smoke.AGENTS.gamma).toBe('gamma');
+});
+
+test('bin: all three summon prompts reference smoke.AGENTS.<name>, not a literal', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(BIN, 'utf8');
+  for (const name of ['alpha', 'beta', 'gamma']) {
+    const re = new RegExp(`\\$\\{summonPath\\}\\s+\\$\\{smoke\\.AGENTS\\.${name}\\}`);
+    expect(src).toMatch(re);
+  }
 });
 
 // --- noEarlyWakeWindowMs: must never outlive fleet-waker's real GRACE_MS ---------------------------

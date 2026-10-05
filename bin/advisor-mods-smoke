@@ -192,6 +192,14 @@ function tmuxCapture(session) {
   return r.status === 0 ? r.stdout : '';
 }
 
+// Full scrollback (not just the visible screen) — needed wherever a wake
+// line might have scrolled off before we check for it. Safe to grep for a
+// unique random sid per worker, so scrollback from this run only.
+function tmuxCaptureFull(session) {
+  const r = spawnSync('tmux', ['capture-pane', '-p', '-S', '-', '-t', session], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout : '';
+}
+
 function pollUntil(fn, timeoutMs, intervalMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -314,7 +322,7 @@ function checkFleetWaker() {
       return fail('fleet-waker', t0, captureAndSaveEvidence(['session never became ready for alpha prompt']));
     }
 
-    const mainPrompt = `Run exactly this bash command once: ${summonPath} alpha ; then reply with just the word summoned and stop.`;
+    const mainPrompt = `Run exactly this bash command once: ${summonPath} ${smoke.AGENTS.alpha} ; then reply with just the word summoned and stop.`;
     spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', mainPrompt]);
     spawnSync('sleep', ['0.5']);
     spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
@@ -353,7 +361,7 @@ function checkFleetWaker() {
       return fail('fleet-waker', t0, captureAndSaveEvidence(['session never became ready for beta prompt']));
     }
 
-    const betaSummonPrompt = `Run exactly this bash command once: ${summonPath} beta ; then reply with just the word summoned and stop.`;
+    const betaSummonPrompt = `Run exactly this bash command once: ${summonPath} ${smoke.AGENTS.beta} ; then reply with just the word summoned and stop.`;
     spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', betaSummonPrompt]);
     spawnSync('sleep', ['0.5']);
     spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
@@ -410,7 +418,7 @@ function checkFleetWaker() {
     const earlyWakeWindowComputedAtMs = Date.now();
     let betaWakeSeenAtMs = null;
     const betaWokeEarly = pollUntil(() => {
-      const pane = tmuxCapture(sessionName);
+      const pane = tmuxCaptureFull(sessionName);
       if (smoke.countWakesBySid(pane)[betaSid]) {
         betaWakeSeenAtMs = betaWakeSeenAtMs || Date.now();
         return pane;
@@ -450,7 +458,7 @@ function checkFleetWaker() {
     }
 
     spawnSync('sleep', ['20']);
-    const paneAfterWait = tmuxCapture(sessionName);
+    const paneAfterWait = tmuxCaptureFull(sessionName);
     const wakesAfterWait = smoke.countWakesBySid(paneAfterWait);
     if ((wakesAfterWait[sid] || 0) !== 1) {
       return fail('fleet-waker', t0, captureAndSaveEvidence([`expected exactly 1 wake for alpha (sid=${sid}) after dedupe window, saw ${wakesAfterWait[sid] || 0}`]));
@@ -459,13 +467,13 @@ function checkFleetWaker() {
     // Beta's grace (30s) elapsed somewhere during the band/no-early-wake
     // polling above plus this 20s wait; it should have woken exactly once.
     const betaWoke = pollUntil(() => {
-      const pane = tmuxCapture(sessionName);
+      const pane = tmuxCaptureFull(sessionName);
       return smoke.countWakesBySid(pane)[betaSid] ? pane : null;
     }, 30000 * args.timeoutScale, 1000);
     if (!betaWoke) {
       return fail('fleet-waker', t0, captureAndSaveEvidence(['beta never woke after grace elapsed']));
     }
-    const wakesAfterBeta = smoke.countWakesBySid(tmuxCapture(sessionName));
+    const wakesAfterBeta = smoke.countWakesBySid(tmuxCaptureFull(sessionName));
     if ((wakesAfterBeta[betaSid] || 0) !== 1) {
       return fail('fleet-waker', t0, captureAndSaveEvidence([`expected exactly 1 wake for beta (sid=${betaSid}), saw ${wakesAfterBeta[betaSid] || 0}`]));
     }
@@ -478,7 +486,7 @@ function checkFleetWaker() {
       return fail('fleet-waker', t0, captureAndSaveEvidence(['session never became ready for gamma prompt']));
     }
 
-    const gammaSummonPrompt = `Run exactly this bash command once: ${summonPath} gamma ; then reply with just the word summoned and stop.`;
+    const gammaSummonPrompt = `Run exactly this bash command once: ${summonPath} ${smoke.AGENTS.gamma} ; then reply with just the word summoned and stop.`;
     spawnSync('tmux', ['send-keys', '-t', sessionName, '-l', gammaSummonPrompt]);
     spawnSync('sleep', ['0.5']);
     spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter']);
@@ -509,7 +517,6 @@ function checkFleetWaker() {
     }
 
     const gammaOutboxPath = path.join(runsRoot, gammaSid, 'channel', 'outbox.jsonl');
-    const gammaMetaPath = path.join(runsRoot, gammaSid, 'meta.json');
     const gammaSynthPath = path.join(runsRoot, gammaSid, 'synthesis.log');
 
     // Write synthesis.log line BEFORE appending result
@@ -526,12 +533,21 @@ function checkFleetWaker() {
     // Assert gamma never woke and band line disappeared within 40s
     const gammaDroppingDone = pollUntil(() => {
       const pane = tmuxCapture(sessionName);
-      const wakeCount = smoke.countWakesBySid(pane)[gammaSid];
+      const wakeCount = smoke.countWakesBySid(tmuxCaptureFull(sessionName))[gammaSid];
       const bandGone = !smoke.findBandLine(pane, gammaShortSid, smoke.AGENTS.gamma);
       return (wakeCount === undefined || wakeCount === 0) && bandGone ? pane : null;
     }, 40000 * args.timeoutScale, 500);
     if (!gammaDroppingDone) {
       return fail('fleet-waker', t0, captureAndSaveEvidence([`gamma woke despite synthesis.log or band never dropped (sid=${gammaSid})`]));
+    }
+
+    // Band dropping is not the same as "never wakes" — hold for a fixed,
+    // unscaled 10s after the drop and re-confirm zero gamma wakes before
+    // declaring the check passed.
+    spawnSync('sleep', ['10']);
+    const wakesAfterHold = smoke.countWakesBySid(tmuxCaptureFull(sessionName))[gammaSid];
+    if (wakesAfterHold) {
+      return fail('fleet-waker', t0, captureAndSaveEvidence([`gamma woke during post-drop hold (sid=${gammaSid})`]));
     }
 
     return pass('fleet-waker', t0);
