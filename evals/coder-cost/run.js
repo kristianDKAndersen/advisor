@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { priceForModel } = require('../../bin/advisor-cost');
+const { buildPluginOverrides } = require('../../lib/summon.js');
 
 const EVAL_DIR = __dirname;
 // Overridable so the test suite can point these at disposable fixtures instead of this repo.
@@ -127,20 +128,72 @@ function printDryRunPlan(plan, configNames, cases, trials) {
 
 function scrubEnv() {
   const env = { ...process.env };
-  for (const k of ['CLAUDE_CODE_SESSION_ID', 'SSE_PORT', 'CHILD_SESSION', 'ENTRYPOINT', 'CLAUDECODE']) {
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'SSE_PORT', 'CHILD_SESSION', 'ENTRYPOINT', 'CLAUDECODE', 'CLAUDE_I_SENTINEL']) {
     delete env[k];
   }
   return env;
 }
 
-// Tracks worktrees currently checked out so a terminating signal can remove them all.
+// Exact text required by the isolation spec (2026-10-05 incident): the eval
+// model must behave like a plain coding agent, never the Advisor orchestrator.
+const NEUTRAL_CLAUDE_MD = 'You are a software engineer working directly in this repository. Implement the task yourself with your own tools. Do not run bin/summon, bin/advisor-* or any agent-orchestration script, do not spawn other agents, and do not run git commands that create, move or delete branches, worktrees or refs, or that push. When you believe the task is complete, stop.';
+
+// Strips the repo's own Advisor doctrine from the clone (claude.md/CLAUDE.md
+// collide on this case-insensitive filesystem) and the whole .claude/ dir,
+// then writes a neutral CLAUDE.md so the eval model can't act as the Advisor.
+function setupNeutralWorkspace(wt) {
+  for (const name of ['claude.md', 'CLAUDE.md']) {
+    try { fs.rmSync(path.join(wt, name), { force: true }); } catch (e) {}
+  }
+  try { fs.rmSync(path.join(wt, '.claude'), { recursive: true, force: true }); } catch (e) {}
+  fs.writeFileSync(path.join(wt, 'CLAUDE.md'), NEUTRAL_CLAUDE_MD + '\n');
+}
+
+// Overridable so tests can point this at a fixture instead of the real
+// ~/.claude/settings.json (whose enabledPlugins vary machine to machine).
+const USER_SETTINGS_FILE = process.env.CODER_COST_USER_SETTINGS_FILE || path.join(os.homedir(), '.claude', 'settings.json');
+
+// Builds the single --settings JSON for a run: disables every plugin enabled
+// in the user's own settings (reusing lib/summon.js's worker-isolation helper
+// so eval models can't load the operator's plugins) and, for time_aware
+// configs only, adds the PostToolUse elapsed-time hook on top.
+function buildRunSettings(wt, cfg) {
+  let userSettings = null;
+  try { userSettings = JSON.parse(fs.readFileSync(USER_SETTINGS_FILE, 'utf8')); } catch (e) {}
+  const settings = {};
+  const pluginOverrides = buildPluginOverrides(userSettings, []);
+  if (Object.keys(pluginOverrides).length > 0) settings.enabledPlugins = pluginOverrides;
+  if (cfg.time_aware) {
+    const hookPath = path.join(EVAL_DIR, 'hooks', 'elapsed-time-hook.js');
+    settings.hooks = { PostToolUse: [{ hooks: [{ type: 'command', command: `bun ${hookPath}` }] }] };
+  }
+  const settingsPath = path.join(wt, '.coder-cost-settings.json');
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  return settingsPath;
+}
+
+// Tools no eval model may use: orchestration scripts and ref/worktree-mutating
+// git commands (2026-10-05 incident) plus ScheduleWakeup (Advisor-only).
+const EVAL_DISALLOWED_TOOLS = [
+  'Bash(bin/summon:*)', 'Bash(bin/advisor-*:*)', 'Bash(git push:*)',
+  'Bash(git worktree:*)', 'Bash(git branch:*)', 'Bash(git checkout:*)',
+  'ScheduleWakeup',
+];
+
+// Tracks clones currently checked out so a terminating signal can remove them all.
 const activeWorktrees = new Set();
 
+// A `git clone --shared --no-checkout` instead of `git worktree add`: the clone
+// gets its own refs (a `git branch`/`git checkout` inside it can never touch the
+// source repo's refs) while --shared avoids copying objects. --no-checkout +
+// a separate `checkout --detach` pins it to the case's base_sha.
 function makeWorktree(baseSha) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-'));
-  const wt = path.join(dir, 'wt');
-  const res = spawnSync('git', ['worktree', 'add', '--detach', '-q', wt, baseSha], { cwd: REPO_ROOT, encoding: 'utf8' });
-  if (res.status !== 0) throw new Error(`git worktree add failed: ${res.stderr}`);
+  const wt = path.join(dir, 'repo');
+  const clone = spawnSync('git', ['clone', '--shared', '--no-checkout', '-q', REPO_ROOT, wt], { encoding: 'utf8' });
+  if (clone.status !== 0) throw new Error(`git clone failed: ${clone.stderr}`);
+  const checkout = spawnSync('git', ['checkout', '--detach', '-q', baseSha], { cwd: wt, encoding: 'utf8' });
+  if (checkout.status !== 0) throw new Error(`git checkout failed: ${checkout.stderr}`);
   const info = { dir, wt };
   activeWorktrees.add(info);
   return info;
@@ -148,7 +201,6 @@ function makeWorktree(baseSha) {
 
 function removeWorktree(info) {
   if (!info) return;
-  spawnSync('git', ['worktree', 'remove', '-f', info.wt], { cwd: REPO_ROOT, encoding: 'utf8' });
   try { fs.rmSync(info.dir, { recursive: true, force: true }); } catch (e) {}
   activeWorktrees.delete(info);
 }
@@ -157,24 +209,38 @@ function removeAllActiveWorktrees() {
   for (const info of [...activeWorktrees]) removeWorktree(info);
 }
 
-// Removes worktrees orphaned by a previous run that was killed before cleanup
-// (e.g. the 2026-10-05 incident). Scans $TMPDIR for coder-cost-*/wt dirs.
+// Removes stale run artifacts left by a previous run killed before cleanup
+// (e.g. the 2026-10-05 incident): both post-migration clone dirs (plain rm -rf)
+// and pre-migration `git worktree add` dirs (still need `git worktree remove`
+// or the source repo's .git/worktrees metadata leaks). Scans $TMPDIR for
+// coder-cost-* containers.
 function sweepStaleWorktrees() {
   const tmp = os.tmpdir();
   let entries = [];
   try { entries = fs.readdirSync(tmp); } catch (e) { return; }
+  let prunedLegacy = false;
   for (const name of entries) {
     if (!name.startsWith('coder-cost-')) continue;
     const dir = path.join(tmp, name);
-    const wt = path.join(dir, 'wt');
-    if (!fs.existsSync(wt)) continue; // not a worktree container (e.g. an unrelated tmp dir) — leave it alone
-    spawnSync('git', ['worktree', 'remove', '--force', wt], { cwd: REPO_ROOT, encoding: 'utf8' });
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+    const legacyWt = path.join(dir, 'wt');
+    const cloneDir = path.join(dir, 'repo');
+    if (fs.existsSync(legacyWt)) {
+      spawnSync('git', ['worktree', 'remove', '--force', legacyWt], { cwd: REPO_ROOT, encoding: 'utf8' });
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+      prunedLegacy = true;
+    } else if (fs.existsSync(cloneDir)) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+    }
   }
-  spawnSync('git', ['worktree', 'prune'], { cwd: REPO_ROOT, encoding: 'utf8' });
+  if (prunedLegacy) spawnSync('git', ['worktree', 'prune'], { cwd: REPO_ROOT, encoding: 'utf8' });
 }
 
 function copyHiddenTests(wt, solutionSha, hiddenTests) {
+  // Doctrine was stripped only to keep the model from acting as the Advisor; some hidden
+  // tests read claude.md or .claude/hooks, so restore the base versions before checking.
+  for (const p of ['claude.md', '.claude']) {
+    spawnSync('git', ['checkout', 'HEAD', '--', p], { cwd: wt, encoding: 'utf8' });
+  }
   for (const tf of hiddenTests) {
     const show = spawnSync('git', ['show', `${solutionSha}:${tf}`], { cwd: REPO_ROOT, encoding: 'utf8' });
     if (show.status !== 0) throw new Error(`could not read hidden test ${tf} at ${solutionSha}`);
@@ -187,23 +253,6 @@ function runChecker(wt, hiddenTests) {
   const res = spawnSync('bun', ['test', ...hiddenTests], { cwd: wt, encoding: 'utf8', timeout: 120000, killSignal: 'SIGKILL' });
   if (res.error && res.error.code === 'ETIMEDOUT') return { outcome: 'timeout', raw: res };
   return { outcome: res.status === 0 ? 'pass' : 'fail', raw: res };
-}
-
-// Writes a per-run settings JSON (not the worktree's tracked .claude/settings.json)
-// wiring only the PostToolUse elapsed-time hook, passed to claude via --settings.
-// PostToolUse (not UserPromptSubmit) fires after every tool call, so the elapsed
-// time actually updates turn to turn in `-p` mode instead of being injected once.
-function setupTimeAware(wt, cfg) {
-  if (!cfg.time_aware) return null;
-  const hookPath = path.join(EVAL_DIR, 'hooks', 'elapsed-time-hook.js');
-  const settings = {
-    hooks: {
-      PostToolUse: [{ hooks: [{ type: 'command', command: `bun ${hookPath}` }] }],
-    },
-  };
-  const settingsPath = path.join(wt, '.coder-cost-settings.json');
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  return settingsPath;
 }
 
 // Instrument (a): take the CLI's own reported usage/cost from --output-format json.
@@ -252,6 +301,27 @@ function costFromTranscript(sessionId, fallbackModel, projectsRoot = path.join(o
     input += inTok; output += outTok; cacheRead += cr; cache5m += c5; cache1h += c1;
     cost += (inTok / 1e6) * rate.input + (outTok / 1e6) * rate.output + (cr / 1e6) * rate.cache_read
       + (c5 / 1e6) * rate.cache_creation + (c1 / 1e6) * rate.cache_write_1h;
+
+    // The advisor-tool call runs on its own model (e.g. opus) separate from the
+    // main assistant model; it rides along inside usage.iterations and was
+    // previously dropped entirely (2026-10-05 incident). Dedup is inherited
+    // from the outer `seen` set on msg.id — these only run once per message.
+    if (Array.isArray(u.iterations)) {
+      for (const iter of u.iterations) {
+        if (!iter || iter.type !== 'advisor_message') continue;
+        const iterModel = iter.model || modelId;
+        const iterRate = priceForModel(iterModel);
+        if (!iterRate.known) unpriced.add(iterModel);
+        const iIn = iter.input_tokens || 0;
+        const iOut = iter.output_tokens || 0;
+        const iCr = iter.cache_read_input_tokens || 0;
+        const iCc = iter.cache_creation && typeof iter.cache_creation === 'object' ? iter.cache_creation : null;
+        const iC5 = iCc ? (iCc.ephemeral_5m_input_tokens || 0) : 0;
+        const iC1 = iCc ? (iCc.ephemeral_1h_input_tokens || 0) : 0;
+        cost += (iIn / 1e6) * iterRate.input + (iOut / 1e6) * iterRate.output + (iCr / 1e6) * iterRate.cache_read
+          + (iC5 / 1e6) * iterRate.cache_creation + (iC1 / 1e6) * iterRate.cache_write_1h;
+      }
+    }
   }
   return {
     cost,
@@ -315,13 +385,17 @@ async function runOne(configName, cfg, kase, trial) {
   }
   const { wt } = wtInfo;
   try {
-    const settingsPath = setupTimeAware(wt, cfg);
+    setupNeutralWorkspace(wt);
+    const settingsPath = buildRunSettings(wt, cfg);
     const args = ['-p', kase.brief, '--model', cfg.model, '--effort', cfg.effort,
-      '--permission-mode', 'auto', '--strict-mcp-config', '--output-format', 'json'];
+      '--permission-mode', 'auto', '--strict-mcp-config', '--output-format', 'json',
+      '--setting-sources', 'user', '--settings', settingsPath,
+      '--disallowedTools', EVAL_DISALLOWED_TOOLS.join(',')];
     if (cfg.append_system_prompt) args.push('--append-system-prompt', cfg.append_system_prompt);
-    if (settingsPath) args.push('--settings', settingsPath);
 
     const env = scrubEnv();
+    env.ADVISOR_STATE_DIR = path.join(wtInfo.dir, 'state');
+    env.ADVISOR_WORKER_HOOKS = '1';
     if (cfg.time_aware) env.CODER_COST_START_MS = String(Date.now());
 
     const start = Date.now();
@@ -329,35 +403,44 @@ async function runOne(configName, cfg, kase, trial) {
       cwd: wt, env, timeout: (kase.timeout_sec || 600) * 1000, killSignal: 'SIGKILL',
     });
     const wallSec = Math.round((Date.now() - start) / 1000);
+    const claudeExitCode = res.status != null ? res.status : null;
 
     if (res.error && res.error.code === 'ETIMEDOUT') {
-      return { ...record, outcome: 'timeout', wall_clock_sec: wallSec };
+      return { ...record, outcome: 'timeout', wall_clock_sec: wallSec, claude_exit_code: claudeExitCode };
     }
     if (res.error) {
-      return { ...record, outcome: 'error', error: String(res.error.message || res.error), wall_clock_sec: wallSec };
+      return { ...record, outcome: 'error', error: String(res.error.message || res.error), wall_clock_sec: wallSec, claude_exit_code: claudeExitCode };
     }
 
     let parsed = null;
     try { parsed = JSON.parse(res.stdout); } catch (e) {
-      return { ...record, outcome: 'error', error: 'agent stdout was not valid JSON', wall_clock_sec: wallSec, stdout_tail: (res.stdout || '').slice(-2000) };
+      return { ...record, outcome: 'error', error: 'agent stdout was not valid JSON', wall_clock_sec: wallSec, claude_exit_code: claudeExitCode, stdout_tail: (res.stdout || '').slice(-2000) };
     }
 
     const instrumentA = costFromAgentJson(parsed);
     const instrumentB = costFromTranscript(instrumentA && instrumentA.session_id, cfg.model);
     const diag = disagreement(instrumentA && instrumentA.cost, instrumentB && instrumentB.cost);
+    const sessionId = (instrumentA && instrumentA.session_id) || null;
+    const numTurns = typeof parsed.num_turns === 'number' ? parsed.num_turns : null;
 
     let checkerResult;
     try {
       copyHiddenTests(wt, kase.solution_sha, kase.hidden_tests);
       checkerResult = runChecker(wt, kase.hidden_tests);
     } catch (e) {
-      return { ...record, outcome: 'error', error: String(e.message || e), wall_clock_sec: wallSec, cost_instrument_a: instrumentA, cost_instrument_b: instrumentB };
+      return { ...record, outcome: 'error', error: String(e.message || e), wall_clock_sec: wallSec, claude_exit_code: claudeExitCode, session_id: sessionId, num_turns: numTurns, cost_instrument_a: instrumentA, cost_instrument_b: instrumentB };
     }
+    const checkerOutput = (checkerResult.raw.stdout || '') + (checkerResult.raw.stderr || '');
 
     return {
       ...record,
       outcome: checkerResult.outcome,
       wall_clock_sec: wallSec,
+      claude_exit_code: claudeExitCode,
+      session_id: sessionId,
+      num_turns: numTurns,
+      checker_exit_code: checkerResult.raw.status != null ? checkerResult.raw.status : null,
+      checker_output_tail: checkerOutput.slice(-3000),
       cost_instrument_a: instrumentA,
       cost_instrument_b: instrumentB,
       cost_disagreement_pct: diag.pct,
@@ -464,5 +547,6 @@ if (require.main === module) main().catch((e) => { console.error(e); process.exi
 module.exports = {
   estimateRunCost, costFromAgentJson, costFromTranscript, findTranscript, disagreement,
   loadCompletedSet, completedKey, parseArgs, scrubEnv, runChecker, runOne, runPool,
-  sweepStaleWorktrees, setupTimeAware, buildPlan, RESULTS_DIR, activeWorktrees,
+  sweepStaleWorktrees, buildRunSettings, setupNeutralWorkspace, buildPlan, RESULTS_DIR, activeWorktrees,
+  EVAL_DISALLOWED_TOOLS, NEUTRAL_CLAUDE_MD,
 };

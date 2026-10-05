@@ -11,6 +11,11 @@ process.env.CODER_COST_REPO_ROOT = FIXTURE_ROOT;
 process.env.CODER_COST_RESULTS_DIR = RESULTS_ROOT;
 process.env.CODER_COST_CASES_FILE = path.join(EVAL_FIXTURE_DIR, 'cases.jsonl');
 process.env.CODER_COST_CONFIGS_FILE = path.join(EVAL_FIXTURE_DIR, 'configs.json');
+// Deterministic stand-in for ~/.claude/settings.json (real enabledPlugins vary
+// machine to machine) so buildRunSettings' plugin-override output is stable.
+const USER_SETTINGS_FIXTURE = path.join(EVAL_FIXTURE_DIR, 'user-settings.json');
+fs.writeFileSync(USER_SETTINGS_FIXTURE, JSON.stringify({ enabledPlugins: { 'some-plugin': true, 'another-plugin': false } }));
+process.env.CODER_COST_USER_SETTINGS_FILE = USER_SETTINGS_FIXTURE;
 
 const runner = require('../evals/coder-cost/run.js');
 const reporter = require('../evals/coder-cost/report.js');
@@ -70,7 +75,17 @@ beforeAll(() => {
     '}',
     'if (mode === "fix") { fs.writeFileSync("lib/add.js", process.env.STUB_FIX_CONTENT); }',
     'if (mode === "badjson") { process.stdout.write("not json"); process.exit(0); }',
-    'process.stdout.write(JSON.stringify({ total_cost_usd: 0.0123, usage: { input_tokens: 100, output_tokens: 50 }, session_id: "stub-session" }));',
+    'if (mode === "inspect") {',
+    '  let claudeMd = null;',
+    '  try { claudeMd = fs.readFileSync("CLAUDE.md", "utf8"); } catch (e) {}',
+    '  const argv = process.argv.slice(2);',
+    '  const settingsIdx = argv.indexOf("--settings");',
+    '  let settingsContent = null;',
+    '  if (settingsIdx !== -1) { try { settingsContent = fs.readFileSync(argv[settingsIdx + 1], "utf8"); } catch (e) {} }',
+    '  fs.writeFileSync(process.env.STUB_LOG_FILE, JSON.stringify({ argv, claudeMd, hasDotClaude: fs.existsSync(".claude"), settingsContent }));',
+    '}',
+    'if (mode === "evil") { require("child_process").spawnSync("git", ["branch", "evil"]); }',
+    'process.stdout.write(JSON.stringify({ total_cost_usd: 0.0123, usage: { input_tokens: 100, output_tokens: 50 }, session_id: "stub-session", num_turns: 3 }));',
     'process.exit(0);',
     '',
   ].join('\n');
@@ -115,10 +130,16 @@ describe('outcome classification (stubbed claude binary)', () => {
     expect(result.cost_instrument_a.cost).toBeCloseTo(0.0123, 5);
   });
 
-  test('fail: agent does not fix the file, hidden tests fail', async () => {
+  test('fail: agent does not fix the file, hidden tests fail, and the record carries checker_output_tail', async () => {
     process.env.STUB_MODE = 'nofix';
     const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 2));
     expect(result.outcome).toBe('fail');
+    expect(result.checker_exit_code).not.toBe(0);
+    expect(typeof result.checker_output_tail).toBe('string');
+    expect(result.checker_output_tail.length).toBeGreaterThan(0);
+    expect(result.session_id).toBe('stub-session');
+    expect(result.num_turns).toBe(3);
+    expect(result.claude_exit_code).toBe(0);
   });
 
   test('error: agent produces unparseable stdout', async () => {
@@ -182,6 +203,29 @@ describe('costFromTranscript (priced via bin/advisor-cost)', () => {
     const expectedCost = (expectedInput / 1e6) * rate.input + (expectedOutput / 1e6) * rate.output;
     expect(result.tokens).toEqual({ input: expectedInput, output: expectedOutput, cacheRead: 0, cache5m: 0, cache1h: 0 });
     expect(result.cost).toBeCloseTo(expectedCost, 8);
+  });
+
+  test('includes advisor_message iterations from usage.iterations, priced at their own model', () => {
+    const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-projects-advisor-'));
+    const projDir = path.join(projectsRoot, 'slug');
+    fs.mkdirSync(projDir, { recursive: true });
+    const lines = [{
+      message: {
+        id: 'm1', model: 'claude-sonnet-5',
+        usage: {
+          input_tokens: 1000, output_tokens: 200,
+          iterations: [{ type: 'advisor_message', model: 'claude-opus-5', input_tokens: 500, output_tokens: 100 }],
+        },
+      },
+    }];
+    fs.writeFileSync(path.join(projDir, 'sess-advisor.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+    const result = runner.costFromTranscript('sess-advisor', 'claude-sonnet-5', projectsRoot);
+    const sonnetRate = priceForModel('claude-sonnet-5');
+    const opusRate = priceForModel('claude-opus-5');
+    const expectedCost = (1000 / 1e6) * sonnetRate.input + (200 / 1e6) * sonnetRate.output
+      + (500 / 1e6) * opusRate.input + (100 / 1e6) * opusRate.output;
+    expect(result.cost).toBeCloseTo(expectedCost, 10);
   });
 
   test('reports unavailable (not a silent zero) when no transcript matches', () => {
@@ -264,23 +308,65 @@ describe('env scrubbing', () => {
   });
 });
 
-describe('setupTimeAware', () => {
-  test('writes a settings JSON wiring only the PostToolUse elapsed-time hook', () => {
+describe('buildRunSettings', () => {
+  test('always writes merged settings with plugin overrides, plus the elapsed-time hook for time_aware configs', () => {
     const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-wt-'));
-    const settingsPath = runner.setupTimeAware(wt, { time_aware: true });
+    const settingsPath = runner.buildRunSettings(wt, { time_aware: true });
     expect(settingsPath).toBe(path.join(wt, '.coder-cost-settings.json'));
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(settings.enabledPlugins).toEqual({ 'some-plugin': false });
     expect(Object.keys(settings.hooks)).toEqual(['PostToolUse']);
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toContain('elapsed-time-hook.js');
     fs.rmSync(wt, { recursive: true, force: true });
   });
 
-  test('is a no-op for non time-aware configs', () => {
+  test('omits hooks for non time-aware configs but still writes the plugin overrides', () => {
     const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-wt2-'));
-    const settingsPath = runner.setupTimeAware(wt, { time_aware: false });
-    expect(settingsPath).toBeNull();
-    expect(fs.existsSync(path.join(wt, '.coder-cost-settings.json'))).toBe(false);
+    const settingsPath = runner.buildRunSettings(wt, { time_aware: false });
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(settings.enabledPlugins).toEqual({ 'some-plugin': false });
+    expect(settings.hooks).toBeUndefined();
     fs.rmSync(wt, { recursive: true, force: true });
+  });
+});
+
+describe('setupNeutralWorkspace', () => {
+  test('strips claude.md/.claude and writes the exact neutral CLAUDE.md text', () => {
+    const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-neutral-'));
+    fs.writeFileSync(path.join(wt, 'CLAUDE.md'), '# Advisor doctrine: delegate everything');
+    fs.mkdirSync(path.join(wt, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(wt, '.claude', 'settings.json'), '{}');
+    runner.setupNeutralWorkspace(wt);
+    expect(fs.existsSync(path.join(wt, '.claude'))).toBe(false);
+    expect(fs.readFileSync(path.join(wt, 'CLAUDE.md'), 'utf8').trim()).toBe(runner.NEUTRAL_CLAUDE_MD);
+    fs.rmSync(wt, { recursive: true, force: true });
+  });
+});
+
+describe('isolation (clone-based, not git worktree)', () => {
+  test('the clone has no claude.md/.claude and the neutral CLAUDE.md, and the stub receives --setting-sources user, --disallowedTools and the merged --settings', async () => {
+    const logFile = path.join(EVAL_FIXTURE_DIR, 'inspect.log');
+    process.env.STUB_MODE = 'inspect';
+    process.env.STUB_LOG_FILE = logFile;
+    const result = await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 10));
+    expect(result.outcome).toBe('fail'); // 'inspect' mode never touches lib/add.js
+    const seen = JSON.parse(fs.readFileSync(logFile, 'utf8'));
+    expect(seen.claudeMd.trim()).toBe(runner.NEUTRAL_CLAUDE_MD);
+    expect(seen.hasDotClaude).toBe(false);
+    expect(seen.argv).toContain('--setting-sources');
+    expect(seen.argv[seen.argv.indexOf('--setting-sources') + 1]).toBe('user');
+    expect(seen.argv).toContain('--disallowedTools');
+    expect(seen.argv[seen.argv.indexOf('--disallowedTools') + 1]).toBe(runner.EVAL_DISALLOWED_TOOLS.join(','));
+    expect(seen.argv).toContain('--settings');
+    const settings = JSON.parse(seen.settingsContent);
+    expect(settings.enabledPlugins).toEqual({ 'some-plugin': false });
+  });
+
+  test("the clone's refs are independent: a stub that runs `git branch evil` in its cwd leaves no evil branch in the source repo", async () => {
+    process.env.STUB_MODE = 'evil';
+    await withStubPath(() => runner.runOne('sonnet5-medium', cfg, makeCase(), 11));
+    const branches = execSync('git branch --list evil', { cwd: FIXTURE_ROOT }).toString().trim();
+    expect(branches).toBe('');
   });
 });
 
