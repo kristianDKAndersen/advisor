@@ -11,34 +11,36 @@ const BIN = path.join(REPO, 'bin', 'advisor-cost');
 describe('priceForModel', () => {
   it('returns haiku rates including cache rates', () => {
     const p = priceForModel('claude-haiku-4-5-20251001');
-    expect(p.input).toBe(0.80);
-    expect(p.output).toBe(4.00);
-    expect(p.cache_read).toBe(0.08);
-    expect(p.cache_creation).toBe(1.00);
+    expect(p.input).toBe(1.00);
+    expect(p.output).toBe(5.00);
+    expect(p.cache_read).toBe(0.10);
+    expect(p.cache_creation).toBe(1.25);
   });
   it('returns sonnet rates including cache rates', () => {
-    const p = priceForModel('claude-sonnet-4-6');
-    expect(p.input).toBe(3.00);
-    expect(p.output).toBe(15.00);
-    expect(p.cache_read).toBe(0.30);
-    expect(p.cache_creation).toBe(3.75);
+    const p = priceForModel('claude-sonnet-5-5');
+    expect(p.input).toBe(2.00);
+    expect(p.output).toBe(10.00);
+    expect(p.cache_read).toBe(0.20);
+    expect(p.cache_creation).toBe(2.50);
   });
   it('returns opus rates including cache rates', () => {
-    const p = priceForModel('claude-opus-4-8');
-    expect(p.input).toBe(15.00);
-    expect(p.output).toBe(75.00);
-    expect(p.cache_read).toBe(1.50);
-    expect(p.cache_creation).toBe(18.75);
+    const p = priceForModel('claude-opus-5-5');
+    expect(p.input).toBe(4.00);
+    expect(p.output).toBe(20.00);
+    expect(p.cache_read).toBe(0.20);
+    expect(p.cache_creation).toBe(5.00);
   });
   it('returns default (sonnet) rates for unknown model', () => {
     const p = priceForModel('unknown-model');
-    expect(p.input).toBe(3.00);
-    expect(p.output).toBe(15.00);
+    expect(p.input).toBe(2.00);
+    expect(p.output).toBe(10.00);
   });
   it('returns fable rates', () => {
-    const p = priceForModel('claude-fable-5');
-    expect(p.input).toBe(3.00);
-    expect(p.output).toBe(15.00);
+    const p = priceForModel('claude-fable-5-1');
+    expect(p.input).toBe(10.00);
+    expect(p.output).toBe(50.00);
+    expect(p.cache_read).toBe(0.25);
+    expect(p.cache_creation).toBe(12.50);
   });
 });
 
@@ -95,23 +97,23 @@ describe('normalizeEntry', () => {
 
 describe('estimateCost (cache-aware)', () => {
   it('calculates cost for 1M input + 1M output at sonnet rates', () => {
-    const cost = estimateCost(1_000_000, 1_000_000, 0, 0, 'claude-sonnet-4-6');
-    expect(cost).toBeCloseTo(18.00, 4);
+    const cost = estimateCost(1_000_000, 1_000_000, 0, 0, 'claude-sonnet-5-5');
+    expect(cost).toBeCloseTo(12.00, 4);
   });
   it('calculates zero for zero tokens', () => {
     expect(estimateCost(0, 0, 0, 0, 'claude-sonnet-4-6')).toBe(0);
   });
   it('uses haiku rates for haiku model', () => {
     const cost = estimateCost(1_000_000, 0, 0, 0, 'claude-haiku-4-5-20251001');
-    expect(cost).toBeCloseTo(0.80, 4);
+    expect(cost).toBeCloseTo(1.00, 4);
   });
-  it('includes cache_read in cost at discounted rate (sonnet: $0.30/MTok)', () => {
-    const cost = estimateCost(0, 0, 1_000_000, 0, 'claude-sonnet-4-6');
-    expect(cost).toBeCloseTo(0.30, 4);
+  it('includes cache_read in cost at discounted rate (sonnet: $0.20/MTok)', () => {
+    const cost = estimateCost(0, 0, 1_000_000, 0, 'claude-sonnet-5-5');
+    expect(cost).toBeCloseTo(0.20, 4);
   });
-  it('includes cache_creation in cost at premium rate (sonnet: $3.75/MTok)', () => {
-    const cost = estimateCost(0, 0, 0, 1_000_000, 'claude-sonnet-4-6');
-    expect(cost).toBeCloseTo(3.75, 4);
+  it('includes cache_creation in cost at premium rate (sonnet: $2.50/MTok)', () => {
+    const cost = estimateCost(0, 0, 0, 1_000_000, 'claude-sonnet-5-5');
+    expect(cost).toBeCloseTo(2.50, 4);
   });
 });
 

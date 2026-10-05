@@ -11,7 +11,7 @@
 // Override state path with ADVISOR_STATE_DIR for testing.
 //
 // Pricing: cache_read and cache_creation are priced at published discounted rates,
-// not excluded — they are real costs. Source: Anthropic pricing page 2026-06.
+// not excluded — they are real costs. Source: claude.com/pricing 2026-10-05
 
 const fs = require('fs');
 const path = require('path');
@@ -19,15 +19,15 @@ const os = require('os');
 const telemetryBackfill = require('../lib/telemetry-backfill');
 
 // Price per million tokens, USD.
-// cache_read  = 10% of input rate (prompt cache read)
-// cache_creation = 125% of input rate (prompt cache write)
+// cache_read is carried per model (10% haiku/sonnet, 5% opus, 2.5% fable);
+// cache_creation = 125% of input; Source: claude.com/pricing 2026-10-05
 const PRICE_TABLE = {
-  'claude-haiku':  { input: 0.80,  output: 4.00,  cache_read: 0.08, cache_creation: 1.00  },
-  'claude-sonnet': { input: 3.00,  output: 15.00, cache_read: 0.30, cache_creation: 3.75  },
-  'claude-opus':   { input: 15.00, output: 75.00, cache_read: 1.50, cache_creation: 18.75 },
-  'claude-fable':  { input: 3.00,  output: 15.00, cache_read: 0.30, cache_creation: 3.75  },
+  'claude-haiku':  { input: 1.00,  output: 5.00,  cache_read: 0.10, cache_creation: 1.25  },
+  'claude-sonnet': { input: 2.00,  output: 10.00, cache_read: 0.20, cache_creation: 2.50  },
+  'claude-opus':   { input: 4.00,  output: 20.00, cache_read: 0.20, cache_creation: 5.00  },
+  'claude-fable':  { input: 10.00, output: 50.00, cache_read: 0.25, cache_creation: 12.50 },
 };
-const DEFAULT_PRICE = { input: 3.00, output: 15.00, cache_read: 0.30, cache_creation: 3.75 };
+const DEFAULT_PRICE = { input: 2.00, output: 10.00, cache_read: 0.20, cache_creation: 2.50 };
 
 function priceForModel(modelId) {
   if (!modelId) return { ...DEFAULT_PRICE };
@@ -240,8 +240,8 @@ function printTable({ rows, noMap }, byAgent) {
     console.log('─'.repeat(92));
     console.log(pad('TOTAL', 38) + padNum(fmt(totInput), 12) + padNum(fmt(totOutput), 12) + padNum(fmt(totRead), 12) + padNum(fmt(totWr), 12) + fmtCost(totCost));
   }
-  console.log('\nPricing (per MTok): haiku $0.80in/$4.00out/$0.08cr/$1.00cw  sonnet $3.00in/$15.00out/$0.30cr/$3.75cw  opus $15.00in/$75.00out/$1.50cr/$18.75cw');
-  console.log('cr=cache_read  cw=cache_creation  fable assumed sonnet rates  default: sonnet');
+  console.log('\nPricing (per MTok): haiku $1.00in/$5.00out/$0.10cr/$1.25cw  sonnet $2.00in/$10.00out/$0.20cr/$2.50cw  opus $4.00in/$20.00out/$0.20cr/$5.00cw  fable $10.00in/$50.00out/$0.25cr/$12.50cw');
+  console.log('cr=cache_read  cw=cache_creation  default: sonnet');
 }
 
 function parseArgs(argv) {
@@ -327,11 +327,11 @@ The session-map writer (worker-session-map hook) must ship first.
 
 Pricing (per million tokens):
   Model         input    output   cache_read  cache_creation
-  haiku         $0.80    $4.00    $0.08       $1.00
-  sonnet        $3.00    $15.00   $0.30       $3.75
-  opus          $15.00   $75.00   $1.50       $18.75
-  fable         $3.00    $15.00   $0.30       $3.75  (assumed sonnet family)
-  default       $3.00    $15.00   $0.30       $3.75  (sonnet, when model unknown)
+  haiku         $1.00    $5.00    $0.10       $1.25
+  sonnet        $2.00    $10.00   $0.20       $2.50
+  opus          $4.00    $20.00   $0.20       $5.00
+  fable         $10.00   $50.00   $0.25       $12.50
+  default       $2.00    $10.00   $0.20       $2.50  (sonnet, when model unknown)
 
 Model is not stored in token-usage.jsonl; sonnet rates are the default.
 Set ADVISOR_STATE_DIR to override ~/.advisor/state.
