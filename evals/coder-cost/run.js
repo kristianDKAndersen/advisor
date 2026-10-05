@@ -147,6 +147,11 @@ function setupNeutralWorkspace(wt) {
   }
   try { fs.rmSync(path.join(wt, '.claude'), { recursive: true, force: true }); } catch (e) {}
   fs.writeFileSync(path.join(wt, 'CLAUDE.md'), NEUTRAL_CLAUDE_MD + '\n');
+  // Commit the swap so the model starts from a clean tree: an uncommitted deletion
+  // read as "pre-existing breakage" and invited git stash games that lost files.
+  const g = (...a) => spawnSync('git', a, { cwd: wt, encoding: 'utf8' });
+  g('add', '-A');
+  g('-c', 'user.name=eval', '-c', 'user.email=eval@localhost', 'commit', '-q', '--no-verify', '-m', 'eval: neutral workspace');
 }
 
 // Overridable so tests can point this at a fixture instead of the real
@@ -235,11 +240,11 @@ function sweepStaleWorktrees() {
   if (prunedLegacy) spawnSync('git', ['worktree', 'prune'], { cwd: REPO_ROOT, encoding: 'utf8' });
 }
 
-function copyHiddenTests(wt, solutionSha, hiddenTests) {
+function copyHiddenTests(wt, solutionSha, hiddenTests, baseSha) {
   // Doctrine was stripped only to keep the model from acting as the Advisor; some hidden
   // tests read claude.md or .claude/hooks, so restore the base versions before checking.
   for (const p of ['claude.md', '.claude']) {
-    spawnSync('git', ['checkout', 'HEAD', '--', p], { cwd: wt, encoding: 'utf8' });
+    spawnSync('git', ['checkout', baseSha || 'HEAD', '--', p], { cwd: wt, encoding: 'utf8' });
   }
   for (const tf of hiddenTests) {
     const show = spawnSync('git', ['show', `${solutionSha}:${tf}`], { cwd: REPO_ROOT, encoding: 'utf8' });
@@ -425,7 +430,7 @@ async function runOne(configName, cfg, kase, trial) {
 
     let checkerResult;
     try {
-      copyHiddenTests(wt, kase.solution_sha, kase.hidden_tests);
+      copyHiddenTests(wt, kase.solution_sha, kase.hidden_tests, kase.base_sha);
       checkerResult = runChecker(wt, kase.hidden_tests);
     } catch (e) {
       return { ...record, outcome: 'error', error: String(e.message || e), wall_clock_sec: wallSec, claude_exit_code: claudeExitCode, session_id: sessionId, num_turns: numTurns, cost_instrument_a: instrumentA, cost_instrument_b: instrumentB };
