@@ -46,7 +46,7 @@ export function shouldRead(prev, stat) {
 }
 
 // Whether a tick actually changed anything persistence-worthy on a watch:
-// compares the fields a tick can mutate (lastSeq/lastStat/pending/lastEventType).
+// compares the fields a tick can mutate (lastSeq/lastStat/pending/lastEventType/lastProgress).
 // `before` may be a plain snapshot object; `after` the live (mutated) watch.
 export function watchChanged(before, after) {
   const b = before || {}
@@ -55,6 +55,7 @@ export function watchChanged(before, after) {
   if (b.lastEventType !== a.lastEventType) return true
   if (JSON.stringify(b.lastStat || null) !== JSON.stringify(a.lastStat || null)) return true
   if (JSON.stringify(b.pending || []) !== JSON.stringify(a.pending || [])) return true
+  if (JSON.stringify(b.lastProgress || null) !== JSON.stringify(a.lastProgress || null)) return true
   return false
 }
 
@@ -72,17 +73,61 @@ export function formatAge(ms) {
   return Math.floor(totalMin / 60) + 'h' + (totalMin % 60) + 'm'
 }
 
-// One line per worker (sid, agent, age, last event type, grace note), capped
-// at MAX_BAND_ROWS with a "+N more" summary row; [] for zero workers hides
-// the band entirely (the render hook returns the untouched base tree then).
+// Adapted from claude-kit's savvy-progress register.tsx barText (MIT, johnnyvizz).
+// Renders a ratio as a fixed-width text bar of full blocks and light shade.
+export function barText(ratio, width) {
+  const w = Math.max(0, Math.floor(Number(width) || 0))
+  const r = Math.max(0, Math.min(1, Number(ratio) || 0))
+  const filled = Math.round(r * w)
+  return '█'.repeat(filled) + '░'.repeat(w - filled)
+}
+
+const BAR_WIDTH = 10
+const NOTE_MAX = 40
+
+// Adapted from claude-kit's savvy-progress step tool schema {done,total,note}
+// (MIT, johnnyvizz). Accepts a JSON string or object; returns {done,total,note}
+// only when done/total are finite numbers and total>0, else null - never throws.
+export function parseProgressBody(body) {
+  let obj = body
+  if (typeof body === 'string') {
+    try {
+      obj = JSON.parse(body)
+    } catch {
+      return null
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
+  const { done, total, note } = obj
+  if (typeof done !== 'number' || !Number.isFinite(done)) return null
+  if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) return null
+  return { done, total, note: typeof note === 'string' ? note : undefined }
+}
+
+// Adapted from claude-kit's savvy-progress register.tsx STATUS_GLYPH (MIT, johnnyvizz).
+const STATUS_GLYPH = { progress: '●', result: '✓', error: '✗', question: '◷' }
+
+// One line per worker (glyph, sid, agent, age, last event type, grace note,
+// and - when structured progress is known - a bar + done/total + truncated
+// note), capped at MAX_BAND_ROWS with a "+N more" summary row; [] for zero
+// workers hides the band entirely (the render hook returns the untouched
+// base tree then). Rows without structured progress render exactly as
+// before apart from the leading glyph.
 export function formatFleetLines(watchList, nowMs) {
   const list = Array.isArray(watchList) ? watchList : []
   const shown = list.slice(0, MAX_BAND_ROWS).map((w) => {
     const ageMs = typeof w.ageMin === 'number' ? w.ageMin * 60000 : nowMs - w.addedAt
+    const glyph = STATUS_GLYPH[w.lastEventType] || '·'
     const bits = [shortSid(w.sid), w.agent, formatAge(ageMs)]
     if (w.lastEventType) bits.push(w.lastEventType)
     if (w.pendingGrace) bits.push('waiting grace')
-    return bits.join(' ')
+    let line = glyph + ' ' + bits.join(' ')
+    if (w.lastProgress) {
+      const { done, total, note } = w.lastProgress
+      line += ' ' + barText(done / total, BAR_WIDTH) + ' ' + done + '/' + total
+      if (note) line += ' ' + String(note).slice(0, NOTE_MAX)
+    }
+    return line
   })
   if (list.length > MAX_BAND_ROWS) shown.push('+' + (list.length - MAX_BAND_ROWS) + ' more')
   return shown
@@ -227,11 +272,15 @@ export function parseEnvelope(body) {
 // Parses JSONL outbox content for lines with seq > lastSeq, skipping
 // malformed lines. Terminal events: result, error; also wakes on question.
 // lastSeq advances past every well-formed line seen, not just terminal ones,
-// so progress messages don't get re-scanned every tick.
+// so progress messages don't get re-scanned every tick. lastProgress tracks
+// the highest-seq progress line with a valid structured body, independent of
+// lastType, so a later non-progress line doesn't erase a known progress bar.
 export function parseOutboxLines(content, lastSeq) {
   const events = []
   let maxSeq = lastSeq
   let lastType
+  let lastProgress
+  let lastProgressSeq = -Infinity
   for (const rawLine of String(content || '').split('\n')) {
     const line = rawLine.trim()
     if (!line) continue
@@ -246,12 +295,19 @@ export function parseOutboxLines(content, lastSeq) {
       maxSeq = msg.seq
       lastType = msg.type
     }
+    if (msg.type === 'progress' && msg.seq > lastProgressSeq) {
+      const parsed = parseProgressBody(msg.body)
+      if (parsed) {
+        lastProgress = parsed
+        lastProgressSeq = msg.seq
+      }
+    }
     if (msg.seq <= lastSeq) continue
     if (msg.type === 'result' || msg.type === 'error' || msg.type === 'question') {
       events.push(msg)
     }
   }
-  return { events, lastSeq: maxSeq, lastType }
+  return { events, lastSeq: maxSeq, lastType, lastProgress }
 }
 
 // Same decoding as lib/channel.js's readSynthesisRecords: one JSON record
@@ -450,6 +506,7 @@ async function syncState($, instanceId, allowSkip) {
         addedAt: w.addedAt,
         ageMin: Math.floor((now - w.addedAt) / 60000),
         lastEventType: w.lastEventType,
+        lastProgress: w.lastProgress,
         pendingGrace: !!(w.pending && w.pending.length),
       }
     })
@@ -499,7 +556,13 @@ async function pollOnce($, instanceId, runsRoot) {
         safeLog($, 'refusing to read outbox outside runs root: ' + w.outbox)
         continue
       }
-      const before = { lastSeq: w.lastSeq, lastStat: w.lastStat, pending: w.pending, lastEventType: w.lastEventType }
+      const before = {
+        lastSeq: w.lastSeq,
+        lastStat: w.lastStat,
+        pending: w.pending,
+        lastEventType: w.lastEventType,
+        lastProgress: w.lastProgress,
+      }
       let stat = null
       try {
         stat = await $.fs.stat(w.outbox)
@@ -522,6 +585,7 @@ async function pollOnce($, instanceId, runsRoot) {
           newEvents = parsed.events
           w.lastSeq = parsed.lastSeq
           if (parsed.lastType) w.lastEventType = parsed.lastType
+          if (parsed.lastProgress) w.lastProgress = parsed.lastProgress
           if (stat) w.lastStat = { size: stat.size, mtimeMs: stat.mtimeMs }
         }
       }

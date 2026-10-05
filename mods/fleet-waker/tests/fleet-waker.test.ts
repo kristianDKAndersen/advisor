@@ -17,6 +17,8 @@ import {
   shouldRead,
   shortSid,
   formatAge,
+  barText,
+  parseProgressBody,
   formatFleetLines,
   watchChanged,
   __simulateReload,
@@ -203,12 +205,45 @@ test('shortSid/formatAge/formatFleetLines: band rows, 5-row cap with a "+N more"
   const w = (n: number, extra = {}) => ({ sid: `179000000${n}-abcdef`, agent: 'coder', addedAt: 0, ...extra })
   expect(formatFleetLines([], 0)).toEqual([])
   expect(formatFleetLines([w(1, { pendingGrace: true, lastEventType: 'result' })], 60000)).toEqual([
-    'abcdef coder 1m result waiting grace',
+    '✓ abcdef coder 1m result waiting grace',
   ])
   const six = [0, 1, 2, 3, 4, 5].map((n) => w(n))
   const lines = formatFleetLines(six, 0)
   expect(lines.length).toBe(6)
+  expect(lines[0]).toBe('· abcdef coder 0m')
   expect(lines[5]).toBe('+1 more')
+})
+
+test('barText: fills proportionally to ratio, clamps below 0 and above 1, zero width is empty', () => {
+  expect(barText(0, 10)).toBe('░░░░░░░░░░')
+  expect(barText(1, 10)).toBe('██████████')
+  expect(barText(0.5, 10)).toBe('█████░░░░░')
+  expect(barText(-1, 10)).toBe('░░░░░░░░░░')
+  expect(barText(2, 10)).toBe('██████████')
+  expect(barText(0.5, 0)).toBe('')
+})
+
+test('parseProgressBody: accepts a JSON string or object with finite done/total, rejects invalid/garbage without throwing', () => {
+  expect(parseProgressBody('{"done":3,"total":10,"note":"step"}')).toEqual({ done: 3, total: 10, note: 'step' })
+  expect(parseProgressBody({ done: 1, total: 4 })).toEqual({ done: 1, total: 4, note: undefined })
+  expect(parseProgressBody('{"done":1,"total":0}')).toBeNull()
+  expect(parseProgressBody('{"done":"x","total":4}')).toBeNull()
+  expect(parseProgressBody('not json')).toBeNull()
+  expect(parseProgressBody(null)).toBeNull()
+  expect(parseProgressBody(42)).toBeNull()
+  expect(parseProgressBody([1, 2])).toBeNull()
+})
+
+test('formatFleetLines: appends a bar + done/total + truncated note when structured progress is present', () => {
+  const w = {
+    sid: '1790000000-abcdef',
+    agent: 'coder',
+    addedAt: 0,
+    lastEventType: 'progress',
+    lastProgress: { done: 2, total: 4, note: 'x'.repeat(60) },
+  }
+  const lines = formatFleetLines([w], 0)
+  expect(lines[0]).toBe('● abcdef coder 0m progress ' + barText(0.5, 10) + ' 2/4 ' + 'x'.repeat(40))
 })
 
 test('watchChanged: true on lastSeq/lastStat/pending/lastEventType drift, false when all are identical', () => {

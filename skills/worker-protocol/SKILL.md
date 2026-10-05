@@ -1,7 +1,7 @@
 ---
 name: worker-protocol
 description: Load inbox-polling rules, per-tool tracing, and self-terminate behavior for coder worker sessions. Run this at the start of every worker session before doing any other work to set up mandatory inbox polling, tracing, and the result envelope format.
-last_edited: 2026-05-26
+last_edited: 2026-10-05
 ---
 
 # Worker Protocol
@@ -77,7 +77,9 @@ bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type <type> --body "<text>" --
 ### Message types
 
 You SEND:
-- `progress` — intermediate observation (keep concise)
+- `progress` — intermediate observation (keep concise). The body MAY be a JSON
+  object `{"done":N,"total":M,"note":"..."}` so the fleet-waker band can render
+  a progress bar for this worker; plain free-text progress bodies stay valid.
 - `result`   — a completed deliverable
 - `question` — only if truly blocked; the pattern is *execute, don't negotiate*
 
