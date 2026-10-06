@@ -1,46 +1,29 @@
 ---
 name: synth
 description: Record a synthesis checkpoint via channel.js synthesize with required fields: sid, seq, established, and gap. Use when the Advisor needs to log what has been established and what open question remains at a given session step.
-last_edited: 2026-06-09
+last_edited: 2026-10-06
 ---
 
 # Synth
 
-Run a synthesis record via `channel.js synthesize`. All 4 required fields must
-be supplied; missing fields cause a validation error without invoking the command.
+Record a synthesis checkpoint via `channel.js synthesize`. `$ADV` must be set
+(`bin/summon` exports it in worker environments; elsewhere use the repo root).
+`channel.js` exits 1 naming any missing required flag, so run it only once you
+have all six.
 
-**Prerequisite:** `$ADV` must be set (it is exported by `bin/summon` in all
-worker environments).
+## Fields
 
-## Required fields
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--sid` | yes | Session ID of the current advisor run |
+| `--seq` | yes | Sequence number of the synthesis record |
+| `--established` | yes | What has been established (one sentence) |
+| `--gap` | yes | What gap or open question remains |
+| `--material` | yes | `yes`, `no` or `partial`: whether supporting material is attached |
+| `--next` | yes | `proceed-to-step-8`, `spawn-refinement: <gap>` or `spawn-evaluator` |
+| `--key-quotes` | no | 1-2 verbatim quotes worth preserving; empty string if none |
 
-| Flag | Description |
-|------|-------------|
-| `--sid` | Session ID of the current advisor run |
-| `--seq` | Sequence number of the synthesis record |
-| `--established` | What has been established (one sentence) |
-| `--gap` | What gap or open question remains |
-
-## Optional fields
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--material` | `no` | Whether supporting material is attached (`yes`/`no`) |
-| `--next` | `proceed-to-step-8` | Next action directive for the Advisor |
-| `--key-quotes` | `''` | 1–2 verbatim quotes from source material worth preserving; empty string if none |
-
-## Validation
-
-Check all 4 required fields FIRST. If any is missing, print:
-
-```
-ERROR: missing required field: --<field>
-Usage: /synth --sid "..." --seq "..." --established "..." --gap "..." [--material "no"] [--next "proceed-to-step-8"] [--key-quotes ""]
-```
-
-Do NOT invoke `node ... synthesize` when any required field is missing.
-
-## Invocation (all required fields present)
+## Invocation
 
 ```bash
 bun "$ADV/lib/channel.js" synthesize \
@@ -56,19 +39,8 @@ bun "$ADV/lib/channel.js" synthesize \
 
 ```
 /synth \
-  --sid "1777470000-abc123" \
-  --seq "3" \
-  --established "Both researchers confirm the API rate-limits at 60 req/min" \
-  --gap "No consensus yet on which caching strategy to adopt"
-```
-
-Invokes:
-
-```bash
-bun "$ADV/lib/channel.js" synthesize \
   --sid "1777470000-abc123" --seq "3" \
   --established "Both researchers confirm the API rate-limits at 60 req/min" \
   --gap "No consensus yet on which caching strategy to adopt" \
-  --material "no" \
-  --next "proceed-to-step-8"
+  --material "no" --next "proceed-to-step-8"
 ```

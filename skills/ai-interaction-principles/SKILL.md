@@ -1,18 +1,16 @@
 ---
 name: ai-interaction-principles
 description: Checklist of 39 human-AI interaction design principles (Bakusevych, UX Collective 2026) for briefing or building user-facing AI features - AI UX, chatbots, agent products, AI-assisted workflows, or AI feature specs. Use when a task ships AI in front of a user and needs interaction-design constraints beyond raw model capability.
-last_edited: 2026-07-02
+last_edited: 2026-10-06
 ---
 
 # AI Interaction Principles
 
-39 principles for designing human-AI interaction, synthesized from six upstream
-frameworks (OpenAI Model Spec, Anthropic Claude Constitution, Horvitz mixed-initiative
-work, Google PAIR Guidebook, IBM's Generative AI principles, Microsoft's Guidelines
-for Human-AI Interaction). Lean on these when scoping or reviewing a user-facing AI
-feature - they are defaults, not law. Rules can be bent; record why when you bend one.
+39 principles for designing human-AI interaction. Lean on these when scoping or
+reviewing a user-facing AI feature - they are defaults, not law; record why when
+you bend one.
 
-## Index (compact — full text in PRINCIPLES.md)
+## Index (full text, tags, thesis, attribution: PRINCIPLES.md)
 
 ### 1. Probabilistic Foundation (1-3)
 1. **Use AI only where it has a comparative advantage** [build]
@@ -80,5 +78,3 @@ most cases. Open `PRINCIPLES.md` only when a picked principle needs its full
 description to resolve a brief ambiguity. `[advisor]`-tagged principles govern
 the advisor's own orchestration, not shipped features, and are not brief
 constraints.
-
-Full text, tags, thesis, and attribution: `PRINCIPLES.md`.
