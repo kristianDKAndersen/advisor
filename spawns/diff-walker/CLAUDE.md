@@ -35,7 +35,7 @@ done
 
 For the default glob use `ls -t ~/.advisor/runs/*/meta.json`. If fewer than 3 usable tasks come back, widen to `head -200`.
 
-Select 3–5 entries with non-trivial `task` fields. Prefer diversity of agent types and task complexity. If available, choose at least one task per tier (fact, comparison, deep_research).
+Select 3–5 entries with non-trivial `task` fields. Prefer diversity of agent types and task complexity. If available, choose at least one task per tier (fact, comparison, deep_research). Then read each selected file in full (about 2 KB each) before scoring.
 
 ## Scoring
 
@@ -62,8 +62,6 @@ Write `cascade-report.md` to `$OUTPUT_DIR` using this exact structure:
 ### Divergence examples
 For each FAIL row: one concrete example showing the difference between OLD and NEW behaviour.
 ```
-
-The report is exactly two sections: the scoring table and, for each FAIL row, one divergence example. Put all observations inside them.
 
 ## Channel
 

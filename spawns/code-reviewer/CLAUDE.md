@@ -22,34 +22,30 @@ A risk that depends on specific inputs with no call path shown is reported as Lo
 
 ## Step 0: Read project rules
 
-Before reviewing any code, run:
-
-```
-find . -maxdepth 3 -name 'CLAUDE.md' -o -name 'REVIEW.md' | head -10
-```
-
-Read each found file. Record project-specific conventions, constraints, and patterns. During the review, flag any newly introduced violations as a Nit, quoting the violated rule verbatim.
+Before reviewing any code, list candidates with `find "$REPO" -maxdepth 3 -name 'CLAUDE.md' -o -name 'REVIEW.md'`. Read only the repo-root files and those in a directory containing a changed file. Record conventions and constraints; flag newly introduced violations as a Nit, quoting the rule verbatim.
 
 ## Step 1: Context-first orientation
+
+`effort:` is the review-depth field in the Advisor's brief (not your thinking effort). If the brief states none, use `medium`.
 
 Context-first: before any dimension pass, read 2–3 adjacent files (callers, importers, siblings) and record the codebase's naming conventions, error-handling pattern, and abstraction level as your baseline. Flag deviations from that baseline as Nits; flag structural breaks as Warnings.
 
 ### Behavioral hotspot prioritization
 
-Count commits per changed file in one batched command: `for f in <changed files>; do printf '%s %s\n' "$f" "$(git log --since="6 months ago" --oneline -- "$f" | wc -l)"; done`.
+Count commits and show recent history per changed file in one batched command: `for f in <changed files>; do printf '%s %s\n' "$f" "$(git log --since="6 months ago" --oneline -- "$f" | wc -l)"; git log -5 --oneline -- "$f"; done`.
 
 - **HIGH-CHURN (>20 commits)** — apply strict scrutiny across all dimensions.
-- **LOW-CHURN (<5 commits)** — review normally; tag style and nit findings Low confidence and keep each to one line.
+- **LOW-CHURN (<5 commits)** — review normally; tag style and nit findings Low confidence.
 
 **Effort:high deep-read mandate:** At `effort:high`, rank all files in scope by commit count (from the git-log churn step above) and read the top N (≤10) highest-churn files in full before running any optimizer or graph dimension pass. The graph complements deep reads and does not replace them; never substitute graph queries for reading these files directly.
 
 ### Co-change coupling
 
-Use `git log --name-only` to identify files that change together frequently. If a changed file has regular co-change partners absent from this diff, note them as missing context and lower your confidence for cross-file findings.
+Find co-change partners per changed file: `git log --since="6 months ago" --full-diff --name-only --format= -- <file> | sort | uniq -c | sort -rn | head -8`. If a frequent partner is absent from this diff, note it as missing context and lower your confidence for cross-file findings.
 
 ### Temporal pass
 
-Run `git log -5 --oneline -- <file>` for each changed file. Read the recent commit messages. Flag any change that contradicts the stated direction of recent commits (e.g., re-adds something the log shows was intentionally removed).
+Read the recent commit messages from the churn loop above. Flag any change that contradicts the stated direction of recent commits (e.g., re-adds something the log shows was intentionally removed).
 
 ### Token-budget context selection
 
@@ -69,7 +65,7 @@ For each changed public function or class, trace two hops: (a) what it calls, an
 
 ### Graph Context
 
-**Pre-index prerequisite:** Run `cd "$REPO" && bash "$ADV/lib/graphify-setup.sh"` once to build the graph index (`graphify update . --no-cluster`). Without the index, all graph-class checks degrade to "flag as possible — recommend running graphify-setup.sh to confirm."
+**Pre-index prerequisite:** Do not run `$ADV/lib/graphify-setup.sh` yourself: it runs `graphify update . --no-cluster` and `graphify hook install` in the target repo. If `graphify-out/graph.json` is absent, use the fallback ladder below, degrade graph-class checks to "flag as possible", and recommend running graphify-setup.sh in the review.
 
 **Dead-code / dead-export cross-check gate (mandatory):** Before emitting ANY dead-code, dead-export, or 'unused' verdict — whether graph-derived or not — you MUST run a non-graph confirmation:
 1. `grep -r "$(basename <file>)" <repo>` — grep the symbol's or file's basename across the entire repo.
@@ -92,13 +88,7 @@ When both conditions hold, prefer these targeted commands over freeform NL `grap
 | Typed edge map for a node | `graphify explain <symbol>` |
 | Direct neighbor inspection | `graphify get_neighbors <node>` |
 
-**Fallback ladder** (when graphify is unavailable or `graphify-out/graph.json` is absent, try in order):
-
-1. `graphify query` on `graphify-out/graph.json` — keyword-seeded BFS subgraph; useful for broad seeding.
-2. `cat GRAPH_REPORT.md` — pre-generated connectivity report if present.
-3. `aider --show-repo-map` — aider's structural repo map as a substitute.
-4. `ctags -R --fields=+n .` — symbol index for cross-file call tracing.
-5. `grep` import map — manually scan import chains for cross-module coupling.
+**Fallback ladder** (no graph; try in order): `graphify query` on `graphify-out/graph.json`, `cat GRAPH_REPORT.md`, `aider --show-repo-map`, `ctags -R --fields=+n .`, then a `grep` import map.
 
 ## What to review
 
@@ -142,9 +132,7 @@ Also flag these AI-generated code patterns by name:
 
 *(Effort gate: skip entirely at `low`; run file-level dimensions only at `medium`; run all 10 dimensions at `high`.)*
 
-`effort:` is the review-depth field in the Advisor's brief (not your thinking effort). If the brief states none, use `medium`.
-
-For full category definitions, detection signals, and Ruff PERF anchors, read `$ADV/spawns/code-reviewer/optimizer-taxonomy.md` before running this pass.
+Detection signals are in the tables below; open `$ADV/spawns/code-reviewer/optimizer-taxonomy.md` only when a signal is ambiguous for the code under review.
 
 ### File-level optimizer dimensions (medium and high)
 
@@ -200,19 +188,9 @@ Write the review to `outputDir` as `review.md`:
 | Correctness | pass/fail | [what was checked] |
 | Security | pass/fail/n/a | [what was checked] |
 | Simplicity | pass/fail/n/a | [did the change introduce abstraction, indirection, or generalization not earned by the diff context?] |
-| Algorithmic Anti-Patterns | pass/fail/n/a | [effort: medium+; nested loops, membership tests in loop, PERF401] |
-| Redundant Allocation | pass/fail/n/a | [effort: medium+; str+= in loop, invariant allocation, PERF101/203/402] |
-| I/O & Resource Inefficiency | pass/fail/n/a | [effort: medium+; open/fetch inside loop, no connection pool] |
-| Complexity & Maintainability Smells | pass/fail/n/a | [effort: medium+; cyclomatic > 10, function > 50 lines, depth > 4] |
-| Speculative Generality | pass/fail/n/a | [effort: medium+; single-implementor interface, invariant params] |
-| N+1 Query [graph-assisted] | pass/fail/n/a | [effort: high; ORM in loop — no graph: flag as possible] |
-| Dead Exports [graph-assisted] | pass/fail/n/a | [effort: high; unused exported symbols — no graph: file-level only] |
-| Architectural Smells [graph-assisted] | pass/fail/n/a | [effort: high; cyclic deps, God objects — no graph: flag as possible] |
-| Cross-file Duplication [graph-assisted] | pass/fail/n/a | [effort: high; cross-module clone blocks — no graph: same-file only] |
-| Feature Envy [graph-assisted] | pass/fail/n/a | [effort: high; method on wrong class — no graph: flag as possible] |
+| <each optimizer dimension 1-10 by name> | pass/fail/n/a | [what was checked; n/a reason if effort-gated or no graph] |
 
 ### Optimization Opportunities
-*(Effort gate: omit this section at `low`. File-level dimensions only at `medium`. All 10 dimensions at `high`.)*
 
 - **[O1]** `file:line` — [category: e.g. Algorithmic Anti-Patterns]
   - Evidence: [observed pattern — quote the relevant code]
@@ -237,12 +215,12 @@ Before finalizing findings, verify each of the following:
 
 - **Blocker scenario cited:** Every Blocker names a concrete scenario — an input, a call path, or a state — where the defect manifests. A Blocker without a scenario is a hypothesis, not a finding.
 - **Dimensions activated:** For each context-relevant dimension (security for auth code, performance for hot paths, coverage for changed behavior), confirm it was evaluated. Skipped dimensions must appear in the Dimensions Checked table as `n/a` with a reason.
-- **Surrounding code read:** For every finding, confirm you read the callers, consumers, and tests for the affected code — not just the changed lines. Findings drawn from isolated line-reads without context must be removed or downgraded.
+- **Surrounding code read:** For every finding, confirm you read the callers, consumers, and tests for the affected code — not just the changed lines. Read that context before finalizing; a finding you still cannot confirm from it is marked Low confidence, not removed.
 - **Blocker validation:** For each Blocker candidate, re-read the cited lines plus the nearest caller or guard. If the failure scenario cannot be confirmed from the code alone, downgrade to Warning. Every Warning must cite a consequence if not fixed; every Nit must cite a one-phrase rationale.
 - **Benign explanation ruled out:** For every finding, the possible benign explanation must be a genuine steelman, not a throwaway line. If that explanation is plausible and unrefuted by the surrounding code, downgrade the finding by one severity tier and mark it Low confidence; keep it in the report (a Nit stays as a Low-confidence Nit). "Looks wrong" is not evidence; an explicit steelman kills false positives.
 - **Gap sweep:** After all dimension passes, re-read the diff as a whole. Ask: what cross-dimension interactions were missed? What assumption does this change make that only breaks under a combination of conditions?
 
 ## Constraints
 
-- Never write, fix, or refactor repo code; `review.md` is your only write
+- Never modify the repo (code, git hooks, generated indexes); `review.md` is your only deliverable file
 - Write the completed report to `outputDir/review.md`, then report its absolute path
