@@ -16,7 +16,7 @@ Canonical background-observe + ScheduleWakeup pattern for monitoring in-flight w
 
 ### Step 1 - Launch ONE observer covering all in-flight sids
 
-Launch ONE `bin/advisor-observe <sid> [<sid>...]` as a `run_in_background` Bash call, listing every in-flight sid. It exits at the FIRST terminal event across the fleet: `result` with non-blocked verdict (exit 0), `result` with `verdict: "blocked"` or an error (exit 1), timeout or usage error, e.g. bare --after with 2+ sids (exit 2), or `--stall-exit` seconds of true silence (exit 3; observe does NOT terminate the worker). Every stdout line carries a `sid`; key off the trailing `{"type":"observe_exit","code":N,"sid":...,"reason":...}` line, not the shell `$?`.
+Launch ONE `bin/advisor-observe <sid> [<sid>...]` as a `run_in_background` Bash call, listing every in-flight sid. It exits at the FIRST terminal event across the fleet: `result` with non-blocked verdict (exit 0), `result` with `verdict: "blocked"` or an error (exit 1), timeout or usage error, e.g. bare --after with 2+ sids (exit 2), `--stall-exit` seconds of true silence (exit 3; observe does NOT terminate the worker), or a worker `question` (exit 4, reason `question`). Every stdout line carries a `sid`; key off the trailing `{"type":"observe_exit","code":N,"sid":...,"reason":...}` line, not the shell `$?`.
 
 ```bash
 bin/advisor-observe <sid1> <sid2> --max-wait 1800
@@ -24,7 +24,7 @@ bin/advisor-observe <sid1> <sid2> --max-wait 1800
 
 Flags: `--after <sid>:<seq>` (repeatable, one per sid; a bare `--after <seq>` is legal only with a single sid), `--max-wait <secs>` (default 1800), `--nudge-after <secs>` (default 300; 0 disables the one automatic "status?" nudge), `--stall-exit <secs>` (default 600; 0 disables).
 
-On exit, re-arm ONE fresh observe with the REMAINING sids and their per-sid `--after <sid>:<seq>` cursors.
+On exit, re-arm ONE fresh observe with the REMAINING sids and their per-sid `--after <sid>:<seq>` cursors. On exit 4, first answer the question via `guidance`, then re-arm all remaining sids, keeping the asking sid with `--after <sid>:<seq>` set to the question line's `seq` so it is skipped.
 
 ### Step 2 - Mandatory ScheduleWakeup fallback
 

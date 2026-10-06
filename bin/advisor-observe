@@ -18,6 +18,7 @@
 // though the pipe's own exit status is jq's, not observe's.
 //   0 = result with non-blocked verdict   1 = result verdict:blocked or error
 //   2 = max-wait timeout or a usage error 3 = --stall-exit total silence reached
+//   4 = a worker sent a `question` (answer it, re-arm with --after <sid>:<seq>)
 //
 // Heartbeats come only from tool hooks — a single long-running Bash call emits
 // none. "True silence" for the nudge/stall-exit/stalled checks is silence on
@@ -202,7 +203,7 @@ async function main() {
 
   while (true) {
     for (const rec of liveRecords()) {
-      // ── Outbox: first result/error across the fleet exits the process ───────
+      // ── Outbox: first result/error/question across the fleet exits the process
       const msgs = rec.outTail.read(rec.outboxPath).filter(m => m.seq > rec.cursor);
       for (const m of msgs) {
         rec.cursor = Math.max(rec.cursor, m.seq);
@@ -214,6 +215,7 @@ async function main() {
         emit(m, rec.sid);
         if (m.type === 'result') emitExit(exitCodeForMessage(m), rec.sid, reasonForMessage(m));
         if (m.type === 'error') emitExit(1, rec.sid, 'error');
+        if (m.type === 'question') emitExit(4, rec.sid, 'question');
       }
 
       // ── Inbox terminate check (per sid) ────────────────────────────────────
