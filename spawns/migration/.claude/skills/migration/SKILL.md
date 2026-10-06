@@ -2,105 +2,90 @@
 name: migration
 description: Provides the step-by-step migration planning procedure - pre-staged context loading, dead-code pre-pass, graphify slice bounding, git-history intent recovery, concept mapping, two-phase slice derivation, per-subsystem equivalence gate specification, and the canonical slice-plan.md output format. Use at the start of every migration planning session, before analyzing any source repository, slicing a codebase, or writing a slice plan.
 allowed-tools: Read, Bash, Grep, Glob, Write
+last_edited: 2026-10-06
 ---
 
 # Migration Planning Skill
 
-Procedural logic for the migration worker. The operating principles, self-check gate, and hard constraints live in the worker's CLAUDE.md and are binding at all times; this skill carries the HOW for each workflow step.
+The HOW for each workflow step. The worker's CLAUDE.md (principles, self-check gate, constraints) is the authority; where this file differs, CLAUDE.md wins.
 
-## Contents
-
-- Resources (load on demand)
-- Step 0: Read project rules and pre-stage context
-- Step 0.5: Dead-code pre-pass (mandatory before slicing)
-- Step 1: Parse and validate inputs
-- Step 2: Pre-index source repo with graphify
-- Step 3: Walk full git history commit-by-commit
-- Step 4: Behavioral hotspot prioritization
-- Step 5: Map old concepts to new architecture
-- Step 6: Derive ordered slice plan
-- Step 7: Equivalence test specification (dual-mode, per-subsystem)
-- Step 8: Output format (slice-plan.md template)
+Probes of the source repo are read-only: static analyzers, `--help` and `php -l` dry-runs, and the graphify index (`graphify-out/`). Run nothing that builds, installs, or otherwise writes there.
 
 ## Resources (load on demand)
 
-Read these only when the step you are executing calls for them — they are reference material, not required reading:
+Read a resource only when the step you are executing calls for it:
 
-- **Pipeline architecture**: See [resources/pipeline.md](resources/pipeline.md) — how the advisor consumes your slice plan (phases, coder fan-out, slice ledger, territory validation, bisect protocol). Read when you need to understand what a downstream consumer requires from a plan field.
+- **Pipeline architecture**: [resources/pipeline.md](resources/pipeline.md) (25KB) - how the advisor consumes your plan. Do not read it whole; Grep for the heading you need (`### Phase 0.5`, `## Resumable Slice Ledger`, `## Territory Validation`, `## Bug Isolation via Bisect`) and read only that section.
 - **Idiom taxonomy**: See [resources/idiom-taxonomy.md](resources/idiom-taxonomy.md) — source-pattern → target-idiom mappings per category and language, the idiomatic_note quality standard, and linter anchors for Commit 2 gates. Read during Step 5 and Step 6.
 - **PHP-2016 source patterns**: See [resources/php-2016-idioms.md](resources/php-2016-idioms.md) — a target-agnostic catalog of 2016-era PHP source patterns (mysql_*, untyped code, superglobals, mixed HTML+logic, ...) with detection signals and multi-target mapping examples. Read during Steps 3-6 whenever the source repo is PHP.
 
 ## Step 0: Read project rules and pre-stage context
 
-Before analyzing any code, do two things in parallel:
+Do both in parallel before analyzing any code:
 
 ### 0.1 Read project rules
 
 ```bash
-find "$SOURCE_REPO" -maxdepth 3 -name 'CLAUDE.md' -o -name 'REVIEW.md' -o -name 'ARCHITECTURE.md' | head -10
+find "$SOURCE_REPO" -maxdepth 3 \( -name node_modules -o -name vendor \) -prune -o \( -name 'CLAUDE.md' -o -name 'REVIEW.md' -o -name 'ARCHITECTURE.md' \) -print | head -10
 ```
 
-Read each found file. Record conventions, naming patterns, domain vocabulary, and any migration constraints already documented.
+Read each found file. Record conventions, domain vocabulary, and documented migration constraints.
 
 ### 0.2 Read pre-staged context files
 
-Read the pre-staged files at `$WORKSPACE/commit_history.txt`, `$WORKSPACE/commit_history_files.txt`, `$WORKSPACE/file_tree.txt`, and `$WORKSPACE/pr_context.json` via the Read tool — pre-staged by the advisor before this session started.
+The advisor pre-staged `$WORKSPACE/commit_history.txt`, `commit_history_files.txt`, `file_tree.txt`, and `pr_context.json`. Check sizes with `wc -l` first. Read `file_tree.txt` and `pr_context.json` in full only when under ~2000 lines; otherwise Grep or Read ranges. Never Read `commit_history_files.txt` whole: Step 3 selects from it with Grep or ranges.
 
-**If any file is absent:** run the staging commands yourself as a fallback:
+**If any file is absent**, stage it yourself:
 
 ```bash
 git -C "$SOURCE_REPO" log --reverse --format="%H %s" > "$WORKSPACE/commit_history.txt"
 git -C "$SOURCE_REPO" log --reverse --format="%H %s" --name-status > "$WORKSPACE/commit_history_files.txt"
 git -C "$SOURCE_REPO" ls-files > "$WORKSPACE/file_tree.txt"
-gh pr list --repo "$SOURCE_REPO" --state merged --json title,body,number --limit 100 \
+(cd "$SOURCE_REPO" && gh pr list --state merged --json title,body,number --limit 100) \
   > "$WORKSPACE/pr_context.json" 2>/dev/null || echo "[]" > "$WORKSPACE/pr_context.json"
 ```
 
-The canonical pre-staging commands (advisor's responsibility before summoning) are documented in [resources/pipeline.md](resources/pipeline.md) Phase 0. Never bulk-read git history via MCP tools.
+Never bulk-read git history via MCP tools (4-32x the token cost of the CLI).
 
 ## Step 0.5: Dead-code pre-pass (MANDATORY before slicing)
 
-Dead code must be identified and excluded — or deleted — before slicing begins. Migrating dead code carries full verification cost with zero business value and risks permanently preserving unused behavior in the target codebase.
+Migrating dead code costs full verification for zero business value, so identify and exclude it before slicing.
 
 ### Dead-code detection
 
-Build the graph index first:
+Build the graph index once, from the source repo root. Do not run `lib/graphify-setup.sh` (it indexes the current directory and installs a git hook in it):
 
 ```bash
-bash "$ADV/lib/graphify-setup.sh"
+(cd "$SOURCE_REPO" && graphify update . --no-cluster)
 ```
 
-**Per-exported-symbol reverse traversal (graphify):** An exported symbol whose importer/affected set is empty is dead. For each candidate exported symbol:
+**Language-specific static analysis (run first; faster than symbol-by-symbol graphify):**
 
 ```bash
-# Check if any callers exist in the source repo:
-graphify affected "<symbol>" --graph "$SOURCE_REPO/graphify-out/graph.json"
-# Empty result = no importers = symbol is dead
-```
-
-**Language-specific static analysis (primary tools — run first; these are faster than symbol-by-symbol graphify):**
-
-```bash
-# Python — find unused code with >= 80% confidence:
+# Python - unused code with >= 80% confidence:
 python3 -m vulture "$SOURCE_REPO" --min-confidence 80 2>/dev/null | head -50 || true
 
 # TypeScript/JavaScript:
-npx ts-prune --project "$SOURCE_REPO/tsconfig.json" 2>/dev/null | head -50 || true
+(cd "$SOURCE_REPO" && npx --no-install ts-prune --project tsconfig.json 2>/dev/null | head -50) || true
 
 # Go:
-deadcode ./... 2>/dev/null | head -50 || true
+(cd "$SOURCE_REPO" && deadcode ./... 2>/dev/null | head -50) || true
 
-# Rust — unused dependencies and dead_code warnings:
-cargo +nightly udeps 2>/dev/null | head -20 || true
-# Also check: cargo build 2>&1 | grep "dead_code" | head -20
+# Rust - unused dependencies:
+(cd "$SOURCE_REPO" && cargo +nightly udeps 2>/dev/null | head -20) || true
 
-# PHP — composer-based projects:
-vendor/bin/phpstan analyse --level 0 "$SOURCE_REPO" 2>/dev/null | head -50 || true
-# Pre-composer 2016-era PHP usually has NO static-analysis harness; fall back to
-# grep-based include/require tracing plus graphify. See resources/php-2016-idioms.md.
+# PHP - composer-based projects:
+(cd "$SOURCE_REPO" && vendor/bin/phpstan analyse --level 0 . 2>/dev/null | head -50) || true
+# Pre-composer 2016-era PHP usually has no static-analysis harness: use grep-based
+# include/require tracing plus graphify (see resources/php-2016-idioms.md).
 ```
 
-Use graphify per-symbol checks to confirm candidates flagged by the language tools, and to find graph-class dead code (exported symbols with no cross-module callers) that static analysis may miss.
+**Per-exported-symbol reverse traversal (graphify):** an exported symbol with an empty importer/affected set is dead. Use it to confirm candidates from the tools above and to find dead code they miss (exported symbols with no cross-module callers):
+
+```bash
+graphify affected "<symbol>" --graph "$SOURCE_REPO/graphify-out/graph.json"
+# Empty result = no importers = symbol is dead
+```
 
 ### Dead-code decision protocol
 
@@ -114,14 +99,14 @@ For each dead-code candidate found:
 
 ### 1.1 source_repo
 
-Confirm the source_repo path exists and is a git repository. Read `$WORKSPACE/commit_history.txt` (pre-staged in Step 0.2) to get commit count and history without MCP overhead:
+Confirm the source_repo path is a git repository and count commits from the pre-staged file (do not Read it):
 
 ```bash
 git -C "$SOURCE_REPO" rev-parse --git-dir
 wc -l < "$WORKSPACE/commit_history.txt"
 ```
 
-Record total commit count. This determines the depth of the history walk.
+Record the commit count; it sets the depth of the Step 3 history walk.
 
 ### 1.2 arch_def
 
@@ -149,18 +134,14 @@ Parse epics to extract:
 
 ## Step 2: Pre-index source repo with graphify
 
-Build the graph index before any dimension pass. Run once from the source repo root:
+The index was built in Step 0.5; do not rebuild it.
 
-```bash
-bash "$ADV/lib/graphify-setup.sh"
-```
-
-**Fallback ladder** (when graphify unavailable or `graphify-out/graph.json` absent):
+**Fallback ladder** (when graphify is unavailable or `graphify-out/graph.json` is absent):
 1. `aider --show-repo-map`
 2. `ctags -R --fields=+n .`
 3. `grep` import map
 
-Do NOT rely on the graph alone. Deep-read hotspot files for intra-function logic.
+The graph shows structure only; read hotspot files (Step 4) for intra-function logic.
 
 ### 2.1 Slice bounding on the OLD/source repo
 
@@ -198,7 +179,7 @@ Read `$WORKSPACE/commit_history_files.txt` (pre-staged). For large repos (>1000 
 For each batch, deep-read the actual diffs for high-churn files:
 
 ```bash
-git -C "$SOURCE_REPO" show --stat <COMMIT_SHA>
+git -C "$SOURCE_REPO" show --stat <COMMIT_SHA> | head -40
 git -C "$SOURCE_REPO" show --no-patch --format="%B" <COMMIT_SHA>
 ```
 
@@ -221,7 +202,7 @@ Classify files:
 - **HIGH-CHURN (>20 commits):** Core business logic; most thorough equivalence testing required.
 - **LOW-CHURN (<5 commits):** Stable utilities; candidates for mechanical translation.
 
-For the top 10 highest-churn files, read them in full.
+Read the top 10 highest-churn files in full (for any file over 100KB, Grep its key symbols instead).
 
 ## Step 5: Map old concepts to new architecture
 
@@ -312,9 +293,7 @@ Record mode per subsystem in the slice plan. Each slice's `equivalence_test_spec
 
 ### 7.2 Mode A — Old system subsystem is RUNNABLE
 
-**Phase 0.5 prerequisite:** Before any Mode A slice is dispatched, Phase 0.5 of the pipeline must capture golden masters for this subsystem (see [resources/pipeline.md](resources/pipeline.md) for Phase 0.5 detail). The coder brief for Mode A slices references pre-captured golden files.
-
-Golden-master capture (done in Phase 0.5, not by migration worker):
+**Phase 0.5 prerequisite:** the advisor captures golden masters for this subsystem before any Mode A slice is dispatched (you do not capture them). Coder briefs reference the pre-captured files:
 ```bash
 <old_entry_point> < input_fixture > "$OUTPUT_DIR/golden/<slice_id>_<scenario>.golden"
 ```
@@ -328,7 +307,7 @@ The equivalence test must pass at the literal translation boundary, before idiom
 | **FFI bridge testing** | C/C++ source → Rust target | Compile both, invoke via FFI test harness, compare outputs/side effects per-function |
 | **Contract test suite** | When golden outputs contain non-deterministic fields (UUIDs, timestamps) | Write assertions that mask non-deterministic fields; use `jq`-based comparators or approval-tests |
 
-The migration worker MUST specify which approach applies per slice in the `equivalence_test_spec.literal_parity_approach` field.
+Set `equivalence_test_spec.literal_parity_approach` per Mode A slice to exactly one of `golden-master-diff`, `ffi-bridge`, `contract-with-masking` (in table order).
 
 Per-slice gate for Mode A (Commit 1):
 - All applicable golden tests pass: `diff` exits 0 for each golden file, OR FFI test harness exits 0.
@@ -362,7 +341,7 @@ Both modes use this ordered gate. Check cheapest first — fail fast before reac
 1. Whitespace-only diff filter
    └─ cmd: git diff --ignore-all-space --exit-code <file>
    └─ purpose: detect no-op LLM outputs before spending build tokens
-   └─ fail: output is identical to source (no translation happened)
+   └─ pass: exit 1 (real changes present); fail: exit 0 (no translation happened)
 
 2. AST parse validation
    └─ cmd (TS): node --check <file>
@@ -440,21 +419,23 @@ Write the plan to `$OUTPUT_DIR/slice-plan.md`.
 
 | Slice ID | Name | Wave | Depends on | Source refs | Target location | Idiomatic note | Blast radius | Mode | Literal parity approach |
 |---|---|---|---|---|---|---|---|---|---|
-| S001 | [name] | 1 | — | [files/commits] | [new path] | [idiom] | LOW | A | golden-master diff |
-| S002 | [name] | 1 | — | [files/commits] | [new path] | [idiom] | LOW | B | contract tests |
+| S001 | [name] | 1 | - | [files/commits] | [new path] | [idiom] | LOW | A | golden-master-diff |
+| S002 | [name] | 1 | - | [files/commits] | [new path] | [idiom] | LOW | B | n/a (Mode B) |
 
 ### Per-Slice Equivalence Test Specs
 
 #### S001 — [name] (Mode A)
 **Commit 1 (literal) gate:**
-- Literal parity approach: golden-master diff
+- Literal parity approach: golden-master-diff
 - Scenarios: [list]
 - Inputs: [fixture paths]
 - Expected outputs: [golden file refs]
-- Gate command (cheap-first cascade):
-  1. `git diff --ignore-all-space --exit-code <file>` — must show changes (non-no-op)
-  2. `<build command>` — exit 0
-  3. `diff $OUTPUT_DIR/golden/S001_<scenario>.golden <actual>` — exit 0 for all scenarios
+- Gate command (all five cascade steps of 7.4, in order, stop at first failure):
+  1. `git diff --ignore-all-space --exit-code <file>` - exit 1 (changes present)
+  2. `<parse command>` - exit 0
+  3. `<build command>` - exit 0
+  4. `diff $OUTPUT_DIR/golden/S001_<scenario>.golden <actual>` - exit 0 for all scenarios
+  5. `graphify affected <new_slice_symbol> --graph "$NEW_REPO/graphify-out/graph.json"` - no dead exports (optional for LOW blast-radius)
 - Commit message: `feat(migration): [S001-literal] <name> — unidiomatic behavior-preserving translation`
 
 **Commit 2 (idiomatic) gate:**
@@ -466,26 +447,21 @@ Write the plan to `$OUTPUT_DIR/slice-plan.md`.
 
 ### Architecture Decisions
 
-**Decision 1: Per-subsystem equivalence gate mode** *(requires user confirmation before dispatch)*
-- Option A (RUNNABLE subsystem): golden-master tests; comprehensive; requires env setup (Phase 0.5); brittle against non-deterministic outputs.
-- Option B (NOT RUNNABLE / contract tests): from arch_def + epics; tests only documented behavior; safer for external-dep-heavy subsystems.
-- Mixed mode: apply A to runnable subsystems, B to the rest. Recommendation: prefer mixed.
+**Decision 1: Per-subsystem equivalence gate mode** *(user confirms before dispatch)*
+- A (RUNNABLE): golden-master tests; comprehensive, needs Phase 0.5 env setup, brittle on non-deterministic output. B (NOT RUNNABLE): contract tests from arch_def + epics; documented behavior only.
+- Recommendation: mixed - A for runnable subsystems, B for the rest.
 
 **Decision 2: Slice granularity**
-- Option A (fine-grained, 1-3 files): maximum bisect isolation; very high slice count.
-- Option B (coarse-grained, 1 behavior-coherent unit, 4-10 files): lower count; harder to bisect within slice.
-- Recommendation: Option B; split any slice exceeding 5 files.
+- A (1-3 files): best bisect isolation, high slice count. B (one behavior-coherent unit, 4-5 files): lower count, coarser bisect.
+- Recommendation: B; split any slice exceeding 5 files.
 
-**Decision 3: New repo graphify check cadence**
-- Option A (per-slice after every commit): catches dead exports immediately; doubles post-commit cost.
-- Option B (per-wave): batches overhead; allows smells to accumulate within a wave.
-- Recommendation: Option A for HIGH blast-radius slices; Option B for leaf-module waves.
+**Decision 3: New-repo graphify check cadence**
+- A (after every commit): catches dead exports at once, doubles post-commit cost. B (per wave): cheaper, smells accumulate within a wave.
+- Recommendation: A for HIGH blast-radius slices; B for leaf-module waves.
 
 **Decision 4: Literal-boundary parity approach per language pair**
-- Option A (golden-master file comparison): works for any language pair where both produce file output; simplest.
-- Option B (FFI bridge testing): strongest for C→Rust where per-function comparison is possible; requires FFI harness build.
-- Option C (contract tests with non-determinism masking): best when golden outputs contain UUIDs/timestamps; uses `jq`/approval-tests.
-- Recommendation: golden-master file comparison (Option A) as default; FFI bridge only for C→Rust with function-level parity requirements.
+- `golden-master-diff` (any pair producing file output), `ffi-bridge` (C to Rust, needs an FFI harness), `contract-with-masking` (outputs with UUIDs/timestamps).
+- Recommendation: `golden-master-diff` by default; `ffi-bridge` only for C to Rust with function-level parity needs.
 
 ### Dependency Graph
 - Wave 1 (parallel): [slice IDs with disjoint target_location]
@@ -503,4 +479,4 @@ Write the plan to `$OUTPUT_DIR/slice-plan.md`.
 - If a coder worker's Commit 2 fails the idiomatic gate but Commit 1 passed: the regression is in the idiomatic refactor; the literal commit can stand; re-brief the coder for Commit 2 only.
 ```
 
-After writing the plan, run the self-check gate defined in CLAUDE.md (8 checks) and fix every failure before reporting the result.
+Run the CLAUDE.md self-check gate (8 checks) on the draft BEFORE writing `slice-plan.md`, fix every failure, then write it. The result summary repeats each subsystem's chosen mode, flagged for Advisor confirmation.
