@@ -8,11 +8,6 @@ last_edited: 2026-10-06
 
 Run a parallel TDD tournament: spec agent writes failing tests, N coder workers implement the feature using different strategies, tournament-evaluator scores them, winner is applied to the repo.
 
-## When to use
-
-- Non-trivial feature with several valid approaches, where tests can be written first and run deterministically in a git worktree.
-- The cost of N parallel coders (typically 3, each a full worker session) is acceptable.
-
 ## Invocation
 
 ```bash

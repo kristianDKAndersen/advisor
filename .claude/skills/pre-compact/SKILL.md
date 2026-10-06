@@ -21,13 +21,13 @@ node -e "
   const {readSessionState} = require('./lib/session');
   const fs = require('fs');
   const path = require('path');
-  readSessionState('<sid>').then(s => {
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const out = path.join(process.env.HOME, '.advisor/runs/plans', ts + '-context-handover.md');
-    fs.mkdirSync(path.dirname(out), { recursive: true });
-    fs.writeFileSync(out, JSON.stringify(s, null, 2));
-    console.log('wrote', out);
-  });
+  const s = readSessionState('<sid>');
+  if (!s) { console.error('no session.json for <sid>'); process.exit(1); }
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const out = path.join(process.env.HOME, '.advisor/runs/plans', ts + '-context-handover.md');
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, JSON.stringify(s, null, 2));
+  console.log('wrote', out);
 "
 ```
 

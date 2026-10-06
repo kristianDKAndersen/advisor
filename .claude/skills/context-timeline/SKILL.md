@@ -8,11 +8,12 @@ allowed-tools:
 
 # context-timeline
 
-Launch the advisor-timeline HTTP server: a live, color-coded per-agent timeline of the inbox and outbox messages of every session under `~/.advisor/runs/`. `bin/summon` auto-starts it on port 7878 (`ADVISOR_TIMELINE_PORT`), so check first and start it only if it is down. Run from the advisor repo root.
+Launch the advisor-timeline server (sessions under `~/.advisor/runs/`). `bin/summon` auto-starts it on port 7878 (`ADVISOR_TIMELINE_PORT`), so check first and start it only if it is down. Run from the advisor repo root.
 
 ```bash
-curl -sf http://127.0.0.1:7878/health >/dev/null || node bin/advisor-timeline --port 7878 &
-open http://localhost:7878/   # macOS
+P="${ADVISOR_TIMELINE_PORT:-7878}"
+curl -sf "http://127.0.0.1:$P/health" >/dev/null || nohup node bin/advisor-timeline --port "$P" >>"$HOME/.advisor/timeline.log" 2>&1 &
+open "http://localhost:$P/"   # macOS
 ```
 
-Stop the server: `kill $(lsof -ti tcp:7878)`.
+Stop the server: `kill $(lsof -ti tcp:${ADVISOR_TIMELINE_PORT:-7878})`.
