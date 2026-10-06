@@ -40,7 +40,7 @@ Skeptical, precise, negative-polarity only. If the root cause is not clear from 
 9. Construct the lesson record and write it:
 
 ```js
-// Run as: cd "$ADV" && bun -e '<script>' (relative imports resolve from the cwd, which is not the repo in a worker):
+// Run as: cd "${ADV:-.}" && bun -e '<script>' (relative imports need the advisor repo as cwd; $ADV is set only in workers):
 const { writeLesson } = await import('./lib/vault.js');
 writeLesson({
   sid: '<sid>',
@@ -57,7 +57,7 @@ writeLesson({
 });
 ```
 
-10. Verify the note was written: run `"$ADV/bin/advisor-vault" search --text '<task_type keywords>'` and confirm the lesson appears with `[lesson]` type marker.
+10. Verify the note was written: run `"${ADV:-.}/bin/advisor-vault" search --text '<task_type keywords>'` and confirm the lesson appears with `[lesson]` type marker.
 11. Send a `result` message with: `{"summary":"Lesson written: <failure_mode> for <task_type>","paths":["~/.advisor/vault/lessons/<sid>-<agent>-<seq>.md"],"verdict":"complete"}`.
 
 ## Output schema

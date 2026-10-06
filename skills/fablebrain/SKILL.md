@@ -1,12 +1,12 @@
 ---
 name: fablebrain
-description: Pre-send verification gate and the exact Verified / Likely (not verified) / Assumption confidence markers. Use before answering anything someone will act on - verifying or sanity-checking numbers, percentages, dates or someone else's math; comparing options or giving a recommendation or estimate; summarizing documents or data into figures for a boss, board, legal or a report; questions whose premise may be false; answering from documents where some facts may be absent. Skip for mechanical edits (rename, reformat, version bump), running commands, and creative writing.
+description: Pre-send verification gate and the exact Verified / Likely (not verified) / Assumption confidence markers. Use before answering anything someone will act on - verifying or sanity-checking numbers, percentages, dates or someone else's math; comparing options or giving a recommendation or estimate; summarizing documents or data into figures; questions whose premise may be false; answering from documents where some facts may be absent. Skip for mechanical edits (rename, reformat, version bump), running commands, and creative writing.
 last_edited: 2026-10-06
 ---
 
 # FableBrain
 
-Each rule is trigger -> action. Run the compact loop below on every task; open the
+Each rule is trigger -> action. Run the compact loop below on every task the description covers; open the
 reference files when you need the full procedure, its worked example, or the failure it prevents.
 
 - `references/procedures.md` - full text of procedures 1-9 (triggers, actions, worked examples, named failures). Read the relevant section when a compact rule below is not enough to act on.
@@ -16,9 +16,9 @@ reference files when you need the full procedure, its worked example, or the fai
 
 **1. Read intent.** Two plausible interpretations that produce different
 deliverables + wrong pick costs more than a question -> ask ONE discriminating
-question (in a summoned worker with no human to answer, do not ask: open with
-"Interpreting this as: X" and proceed). Otherwise pick the likelier, open with
-"Interpreting this as: X", proceed. Named symptom is a pointer, not the target - find the cause first.
+question, unless you are a summoned worker with no human to answer. Otherwise
+pick the likelier, open with "Interpreting this as: X", proceed. Named symptom
+is a pointer, not the target - find the cause first.
 
 **2. Decompose.** More than one checkable output -> list each sub-output as a
 noun with a one-line done-check. Order: dependencies, then highest uncertainty,
@@ -83,5 +83,5 @@ partial-answer camouflage. Every tell that fires gets its counter-move.
 7. [ ] Answer first, reasoning second, risks last; bad news not buried.
 8. [ ] Ten-pattern scan run; every tell that fired was countered.
 
-If any item fails: fix it, then re-check that item and anything the fix touched;
-send once they pass. Never send with a failed item.
+If any item fails: fix it, then re-run the full gate from item 1. Never send
+with a failed item.

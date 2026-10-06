@@ -3,11 +3,11 @@ name: sub-teams
 description: Split the current advisor task into 2-10 independent subtasks and run them in parallel with a delegator plus teammates. Use for large, independent, parallelizable work only.
 last_edited: 2026-10-06
 ---
-# /sub-teams - Parallel Sub-Team Execution
+# /sub-teams — Parallel Sub-Team Execution
 
-Use this only when the task splits into 2 or more independent subtasks that each need real work. For one sequential chain, a single-file change or fewer than 2 independent subtasks, do the work directly and say so in your result.
+Use this only when the task splits into 2 or more independent subtasks that each need real work. For one sequential chain, a single-file change or fewer than 2 independent subtasks, do the work directly and say so in your result (omit `sub_team_run_id` and `meta.sub_team`).
 
-Run Steps 1-3 in one Bash invocation, or write the exports to "$OUTPUT_DIR/sub-team-env.sh" and source it at the top of every later Bash call: shell variables do not persist between Bash calls.
+Shell variables do not persist between Bash calls. Run the Step 1-3 commands in one Bash invocation ending with `echo "RUN_ID=$RUN_ID RUN_DIR=$RUN_DIR"`, then use those literal values in every later step (the Read path in Step 3, `cat` in Step 5, the result envelope).
 
 ## Step 1 — Pre-decompose the advisor task
 
@@ -34,10 +34,7 @@ Each subtask must match this schema:
 }
 ```
 
-Assign tasks to teammates round-robin: `teammate-1`, `teammate-2`, ... (use at least 2 teammates).
-Set `assigned_teammate` per round-robin assignment.
-
-Determine your teammate roles list (e.g. `["teammate-1","teammate-2"]`).
+Assign tasks round-robin to at least 2 teammates (`teammate-1`, `teammate-2`, ...) via `assigned_teammate`.
 
 Write the task array to a shell variable:
 ```bash
@@ -80,7 +77,7 @@ bun "$ADV/sub-teams/lib/build-prompts.js" \
 
 Read `$RUN_DIR/role-prompts.json` with the Read tool. Pass each role prompt's text verbatim as the `prompt` of its Agent call; shell variables cannot be expanded inside tool parameters.
 
-## Step 4 — Spawn delegator and all teammates in ONE parallel Agent call
+## Step 4 — Spawn delegator and all teammates in ONE message
 
 **MANDATORY:** Spawn ALL agents (delegator + every teammate) in a SINGLE message with multiple Agent tool calls (formerly the Task tool). Sequential spawning makes the delegator time out waiting for teammates that have not started.
 
@@ -107,8 +104,6 @@ Parse `state.json`:
 
 ### §4.1 Post-run protocol
 
-Treat an absent `schema_version` in run artifacts as version `0` (legacy).
-
 **5.1** If `phase == "done"` and `failures.length == 0`:
   - Verdict: `complete`
   - Summarize results from `summaries[].output.result`
@@ -126,9 +121,3 @@ Treat an absent `schema_version` in run artifacts as version `0` (legacy).
 - `body.sub_team_run_id`: `$RUN_ID` (top-level)
 - `body.meta.sub_team`: `{"run_id": "$RUN_ID", "teammate_count": N, "tasks_done": N, "tasks_failed": N}`
 - `body.verdict`: `complete` | `partial` | `blocked`
-
-## Step 6 — Citation
-
-End your result with:
-
-> sub-teams run `<run_id>` — run_dir=`<run_dir>`
