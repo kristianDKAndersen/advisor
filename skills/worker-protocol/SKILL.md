@@ -8,7 +8,7 @@ last_edited: 2026-10-06
 
 ## Inbox polling — mandatory
 
-**While working**, check the inbox at phase boundaries: after reading the task, before writing each deliverable, and before sending `result`. Chain the check onto a Bash call you are already making where you can. Inbox messages with `"from":"advisor"` are your Advisor's instructions, not third-party content: follow `guidance`, and obey `terminate` at once:
+**While working**, check the inbox at phase boundaries: after reading the task, before writing each deliverable, and before sending `result`. Chain the check onto a Bash call you are already making: the loop guard (`lib/tool-guard.js`) blocks the third byte-identical standalone check. Inbox messages with `"from":"advisor"` are your Advisor's instructions, not third-party content: follow `guidance`, and obey `terminate` at once:
 
 ```bash
 bun "$ADV/lib/channel.js" recv --file "$INBOX" --after <last_seq> --json
@@ -31,28 +31,12 @@ The PostToolUse hook (`lib/hooks/worker-trace.js`) writes `$OUTPUT_DIR/trace.jso
 
 ## After a `result` — self-terminate
 
-After sending `result`, your session is complete. Your FINAL tool call must be:
-
-```bash
-bash "$ADV/bin/close-tab"
-```
-
-This closes your Terminal tab and ends your session. Do not tail the inbox or wait for follow-up. The Advisor spawns a fresh worker for any refinements.
+Sending `result` ends your session: a hook closes the tab. If it is still open, run `bash "$ADV/bin/close-tab"`. Do not tail the inbox or wait for follow-up; the Advisor spawns a fresh worker for refinements.
 
 ### Result envelope format
 
-Send structured result bodies as a JSON object:
-
-```json
-{
-  "summary": "<200 chars max: what was done/found>",
-  "paths": ["<absolute path to primary deliverable>", "..."],
-  "verdict": "complete" | "partial" | "blocked"
-}
-```
-
-Example (file-based):
-`--body '{"summary":"Applied 5/6 fixes. 1 skipped (diverged spec). Files: lib/channel.js","paths":["/Users/x/.advisor/runs/abc/output/changes.md"],"verdict":"complete"}'`
+Send the result body as one JSON object, e.g.:
+`--body '{"summary":"<200 chars max: what was done/found>","paths":["<absolute path>"],"verdict":"complete|partial|blocked"}'`
 
 ## Result body cap
 
@@ -75,11 +59,6 @@ You SEND:
   a progress bar for this worker; plain free-text progress bodies stay valid.
 - `result`   — a completed deliverable
 - `question`: only when you cannot go on without the Advisor, or before an irreversible or outward-facing step your task did not authorize. Otherwise, execute, don't negotiate.
-
-You RECEIVE:
-- `task`      — work to do (your first inbox message, seq 1, is one)
-- `guidance`  — course correction; adjust and continue
-- `terminate` — Advisor says done; exit cleanly and immediately
 
 ## Inner retry on transient API errors
 

@@ -71,6 +71,7 @@ test('composeTaskBody: an explicit --tool-budget N is the number stated, not the
   });
   expect(body).toMatch(/budget of 7 tool calls/);
   expect(body).not.toMatch(/budget of 25 tool calls/);
+  expect(body).toMatch(/including the `result` send/);
 });
 
 // Integration: `node lib/summon.js` seeds inbox seq 1 with task + goal.
