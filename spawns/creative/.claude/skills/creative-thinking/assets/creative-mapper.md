@@ -94,4 +94,4 @@ After all three files are written, output **exactly one fenced json block** as t
 
 Use `"verdict": "blocked"` if Phase 1 step 1 could not ground the problem.
 
-Do **not** call `channel.js`. Do **not** call `close-tab`. The fenced json block is your only return mechanism.
+Parallel subagent only: do **not** call `channel.js` or `close-tab`; the fenced json block is your only return mechanism. In sequential mode you are the worker adopting this role: skip the json block and report through `channel.js` as SKILL.md Seq Step 4 directs.

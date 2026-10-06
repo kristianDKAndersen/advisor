@@ -73,4 +73,4 @@ After the deliverable is written, output **exactly one fenced json block** as th
 
 Use `"verdict": "partial"` if fewer than 2 survivors passed all three axes. Use `"verdict": "blocked"` only if the idea files were empty or unreadable.
 
-Do **not** call `channel.js`. Do **not** call `close-tab`. The fenced json block is your only return mechanism.
+Parallel subagent only: do **not** call `channel.js` or `close-tab`; the fenced json block is your only return mechanism. In sequential mode you are the worker adopting this role: skip the json block and report through `channel.js` as SKILL.md Seq Step 4 directs.

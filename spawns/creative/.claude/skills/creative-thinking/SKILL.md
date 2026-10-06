@@ -1,19 +1,18 @@
 ---
 name: creative-thinking
-description: Forces genuine creative breakthroughs by deploying a team of cognitively distinct personas who each attack the problem from an irreconcilable angle — biological analogy, temporal displacement, constraint engineering, morphological enumeration, or oblique stimulus. Use this skill whenever a problem feels fixated, the obvious answer arrived too quickly, a discussion is stuck in the same orbit, the first solution is suspect, or you need assumption-destruction and cross-domain alternatives before committing to an approach. Do not use it for incremental tweaks. The skill runs a mapper first to fence the obvious, then fans out to 3 of 5 personas in parallel, then synthesizes a single recommendation. It will surprise you.
+description: Runs a council of cognitively distinct personas (biological analogy, temporal displacement, constraint engineering, morphological enumeration, oblique stimulus) to break fixation. Use when a problem feels fixated, the obvious answer arrived too quickly, the first solution is suspect, or assumption-destruction and cross-domain alternatives are needed before committing to an approach. Not for incremental tweaks. A mapper fences the obvious, 3 of 5 personas attack the problem, and a synthesizer returns a single recommendation.
+last_edited: 2026-10-06
 ---
 
 # Creative Thinking Skill
 
-You are the orchestrator for a Creative Council. Your job is to run the full pipeline below in one of two modes: parallel Task fan-out (when the Task tool is available) or sequential in-worker emulation (when running as a summoned worker). You do NOT generate ideas as your default persona — you adopt each role in turn as directed by the pipeline.
+You are the orchestrator for a Creative Council. Do not generate ideas as your default persona; adopt each role in turn as the pipeline directs. The mapper marks the obvious solution forbidden, three personas with irreconcilable stances attack the problem blind to each other, and the synthesizer reads only their outputs and forges 1-2 recommendations.
 
-The whole point of this skill is to **escape the gravity well of the obvious answer**. The first solution that comes to mind is almost always the laziest one. The mapper marks that solution forbidden. Three personas with mutually irreconcilable cognitive stances each attack the problem from their own angle, blind to each other. The synthesizer reads only their outputs and forges 1-2 refined recommendations with no attachment to any persona's framing. The structure is the engine — your job is to drive it cleanly.
-
-**Execution mode check:** Summoned workers (via `bin/summon`) cannot use the Task tool for subagent fan-out. If you are a summoned worker, skip the parallel Full pipeline steps and jump directly to the **Sequential pipeline** section below. Parallel Task fan-out is available only when running as a top-level agent with Task in your allowed tool list. When in doubt, use sequential mode -- it is the reliable default for in-loop creative work.
+**Mode:** a summoned worker (via `bin/summon`) has no Task tool and runs the **Sequential pipeline**. The **Parallel pipeline** is only for a top-level agent with Task in its allowed tools. When in doubt, run sequentially. `<ABS_OUTPUT_DIR>` below is the absolute path of `$OUTPUT_DIR`.
 
 ## Escape hatch — check this FIRST
 
-If ANY of the following are true, skip the full pipeline and run **Solo Mode** at the bottom of this file:
+If ANY of the following are true, skip the full pipeline and run **Solo Mode**:
 
 1. The problem statement contains "quick check", "just assume", "don't overthink", or "evaluate an idea" (case-insensitive substring match).
 2. The Advisor's brief explicitly specifies mode as `quick-check` or `evaluate-an-idea`.
@@ -23,7 +22,65 @@ If none fire, proceed to the full pipeline.
 
 ---
 
-## Full pipeline (parallel mode -- Task tool required)
+## Sequential pipeline (summoned workers; the default)
+
+You adopt each role in your own context; no Task tool. The "Parallel subagent only" closing lines in the asset files do not bind you: you skip each role's fenced-json return, and you alone report through `channel.js` (Seq Step 4).
+
+### Seq Step 1 -- Mapper phase
+
+Read `.claude/skills/creative-thinking/assets/creative-mapper.md` and act as the mapper. Write `<ABS_OUTPUT_DIR>/forbidden-ideas.md`, `<ABS_OUTPUT_DIR>/assumptions.md` and `<ABS_OUTPUT_DIR>/persona-plan.md`. If the mapper cannot ground the problem, report `verdict` `blocked` via Seq Step 4 and stop.
+
+Extract the 3 personas from `persona-plan.md`; each must be one of `naturalist`, `systematist`, `futurist`, `oracle`, `constraintist`. If fewer than 3 valid names are found, use **naturalist + constraintist + oracle**. Then send:
+
+```bash
+bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type progress --body "mapper done: <N forbidden, M assumptions, personas: a + b + c>" --from creative --quiet
+```
+
+### Seq Step 2 -- Persona phases (one at a time)
+
+For each selected persona, in order:
+
+1. Read `.claude/skills/creative-thinking/assets/creative-<PERSONA_NAME>.md` and adopt its stance without hedging into a generalist.
+2. Read `<ABS_OUTPUT_DIR>/forbidden-ideas.md` and `<ABS_OUTPUT_DIR>/assumptions.md`; no idea may repeat anything forbidden.
+3. Follow the file's phases and write `<ABS_OUTPUT_DIR>/<PERSONA_NAME>-ideas.md`.
+4. Drop the persona before starting the next. Do not read another persona's ideas file - the council needs the isolation parallel mode gets from separate contexts.
+
+A persona that cannot ground the problem writes no file. If fewer than 2 ideas files exist, report `blocked` via Seq Step 4 with summary "Council aborted - fewer than 2 personas succeeded."
+
+### Seq Step 3 -- Synthesizer phase
+
+Send a `progress` message ("synthesis starting") as in Seq Step 1. Read `.claude/skills/creative-thinking/assets/creative-synthesizer.md`, act as the synthesizer, and read only the `*-ideas.md` files - not the mapper outputs or `persona-plan.md`. Write `<ABS_OUTPUT_DIR>/council-result.md`.
+
+### Seq Step 4 -- Report
+
+Write the envelope below once as a fenced json block, then send the same object, without fences or trailing text, as the `result` body and close the tab:
+
+```bash
+bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type result --body '<ENVELOPE>' --from creative --quiet
+bash "$ADV/bin/close-tab"
+```
+
+```json
+{"persona": "creative-orchestrator", "ideas_path": "<ABS_OUTPUT_DIR>/council-result.md", "summary": "<synthesizer summary, 200 chars max, no single quotes>", "verdict": "complete", "tool_calls": 0, "token_estimate": 0}
+```
+
+`verdict` is `complete`, `partial` (the synthesizer reported fewer than 2 survivors) or `blocked` (reason in `summary`, `ideas_path` empty). `tool_calls` and `token_estimate` are integers totalled over all phases. The file is authoritative; do not paraphrase the council result.
+
+---
+
+## Solo Mode
+
+Run this when any escape-hatch trigger fires. No subagents, no fan-out.
+
+1. **Ground.** State the problem in one sentence. List 3+ assumptions. Identify the obvious solution. Name what's unsatisfying about it.
+2. **Forge (abbreviated Depth Ladder).** Generate 3 conventional alternatives (Level 1) AND 1 absurd leap (Level 5). Skip Levels 2-4.
+3. **Refine.** Pick 1-2 survivors. Stress-test each in one sentence. Compare to the baseline.
+
+Write `<ABS_OUTPUT_DIR>/solo-result.md`, then report as in Seq Step 4 with `persona` `solo`, `ideas_path` `<ABS_OUTPUT_DIR>/solo-result.md` and `verdict` `complete` or `partial`.
+
+---
+
+## Parallel pipeline (top-level agent with the Task tool only; summoned workers skip this section)
 
 ### Step 1 — Spawn the mapper
 
@@ -139,107 +196,4 @@ Parse the synthesizer's JSON return. If `verdict` is `"blocked"`, report failure
 
 ### Step 4 — Return to the caller
 
-Your final response is one fenced json block followed by a brief inline pointer to the deliverable:
-
-```json
-{
-  "persona": "creative-orchestrator",
-  "ideas_path": "<ABS_OUTPUT_DIR>/council-result.md",
-  "summary": "<synthesizer summary>",
-  "verdict": "complete",
-  "tool_calls": <total across all subagents>,
-  "token_estimate": <total>
-}
-```
-
-The caller (typically the Advisor or another agent) reads `council-result.md` directly. Do not paraphrase the council result inline — the file is authoritative.
-
----
-
-## Solo Mode
-
-Run this when any escape-hatch trigger fires. No subagents, no fan-out.
-
-1. **Ground.** State the problem in one sentence. List 3+ assumptions. Identify the obvious solution. Name what's unsatisfying about it.
-2. **Forge (abbreviated Depth Ladder).** Generate 3 conventional alternatives (Level 1) AND 1 absurd leap (Level 5). Skip Levels 2–4.
-3. **Refine.** Pick 1–2 survivors. Stress-test each in one sentence. Compare to the baseline.
-
-Write the output to `<ABS_OUTPUT_DIR>/solo-result.md`. Return one fenced json block:
-
-```json
-{
-  "persona": "solo",
-  "ideas_path": "<ABS_OUTPUT_DIR>/solo-result.md",
-  "summary": "<≤200 chars>",
-  "verdict": "complete" | "partial",
-  "tool_calls": <integer>,
-  "token_estimate": <integer>
-}
-```
-
----
-
-## Sequential pipeline (worker context -- no Task required)
-
-Run this when you are a summoned worker or when Task fan-out is unavailable. You emulate the council yourself by adopting each role in sequence within your own context. All pipeline outputs (forbidden-ideas.md, assumptions.md, persona-plan.md, `<PERSONA_NAME>`-ideas.md, council-result.md) are still produced. The council-result.md is identical in structure and authority to the parallel version.
-
-### Seq Step 1 -- Mapper phase
-
-Read the file at:
-  `.claude/skills/creative-thinking/assets/creative-mapper.md`
-
-Follow every instruction in that file exactly, acting as the mapper yourself (no subagent invocation). Write these three files:
-- `<ABS_OUTPUT_DIR>/forbidden-ideas.md`
-- `<ABS_OUTPUT_DIR>/assumptions.md`
-- `<ABS_OUTPUT_DIR>/persona-plan.md`
-
-Parse `persona-plan.md` to extract the 3 recommended personas. Validate each against `{naturalist, systematist, futurist, oracle, constraintist}`. Fall back to **naturalist + constraintist + oracle** if fewer than 3 valid names are found.
-
-Store:
-- `forbiddenPath = <ABS_OUTPUT_DIR>/forbidden-ideas.md`
-- `assumptionsPath = <ABS_OUTPUT_DIR>/assumptions.md`
-- `selectedPersonas = [name1, name2, name3]`
-
-### Seq Step 2 -- Persona phases (one at a time)
-
-For each persona in `selectedPersonas`, in order:
-
-1. Read `.claude/skills/creative-thinking/assets/creative-<PERSONA_NAME>.md`.
-2. Adopt that persona's voice, cognitive constraints, and methodology fully. You are now this persona -- apply its irreconcilable angle without hedging into a generalist stance.
-3. Read `forbiddenPath`. Your ideas must not repeat anything there.
-4. Generate ideas for the problem statement using that persona's lens.
-5. Write your ideas to `<ABS_OUTPUT_DIR>/<PERSONA_NAME>-ideas.md`.
-6. Release the persona and return to orchestrator mode before starting the next one.
-
-Do NOT read the previous persona's ideas file when adopting the next persona -- maintain the same isolation that parallel mode enforces via separate subagent contexts.
-
-### Seq Step 3 -- Synthesizer phase
-
-Read `.claude/skills/creative-thinking/assets/creative-synthesizer.md`.
-
-Adopt the synthesizer role. Follow every instruction in that file exactly. You have access only to the persona ideas files -- do NOT read mapper outputs or persona-plan.md (deliberate isolation mirrors the parallel version). Read all surviving `<PERSONA_NAME>-ideas.md` files and write the synthesis to:
-
-`<ABS_OUTPUT_DIR>/council-result.md`
-
-### Seq Step 4 -- Return to caller
-
-Same envelope as parallel Step 4:
-
-```json
-{
-  "persona": "creative-orchestrator",
-  "ideas_path": "<ABS_OUTPUT_DIR>/council-result.md",
-  "summary": "<synthesizer summary>",
-  "verdict": "complete",
-  "tool_calls": "<total across all sequential phases>",
-  "token_estimate": "<total>"
-}
-```
-
-The caller reads `council-result.md` directly. Do not paraphrase the council result inline.
-
----
-
-## Why this works
-
-The language widens then narrows on purpose. The mapper closes off the predictable solution space. Each persona is forced into a single irreconcilable cognitive stance and cannot hedge into a generalist. The personas never see each other's work, so they can't converge on a centroid. The synthesizer has no attachment to any persona, so it has no babies to defend. The structure is the engine. Your job is to drive it cleanly — do not invent steps, do not skip steps, do not let any subagent narrate the protocol back to the user.
+Your final response is the Seq Step 4 envelope as one fenced json block (`tool_calls` and `token_estimate` totalled across subagents), then a one-line pointer to `council-result.md`. The file is authoritative; do not paraphrase the council result.
