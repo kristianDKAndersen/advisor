@@ -1,11 +1,12 @@
 ---
 name: bias-mitigation
 description: Provides procedural logic for identifying cognitive bias, generating competing hypotheses, and stress-testing research findings. Produces ACH matrix, assumption audit, and counter-narratives. Use during Phase 2 (Bias Audit) of the deep-researcher workflow, or any time research findings need adversarial review before publication.
+last_edited: 2026-10-06
 ---
 
 # Bias Mitigation Skill
 
-This skill provides the procedural logic for the bias-auditor to challenge assumptions and verify research integrity.
+Procedural logic for the Phase 2 audit: you challenge the Phase 1 findings' assumptions and verify their integrity.
 
 ## Critical thinking frameworks
 
@@ -51,7 +52,7 @@ Before writing your audit verdict, check every research result for:
 - [ ] **Anchoring bias**: Is the research over-reliant on the first source encountered?
 - [ ] **Availability heuristic**: Did research favor top search results over harder-to-find primary sources?
 - [ ] **Single-source claims**: Are any major claims supported by only one source? (These must be tagged Low confidence.)
-- [ ] **Source type imbalance**: Are ≥2 of 3 source types represented? (Primary / Secondary / Community)
+- [ ] **Source type imbalance**: Are ≥3 source types represented (primary / specialist / community), per the Phase 1 minimum?
 
 ## Auditing procedures
 
@@ -66,7 +67,7 @@ Identify every **implicit assumption** in the research plan or findings:
 **Verification:** [cite evidence that tests this assumption, or "UNVERIFIED"]
 ```
 
-Minimum: list every assumption found. Flag High-risk ones explicitly.
+List every assumption found and flag High-risk ones explicitly.
 
 ### Evidence Stress-Test
 
@@ -81,10 +82,10 @@ Rank evidence items using this general-purpose hierarchy (not tech-specific):
 
 ## Required audit output files
 
-The bias-auditor MUST write three files:
+Write three non-empty files, each as soon as it is built:
 
-1. `$OUTPUT_DIR/ach-matrix.md` — One ACH table per major finding
-2. `$OUTPUT_DIR/assumptions.md` — Full assumption list with risk ratings
-3. `$OUTPUT_DIR/counter-narratives.md` — All counter-narratives
+1. `$OUTPUT_DIR/ach-matrix.md` - one ACH table per major finding, ending with the audit verdict (below)
+2. `$OUTPUT_DIR/assumptions.md` - full assumption list with risk ratings
+3. `$OUTPUT_DIR/counter-narratives.md` - all counter-narratives
 
-These files are inputs to the report-architect and are included in the final report's Audit Summary section. They must exist and be non-empty.
+**Audit verdict:** end `ach-matrix.md` with one paragraph headed `AUDIT VERDICT:`. Phase 3 pastes it verbatim into the report's Audit Summary and takes the report's confidence level from it. Flag each HIGH-SEVERITY weakness in it: underdetermined evidence for a major claim, a single-source finding, or no counter-narrative possible.

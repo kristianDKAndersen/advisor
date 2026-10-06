@@ -2,15 +2,14 @@
 name: facilitation
 description: Core facilitation mechanics for the brainstormer agent. Contains the 6-stage model with entry/exit criteria, facilitator scripts, idea ledger format, and stage-transition announcements. Load at session start.
 allowed-tools: Read, Write, Bash
+last_edited: 2026-10-06
 ---
 
 # Facilitation Skill
 
-Read this file completely before facilitating. Do not skip sections.
-
-**Reference files (load on demand):**
-- `references/techniques.md` — 5 technique cards (brainwriting, SCAMPER, Six Thinking Hats, Lotus Blossom, Provocation). Read when a stage is stuck after 3 turns.
-- `references/failure-modes.md` — 6 failure mode detection signals and counter-moves. Read when you detect drift or premature convergence.
+**Reference files (read only when triggered):**
+- `references/techniques.md` - 5 technique cards (brainwriting, SCAMPER, Six Thinking Hats, Lotus Blossom, Provocation). Trigger: Stuck Stage Protocol below.
+- `references/failure-modes.md` - 6 failure-mode signals and counter-moves. Trigger: you detect drift or premature convergence.
 
 ---
 
@@ -24,10 +23,7 @@ Maintain `$OUTPUT_DIR/ideas.md` throughout the session. Update at every stage tr
 | ID | Idea | Stage Captured | Maturity | Notes |
 |----|------|---------------|----------|-------|
 | I-01 | <one sentence> | Discover | captured | |
-| I-02 | <one sentence> | Generate | expanded | built on I-01 |
-| I-03 | <one sentence> | Generate | challenged | weak feasibility |
-| I-04 | <one sentence> | Focus | parked | outside appetite |
-| I-05 | <one sentence> | Decide | candidate | selected direction |
+| I-02 | <one sentence> | Focus | parked | outside appetite |
 ```
 
 **Maturity values** (exactly 5 — no others):
@@ -150,7 +146,7 @@ Update `ideas.md`: set deferred to maturity `parked` with reason.
 **Exit artifact:** ≥3 distinct solution concepts at sketch fidelity.
 
 **Opening script:**
-> "Stage 4: Generate. We need ≥3 distinct concepts for [target]. Distinct = different mechanism or different tradeoff. Sketch fidelity only — one sentence, key mechanism, one assumption. No evaluation. I will stop premature evaluation."
+> "Stage 4: Generate. We need ≥3 distinct concepts for [target]. Distinct = different mechanism or different tradeoff. Sketch fidelity only - one sentence, key mechanism, one assumption. No evaluation."
 
 **Elicitation:**
 1. "Concept 1: one sentence — what it does and how it works."
@@ -255,28 +251,29 @@ Experiment card:
 
 **Human gate statement:** "The experiment cards are ready. Whether to run them and whether evidence is sufficient to proceed to build requires organizational judgment. That decision is yours."
 
-**Session close steps:**
-1. Write `$OUTPUT_DIR/session.md` — full summary: stage outputs, pitch, assumption map, experiment cards.
+---
+
+## Session Close
+
+Runs at the end of the session, including when Stage 6 was skipped:
+
+1. Write `$OUTPUT_DIR/session.md` - full summary: stage outputs, pitch, assumption map, experiment cards (or the note that Stage 6 was skipped).
 2. Update `$OUTPUT_DIR/ideas.md` to final state.
-3. Send result via channel.
-4. Run `bash "$ADV/bin/close-tab"`.
+3. Send the `result` envelope from your prompt (`partial` if the session ended before Stage 5 without sign-off), then run `bash "$ADV/bin/close-tab"`.
 
 ---
 
 ## Stage Skipping Policy
 
-- **Stage 1 (Frame):** Do not skip. Explain: "5 questions, 5 minutes. Without it, the session has no anchor."
+- **Stage 1 (Frame):** Never skip; without it the session has no anchor.
 - **Stage 2 (Discover):** Skip only if a pre-existing opportunity map meets the exit criteria (≥5 areas). Confirm by reading it back.
-- **Stage 6 (Validate):** May be skipped if participant has existing evidence. Note in session.md.
+- **Stage 6 (Validate):** May be skipped if the participant has existing evidence. Note in session.md.
 
 ---
 
-## Single-Question Rule (Mandatory)
+## Single-Question Rule
 
-Ask exactly 1 question per turn during elicitation. Never combine questions.
-
-- Correct: "What is the problem in one sentence, without naming a solution?"
-- Incorrect: "What is the problem and who is affected and what does success look like?"
+Ask exactly 1 question per turn during elicitation; never combine questions. Correct: "What is the problem in one sentence, without naming a solution?" Incorrect: "What is the problem and who is affected and what does success look like?"
 
 ---
 
@@ -284,6 +281,5 @@ Ask exactly 1 question per turn during elicitation. Never combine questions.
 
 If a stage has not produced its exit artifact minimum after 3 turns:
 
-1. Read `references/techniques.md` and select the technique matching the stuck pattern.
-2. Apply it and return to the stage elicitation.
-3. If still stuck after the technique: log the gap in `session.md` and advance with what you have, noting the shortfall.
+1. Read `references/techniques.md` and apply the technique matching the stuck pattern, then return to the stage elicitation.
+2. If still stuck: log the gap in `session.md` and advance with what you have, noting the shortfall.
