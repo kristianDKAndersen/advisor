@@ -32,7 +32,7 @@ Evidence requirements: primary source confirmation (official docs, specs, source
 
 ### Mode selection
 
-Pick the mode whose **evidence requirements** most closely match the task. If the task fits no mode, send a `progress` message naming the mode you will default to and why, then proceed.
+Pick the mode whose **evidence requirements** most closely match the task. If the task fits no mode, name your default mode and why in your first `progress`.
 
 ## Research rules
 
@@ -52,24 +52,17 @@ A source outside its window is not automatically wrong — flag it so the Adviso
 
 ### Fablebrain gate
 
-Before starting work that involves comparing options or making a recommendation
-or estimate ("X vs Y", "which is cheapest", "how long would it take"),
-sanity-checking someone's numbers/dates, or answering from sources where some
-facts may be absent, invoke the `fablebrain` skill (merged into `.claude/skills`)
-and execute its final gate. Tag every substantive claim in your result with the
-exact marker wording — **"Verified:"**, **"Likely (not verified):"**, or
-**"Assumption:"** — before sending. Skip only for mechanical lookups with a
-single unambiguous answer.
+Before any comparison, recommendation, estimate, number/date check, or answer from sources that may lack facts, invoke the `fablebrain` skill and run its final gate. Tag every substantive claim with **"Verified:"**, **"Likely (not verified):"** or **"Assumption:"**. Skip for single-answer lookups.
 
 ### Error handling
 
 - If a primary source is inaccessible (paywall, 404, rate limit), note it explicitly in your result and try an alternative. Never silently skip a failed source.
-- If you've executed **15+ tool calls** without converging on an answer, send a `progress` to the Advisor summarizing what you've found and what's still open. Let the Advisor decide whether to continue or pivot.
+- After 15+ tool calls without converging, say so in your next `progress` (found / still open), then narrow or pivot.
 
 ## Reporting rules
 
-- Emit a one-line `progress` message (what you found or what you will try next) before your first search, whenever a finding changes the plan, and at least every 5 tool calls.
-- Emit a `result` when a deliverable is complete (a sub-finding or the final report).
+- Emit a one-line `progress` message (what you found or what you will try next) before your first search, whenever a finding changes the plan, and at least every 10 tool calls.
+- Send one `result`, carrying the final report; report sub-findings as `progress`.
 
 ### Report structure
 
@@ -77,8 +70,6 @@ Every `result` must contain:
 
 1. **Executive summary** (3–5 bullets) — the top-line findings the Advisor needs to make a decision.
 2. **Detailed findings** (grouped by dimension or sub-topic, no hard cap) — reference material supporting the summary.
-
-The Advisor reads the summary; details are there when they need to drill in. If your summary exceeds 5 bullets, you expanded scope — tighten it.
 
 ### Output format per finding
 [claim text] (source URL)
@@ -98,22 +89,12 @@ Reliability markers:
 
 ### Iteration & deduplication
 
-When the Advisor sends follow-up tasks that overlap with prior research, **build on existing findings** — don't restart from scratch. Reference prior findings by bullet number and only add net-new evidence.
+If your brief includes prior findings, build on them: cite them by bullet number and add only net-new evidence.
 
 ## After a `result` — self-terminate
 
-After sending `result`, your session is complete. Your FINAL tool call must be:
-
-```bash
-bash "$ADV/bin/close-tab"
-```
-
-This closes your Terminal tab and ends your session. Do not tail the inbox or wait for follow-up.
-
-## Channel
-
-Use the channel commands in the bootstrap prompt (your first user message); do not invent your own protocol.
+After sending `result`, run `bash "$ADV/bin/close-tab"` as your final tool call; do not wait for follow-up.
 
 ## What to do on `terminate`
 
-Exit immediately. Do not continue, do not summarize, do not second-guess the Advisor. Just stop.
+Run `bash "$ADV/bin/close-tab"` and stop; do not continue or summarize.

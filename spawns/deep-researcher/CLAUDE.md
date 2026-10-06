@@ -15,7 +15,7 @@ Execute all three phases in sequence. Do not skip phases. Do not hand off to the
 
 ## Phase budget
 
-You run in one bounded lifetime: `bin/summon` resolves a timeout of 1500s by default, up to 2400s for large tasks (T = the timeout in your task, else 1500). At the start run `date +%s > "$OUTPUT_DIR/.t0"`. At every checkpoint compute elapsed = now - t0 and write `elapsed Ns / Ts` into `checkpoint.md`. Aim to finish Phase 1 by 50% of T, Phase 2 by 70% and Phase 3 by 90%. If Phase 1 reaches 50% before its minimums are met, stop widening and move on with what you have. Once the minimums are met, do not chase diminishing-returns sources.
+You run in one bounded lifetime: `bin/summon` resolves a timeout of 1500s by default, up to 2400s for large tasks (T = 1500 unless your brief states a timeout in seconds). At the start run `date +%s > "$OUTPUT_DIR/.t0"`. At every checkpoint compute elapsed = now - t0 and write `elapsed Ns / Ts` into `checkpoint.md`. Aim to finish Phase 1 by 50% of T, Phase 2 by 70% and Phase 3 by 90%. If Phase 1 reaches 50% before its minimums are met, stop widening and move on with what you have. Once the minimums are met, do not chase diminishing-returns sources.
 
 ## Execution mode
 
@@ -28,7 +28,7 @@ In every phase, write each artifact to disk as soon as it is produced; a timeout
 ### Phase 1 — Discovery (you run this directly)
 
 1. Invoke the `deep-researcher` skill: run `/deep-researcher` at the start.
-2. Execute the full Research Loop defined in that skill. Minimum requirements before proceeding to Phase 2:
+2. Execute the full Research Loop defined in that skill. Minimum requirements before proceeding to Phase 2 (if the Phase budget cuts Phase 1 short, list each unmet minimum under Unresolved Gaps):
    - ≥5 distinct search queries across ≥3 different source types (official docs/primary, peer-reviewed or specialist, general/community).
    - ≥8 sources read (not just searched — actually fetched and read).
    - ≥1 confirmed primary source (official doc, primary legal filing, authoritative institutional source) per major claim.
@@ -72,7 +72,7 @@ Send a structured result:
 
 ```bash
 bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type result \
-  --body '{"summary":"Deep research complete. N sources, M primary. Report + audit files at output dir.","paths":["$OUTPUT_DIR/research-report.md","$OUTPUT_DIR/ach-matrix.md","$OUTPUT_DIR/assumptions.md","$OUTPUT_DIR/counter-narratives.md"],"verdict":"complete"}' \
+  --body "{\"summary\":\"Deep research complete. N sources, M primary.\",\"paths\":[\"$OUTPUT_DIR/research-report.md\",\"$OUTPUT_DIR/ach-matrix.md\",\"$OUTPUT_DIR/assumptions.md\",\"$OUTPUT_DIR/counter-narratives.md\"],\"verdict\":\"complete\"}" \
   --from deep-researcher --quiet
 ```
 
@@ -83,7 +83,7 @@ bash "$ADV/bin/close-tab"
 
 ## Inbox polling
 
-Run `/worker-protocol` at session start. Between every major action (before Phase 2, before Phase 3, before result), check inbox:
+Between every major action (before Phase 2, before Phase 3, before result), check inbox:
 ```bash
 bun "$ADV/lib/channel.js" recv --file "$INBOX" --after <last_seq> --json
 ```
@@ -91,7 +91,7 @@ On `terminate`, immediately run `bash "$ADV/bin/close-tab"`.
 
 ## Reporting frequency
 
-Emit a `progress` message after reading the task, after each of Phases 1-3 (before result), and whenever a finding changes the plan.
+Also send `progress` after Phase 3 and whenever a finding changes the plan.
 
 ## Required constraints
 
@@ -101,11 +101,9 @@ Emit a `progress` message after reading the task, after each of Phases 1-3 (befo
   then send a `result` with `verdict: "partial"` naming exactly which phases completed
   and which artifacts exist at which paths. A resumable partial is what lets the
   Advisor pick up the work via `bin/advisor-loop` instead of restarting from scratch.
-- End every session with `bash "$ADV/bin/close-tab"` as the final action.
-
 ## Approach
 - Read existing files before writing. Don't re-read unless changed.
-- Keep output concise: open with the content and end when the content ends.
+- Reason thoroughly; keep output concise: open with the content and end when the content ends.
 - Skip files over 100KB unless required.
 - Write plain prose; use hyphens (-) for dashes; no emoji characters.
 - Do not guess APIs, versions, flags, commit SHAs, or package names.
