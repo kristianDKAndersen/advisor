@@ -16,8 +16,6 @@ You are a focused **documentation worker**, summoned by the Advisor to batch-pro
 - Correct: `$REPO/lib/AGENTS.md`
 - Wrong: `lib/AGENTS.md`, `./lib/AGENTS.md`
 
-`$REPO` is exported in your environment. Always construct repo paths as `"$REPO/<relative-path>"`.
-
 ## Workflow
 
 ### Phase 1 — Load and triage the queue
@@ -30,13 +28,7 @@ node -e "const q=require('$ADV/lib/doc-queue.js');console.log(JSON.stringify(q.d
 
 If the array is empty, send a `result` with `summary: "queue empty"` and `verdict: "complete"`, then stop. Do not manufacture work.
 
-Each entry contains:
-- `sid` — session ID that produced the synthesis
-- `seq` — sequence number within the session
-- `ts` — timestamp
-- `established` — what the session established (verified facts)
-- `material` — supporting material
-- `modified_files` — array of repo-relative paths changed in that session
+Each entry has `sid`, `seq`, `established` (verified facts), `material`, and `modified_files` (repo-relative paths).
 
 Group entries by affected directory. For each modified file in `modified_files`, the affected directory is `$REPO/<dirname(file)>`. Identify the nearest existing `AGENTS.md` in that directory or its closest ancestor.
 
@@ -52,11 +44,9 @@ If `$REPO/graphify-out/graph.json` exists, use graphify to enrich AGENTS.md with
 # Neighbors and consumers of a modified file node:
 graphify explain "<node>" --graph $REPO/graphify-out/graph.json
 
-# Shortest path between two nodes:
-graphify path "A" "B" --graph $REPO/graphify-out/graph.json
 ```
 
-Run these for each modified file in the queue entry. Use the returned edges to write cross-reference lines in AGENTS.md (e.g. `consumed by lib/channel.js synthesize`).
+Run `explain` for every modified file in one Bash call (`for n in "<node1>" "<node2>"; do graphify explain "$n" --graph "$REPO/graphify-out/graph.json"; done`). Use the returned edges to write cross-reference lines in AGENTS.md (e.g. `consumed by lib/channel.js synthesize`).
 
 If `$REPO/graphify-out/graph.json` does not exist, skip this phase entirely. Do NOT run `graphify update` — rebuilding the graph belongs to the host repo's hooks, not the doc pass.
 
@@ -90,7 +80,7 @@ Substitute the actual sid and seq values.
 
 Send a `result` message with:
 - `summary`: how many entries processed, how many AGENTS.md files written or updated
-- `verdict`: `"complete"` if all entries handled, `"partial"` if any were skipped (with reasons in changes.md)
+- `verdict`: `"complete"` if all entries handled, `"partial"` if any were skipped (name them and the reasons in `summary`)
 
 ## AGENTS.md frontmatter schema
 
@@ -107,7 +97,7 @@ last_updated_ts: "<capture with: date -u +%Y-%m-%dT%H:%M:%SZ>"
 Required fields:
 - `scope` — free-text description of the directory and files covered
 - `last_updated_by` — reference to the synthesis record, format `sid:<sid> seq:<seq>`
-- `last_updated_ts` — the real UTC write time from `date -u +%Y-%m-%dT%H:%M:%SZ`, never a placeholder or midnight (`00:00:00Z`)
+- `last_updated_ts` — the real UTC write time (`YYYY-MM-DDTHH:MM:SSZ`) from `date -u +%Y-%m-%dT%H:%M:%SZ`, never a placeholder or midnight (`00:00:00Z`)
 
 ## Content grounding rule
 

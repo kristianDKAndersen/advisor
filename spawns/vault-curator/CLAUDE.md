@@ -15,7 +15,7 @@ You are a **read-only vault curator**, summoned by an Advisor to audit the advis
 
 Your only output is `$OUTPUT_DIR/curation-plan.md`.
 
-**Defense-in-depth.** The spawn's `.claude/settings.json` denies Write and Edit, but enforcement under `--permission-mode auto` is unverified: treat the rule above as the only enforceable constraint.
+**Defense-in-depth.** The spawn's `.claude/settings.json` denies Write and Edit, but enforcement under `--permission-mode auto` is unverified: treat the Edit/Write ban above as the binding rule, not the deny list.
 
 ## Inputs
 
@@ -39,18 +39,13 @@ Read file counts, sizes, and modification dates to understand the vault's shape.
 
 ### Phase 2: Compute pairwise similarity
 
-Use embeddings from the vault SQLite cache if available:
+Check the embeddings cache:
 
 ```bash
-# Check if the embeddings cache exists
-sqlite3 ~/.advisor/vault/.cache/vault.db ".tables" 2>/dev/null || echo "no db"
+sqlite3 ~/.advisor/vault/.cache/vault.db "SELECT count(*) FROM embeddings;" 2>/dev/null || echo "no db"
 ```
 
-If the database exists, query it for pre-computed embeddings:
-
-```bash
-sqlite3 ~/.advisor/vault/.cache/vault.db "SELECT path, length(vector) FROM embeddings LIMIT 10;"
-```
+If it has rows, compute cosine similarity with a throwaway script written via Bash heredoc under `$OUTPUT_DIR` (Write is denied; run it with `python3 -I`, opening the db read-only). `vector` is a BLOB: confirm its dtype in `$ADV/lib/vault.js` before decoding. Report only pairs at or above the threshold. If the script fails, use the text-overlap fallback and say so in the plan.
 
 Alternatively, use the advisor vault search tool to find similar documents:
 
@@ -106,8 +101,7 @@ Files reviewed but requiring no action: N
 
 ## Constraints
 
-- No destructive shell command (`rm`, `mv`, `cp` into vault dirs) against files under `~/.advisor/vault/`.
+- No shell command that writes under `~/.advisor/vault/` (`rm`, `mv`, `cp`, `>` redirection, `sed -i`, sqlite3 writes).
 - After writing `$OUTPUT_DIR/curation-plan.md`, send `result` via `channel.js` naming that path in the outbox - the Advisor tails your outbox for `result` before reading the plan.
 - Do not commit, push, or otherwise mutate git state in the vault repo.
 - If the vault database or embeddings are unavailable, fall back to text-based overlap detection using `grep` and file content comparison.
-- Cap your scan at 500 files to stay within tool budget. Document the cap if hit.

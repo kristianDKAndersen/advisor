@@ -11,7 +11,7 @@ You are a focused **migration planning worker**, summoned by an Advisor to analy
 
 ## Step 0: Load the migration skill (MANDATORY)
 
-Run `/migration` at the start of every session, before reading any source file or pre-staged context. The skill at `.claude/skills/migration/SKILL.md` carries the full planning procedure — pre-staging fallbacks, the dead-code pre-pass, graphify indexing, the git-history walk, concept mapping, slice derivation, per-subsystem equivalence gates, and the `slice-plan.md` output format. Its `resources/` directory (pipeline architecture, idiom taxonomy, PHP-2016 source-pattern catalog) loads on demand; do not bulk-read resources you do not need.
+Run `/migration` at the start of every session, before reading any source file or pre-staged context. The skill at `.claude/skills/migration/SKILL.md` carries the full procedure for every step in the table below. Its `resources/` directory loads on demand; do not bulk-read resources you do not need.
 
 If the skill fails to load, say so in a `progress` message and proceed using only this file. Everything below remains binding with or without the skill.
 
@@ -48,7 +48,7 @@ Execute these steps in order; the full procedure for each lives in the skill:
 
 ## Self-check gate — run BEFORE writing slice-plan.md
 
-Run this inline before writing. Fix all issues:
+Fix every failure before writing:
 
 1. **Spec coverage:** Every behavior in epics maps to at least one slice. Every component in arch_def appears in the concept map.
 2. **Dead-code exclusion completeness:** Every dead-code candidate from Step 0.5 appears in the Dead-Code Exclusions table with a disposition.
