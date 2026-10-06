@@ -1,14 +1,13 @@
 ---
 name: fablebrain
-description: Contains the mandatory pre-send checklist, the exact Verified/Likely/Assumption confidence-marker wording, and the step-by-step verification procedures required when producing an answer someone will act on. Required reading BEFORE starting any task that involves - verifying, double-checking, or sanity-checking numbers, percentages, dates, or someone else's math; comparing options or making a recommendation or estimate ("X vs Y", "which is cheapest", "how long would it take"); summarizing documents or data into figures for a boss, board, legal, or a report; debugging questions whose premise may be false ("why does X happen because of Y"); or answering from provided docs where some facts may be absent. The checklist catches wrong percentages, fabricated defaults, silently dropped sub-questions, and false premises that read as correct. Do not run these tasks from memory of this description - open the skill and execute its final gate. Skip only for purely mechanical edits (rename, reformat, version bump), running commands, and creative writing.
-last_edited: 2026-07-13
+description: Pre-send verification gate and the exact Verified / Likely (not verified) / Assumption confidence markers. Use before answering anything someone will act on - verifying or sanity-checking numbers, percentages, dates or someone else's math; comparing options or giving a recommendation or estimate; summarizing documents or data into figures for a boss, board, legal or a report; questions whose premise may be false; answering from documents where some facts may be absent. Skip for mechanical edits (rename, reformat, version bump), running commands, and creative writing.
+last_edited: 2026-10-06
 ---
 
 # FableBrain
 
-A procedure set, not advice. Each rule is trigger -> action, executable with zero
-judgment calls. Run the compact loop below on every task; open the reference files
-when you need the full procedure, its worked example, or the failure it prevents.
+Each rule is trigger -> action. Run the compact loop below on every task; open the
+reference files when you need the full procedure, its worked example, or the failure it prevents.
 
 - `references/procedures.md` - full text of procedures 1-9 (triggers, actions, worked examples, named failures). Read the relevant section when a compact rule below is not enough to act on.
 - `references/fake-competence.md` - the 10 ways an answer looks right but is not, each with its tell and counter-move. Read it in full the first time the skill triggers in a session; scan from memory after that.
@@ -17,8 +16,9 @@ when you need the full procedure, its worked example, or the failure it prevents
 
 **1. Read intent.** Two plausible interpretations that produce different
 deliverables + wrong pick costs more than a question -> ask ONE discriminating
-question. Otherwise pick the likelier, open with "Interpreting this as: X",
-proceed. Named symptom is a pointer, not the target - find the cause first.
+question (in a summoned worker with no human to answer, do not ask: open with
+"Interpreting this as: X" and proceed). Otherwise pick the likelier, open with
+"Interpreting this as: X", proceed. Named symptom is a pointer, not the target - find the cause first.
 
 **2. Decompose.** More than one checkable output -> list each sub-output as a
 noun with a one-line done-check. Order: dependencies, then highest uncertainty,
@@ -83,6 +83,5 @@ partial-answer camouflage. Every tell that fires gets its counter-move.
 7. [ ] Answer first, reasoning second, risks last; bad news not buried.
 8. [ ] Ten-pattern scan run; every tell that fired was countered.
 
-If any item fails: fix it, then re-run the full gate from item 1. Never send
-anyway. A late correct answer costs one delay; a fast wrong one costs the
-user's trust in every future answer.
+If any item fails: fix it, then re-check that item and anything the fix touched;
+send once they pass. Never send with a failed item.

@@ -1,9 +1,13 @@
 ---
-last_edited: 2026-05-22
+name: sub-teams
+description: Split the current advisor task into 2-10 independent subtasks and run them in parallel with a delegator plus teammates. Use for large, independent, parallelizable work only.
+last_edited: 2026-10-06
 ---
-# /sub-teams — Parallel Sub-Team Execution
+# /sub-teams - Parallel Sub-Team Execution
 
-Decompose the current advisor task into N atomic subtasks and execute them in parallel using a delegator + teammate sub-team.
+Use this only when the task splits into 2 or more independent subtasks that each need real work. For one sequential chain, a single-file change or fewer than 2 independent subtasks, do the work directly and say so in your result.
+
+Run Steps 1-3 in one Bash invocation, or write the exports to "$OUTPUT_DIR/sub-team-env.sh" and source it at the top of every later Bash call: shell variables do not persist between Bash calls.
 
 ## Step 1 — Pre-decompose the advisor task
 
@@ -74,31 +78,21 @@ bun "$ADV/sub-teams/lib/build-prompts.js" \
   > "$RUN_DIR/role-prompts.json"
 ```
 
-Read the generated prompts:
-```bash
-cat "$RUN_DIR/role-prompts.json"
-```
+Read `$RUN_DIR/role-prompts.json` with the Read tool. Pass each role prompt's text verbatim as the `prompt` of its Agent call; shell variables cannot be expanded inside tool parameters.
 
-Extract each role prompt into shell variables:
-```bash
-DELEGATOR_PROMPT=$(cat "$RUN_DIR/role-prompts.json" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).role_prompts.delegator)")
-TEAMMATE1_PROMPT=$(cat "$RUN_DIR/role-prompts.json" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).role_prompts['teammate-1'])")
-TEAMMATE2_PROMPT=$(cat "$RUN_DIR/role-prompts.json" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).role_prompts['teammate-2'])")
-```
+## Step 4 — Spawn delegator and all teammates in ONE parallel Agent call
 
-## Step 4 — Spawn delegator and all teammates in ONE parallel Task call
+**MANDATORY:** Spawn ALL agents (delegator + every teammate) in a SINGLE message with multiple Agent tool calls (formerly the Task tool). Sequential spawning makes the delegator time out waiting for teammates that have not started.
 
-**MANDATORY:** Spawn ALL agents (delegator + every teammate) in a SINGLE message with multiple Task tool calls. Spawning them sequentially defeats parallelism and will cause the delegator to time out waiting for teammates that haven't started yet.
+Each Agent call MUST include `model: "<value>"` from the Sub-Team Mode section of your bootstrap prompt (default `model: "sonnet"` if it names none). Use the same value for the delegator and every teammate.
 
-Each Task call MUST include `model: "<value>"` where the value comes from the Sub-Team Mode section of your bootstrap prompt (e.g. `model: "sonnet"`). If the bootstrap prompt did not specify a sub-team model, default to `model: "sonnet"`. Use the same model value for both the delegator and every teammate.
+One call per role, all in the same message:
 
-Spawn using the Task tool, one call per role, all in the same message:
+- Agent 1: `description="sub-team delegator"`, `prompt=<delegator prompt text>`, `model=<sub-team-model>`
+- Agent 2: `description="sub-team teammate-1"`, `prompt=<teammate-1 prompt text>`, `model=<sub-team-model>`
+- Agent 3: `description="sub-team teammate-2"`, `prompt=<teammate-2 prompt text>`, `model=<sub-team-model>`
 
-- Task 1: `description="sub-team delegator"`, `prompt=$DELEGATOR_PROMPT`, `model=<sub-team-model>`
-- Task 2: `description="sub-team teammate-1"`, `prompt=$TEAMMATE1_PROMPT`, `model=<sub-team-model>`
-- Task 3: `description="sub-team teammate-2"`, `prompt=$TEAMMATE2_PROMPT`, `model=<sub-team-model>`
-
-Wait for all Tasks to complete before proceeding to Step 5.
+Wait for all Agent calls to complete before proceeding to Step 5.
 
 ## Step 5 — Read final result and apply post-run protocol
 
@@ -113,8 +107,7 @@ Parse `state.json`:
 
 ### §4.1 Post-run protocol
 
-Output objects produced by the current advisor sub-teams emit `schema_version:1`.
-When reading historical run artifacts, treat absent `schema_version` as version `0` (legacy).
+Treat an absent `schema_version` in run artifacts as version `0` (legacy).
 
 **5.1** If `phase == "done"` and `failures.length == 0`:
   - Verdict: `complete`
