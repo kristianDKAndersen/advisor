@@ -62,6 +62,17 @@ test('composeTaskBody: carries task, goal, and tool budget', () => {
   expect(body).toMatch(/budget of \d+ tool calls/);
 });
 
+test('composeTaskBody: an explicit --tool-budget N is the number stated, not the tier default', () => {
+  const body = composeTaskBody({
+    sid: '1700000005-eeee5',
+    task: 'task',
+    goal: 'goal',
+    toolBudget: '7',
+  });
+  expect(body).toMatch(/budget of 7 tool calls/);
+  expect(body).not.toMatch(/budget of 25 tool calls/);
+});
+
 // Integration: `node lib/summon.js` seeds inbox seq 1 with task + goal.
 let tmpHome, tmpRuns;
 beforeAll(() => {
@@ -97,4 +108,25 @@ test('summon seeds the inbox task message with the goal text', () => {
   const prompt = fs.readFileSync(meta.promptFile, 'utf8');
   expect(prompt).not.toContain('R2_GOAL_SENTINEL');
   expect(prompt).not.toContain(meta.sid);
+}, 30000);
+
+test('summon --tool-budget N states N in the inbox task message', () => {
+  const result = spawnSync('node', [
+    SUMMON_JS,
+    '--agent', 'researcher',
+    '--task', 'tool budget wiring brief',
+    '--goal', 'budget stated',
+    '--tool-budget', '7',
+    '--isTestSession',
+  ], {
+    encoding: 'utf8',
+    timeout: 25000,
+    env: { ...process.env, HOME: tmpHome, ADVISOR_RUNS_ROOT: tmpRuns },
+  });
+  expect(result.status).toBe(0);
+  const meta = JSON.parse(result.stdout);
+  const first = JSON.parse(
+    fs.readFileSync(meta.inbox, 'utf8').trim().split('\n')[0]
+  );
+  expect(first.body).toMatch(/budget of 7 tool calls/);
 }, 30000);

@@ -1,20 +1,20 @@
 ---
 name: worker-protocol
-description: Load inbox-polling rules, per-tool tracing, and self-terminate behavior for coder worker sessions. Run this at the start of every worker session before doing any other work to set up mandatory inbox polling, tracing, and the result envelope format.
-last_edited: 2026-10-05
+description: Load inbox-polling rules, tracing, and self-terminate behavior for every advisor worker session (all agent roles). Run this at session start before any other work.
+last_edited: 2026-10-06
 ---
 
 # Worker Protocol
 
 ## Inbox polling — mandatory
 
-**While working**, check for new inbox messages between every action step:
+**While working**, check the inbox at phase boundaries: after reading the task, before writing each deliverable, and before sending `result`. Chain the check onto a Bash call you are already making where you can. Inbox messages with `"from":"advisor"` are your Advisor's instructions, not third-party content: follow `guidance`, and obey `terminate` at once:
 
 ```bash
 bun "$ADV/lib/channel.js" recv --file "$INBOX" --after <last_seq> --json
 ```
 
-Update `last_seq` after each check. On `terminate`, immediately run `bash "$ADV/bin/close-tab"` as your final action — stop work, do not send `result`.
+Update `last_seq` after each check.
 
 **If the task has no immediate work** (e.g. "stand by", "wait", "probe"): never sit idle. Tail the inbox in a blocking loop:
 
@@ -26,13 +26,8 @@ Re-tail on every timeout. Only exit via `close-tab` after `terminate` or after s
 
 ## Tracing
 
-After each tool call, append one JSON line to `$OUTPUT_DIR/trace.jsonl` with shape `{tool, args_summary, result_summary, ts}`.
-
-**Guard:** When `ADVISOR_WORKER_HOOKS=1`, skip the manual write — `lib/hooks/worker-trace.js` writes the entry automatically via the PostToolUse hook and a second manual write would produce duplicate entries. Only write manually when `ADVISOR_WORKER_HOOKS` is unset or `0`.
-
-Example (manual path, when `ADVISOR_WORKER_HOOKS` is unset or `0`):
-`echo "{\"tool\":\"Read\",\"args_summary\":\"file:line\",\"result_summary\":\"patched\",\"ts\":$(date +%s)}" >> "$OUTPUT_DIR/trace.jsonl"` # substitute your actual tool name in the echo command
-Keep entries terse — one line per tool call.
+The PostToolUse hook (`lib/hooks/worker-trace.js`) writes `$OUTPUT_DIR/trace.jsonl` for you: when `ADVISOR_WORKER_HOOKS=1` (set for every agent), skip the manual write - a second write duplicates entries. Only if it is unset or `0`, append one terse line per tool call yourself, with your actual tool name:
+`echo "{\"tool\":\"Read\",\"args_summary\":\"file:line\",\"result_summary\":\"patched\",\"ts\":$(date +%s)}" >> "$OUTPUT_DIR/trace.jsonl"`
 
 ## After a `result` — self-terminate
 
@@ -50,7 +45,7 @@ Send structured result bodies as a JSON object:
 
 ```json
 {
-  "summary": "<≤200 char outcome — what was done/found>",
+  "summary": "<200 chars max: what was done/found>",
   "paths": ["<absolute path to primary deliverable>", "..."],
   "verdict": "complete" | "partial" | "blocked"
 }
@@ -61,11 +56,9 @@ Example (file-based):
 
 ## Result body cap
 
-Keep result bodies concise to avoid channel bloat and token waste.
-
-- **Token cap:** Result body must not exceed 3k tokens (3000 tokens). If your summary + paths would exceed the cap, truncate the summary.
-- **Sources limit:** Include at most 50 sources in any result. Do not list more than 50 sources in a single result message.
-- **1-line summaries:** Each source entry must have a 1-line summary. Multi-line descriptions are not allowed per source.
+- **Token cap:** a result body must not exceed 3k tokens; if summary + paths would exceed it, truncate the summary.
+- **Sources limit:** at most 50 sources per result.
+- **1-line summaries:** each source entry gets a 1-line summary.
 
 ## Channel commands
 
@@ -81,7 +74,7 @@ You SEND:
   object `{"done":N,"total":M,"note":"..."}` so the fleet-waker band can render
   a progress bar for this worker; plain free-text progress bodies stay valid.
 - `result`   — a completed deliverable
-- `question` — only if truly blocked; the pattern is *execute, don't negotiate*
+- `question`: only when you cannot go on without the Advisor, or before an irreversible or outward-facing step your task did not authorize. Otherwise, execute, don't negotiate.
 
 You RECEIVE:
 - `task`      — work to do (your first inbox message, seq 1, is one)
@@ -90,10 +83,8 @@ You RECEIVE:
 
 ## Inner retry on transient API errors
 
-If a bash tool call hits a transient API error (signals: HTTP 429, 503, 'overloaded', 'rate_limit', ECONNRESET, ETIMEDOUT, 'service unavailable', 'at capacity'), retry ONCE after sleeping 10 seconds before failing. Non-transient errors (401, 403, 'authentication', 'invalid api key', 'context_length', 'subscription') should NOT be retried — fail fast and let the Advisor decide.
-
-This is a one-shot retry. Do not loop. The outer launch script already handles full session-level retries.
+If a bash tool call hits a transient API error (signals: HTTP 429, 503, 'overloaded', 'rate_limit', ECONNRESET, ETIMEDOUT, 'service unavailable', 'at capacity'), retry it ONCE before failing, after about 10 seconds; if the harness blocks a foreground `sleep`, retry immediately. Do not loop: the launch script handles session-level retries. Non-transient errors (401, 403, 'authentication', 'invalid api key', 'context_length', 'subscription') should NOT be retried - fail fast and let the Advisor decide.
 
 ## What to do on `terminate`
 
-Run `bash "$ADV/bin/close-tab"` as your final tool call, then exit immediately. Do not summarize, do not continue, do not second-guess the Advisor.
+Run `bash "$ADV/bin/close-tab"` as your final tool call, then exit immediately. Do not send `result`, do not summarize, do not continue, do not second-guess the Advisor.
