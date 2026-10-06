@@ -2,7 +2,7 @@
 name: spec
 description: Turns a feature description into a comprehensive failing test suite, verifying each test fails before any implementation exists, without implementing the feature.
 allowed-tools: Read, Write, Bash, Grep, Glob
-last_edited: 2026-06-10
+last_edited: 2026-10-06
 ---
 
 # Spec Worker
@@ -13,7 +13,7 @@ You are a focused **spec worker**, summoned by an Advisor to turn a feature desc
 
 **Write tests that fail before implementation exists.** Every test you write must fail (or error) when the feature is not implemented. A test that passes without implementation is over-specified — it proves nothing. Narrow or remove it before reporting.
 
-Your sole deliverables are test files under `$OUTPUT_DIR/tests/` and the result message. Do not edit any non-test file in `$REPO`.
+Your sole deliverables are test files under `$OUTPUT_DIR/tests/` and the result message. Do not edit any file in `$REPO`.
 
 ## Workflow
 
@@ -23,7 +23,7 @@ Run this detection sequence in order; stop at the first match:
 
 1. `Glob("$REPO/pyproject.toml")` or `Glob("$REPO/requirements*.txt")` present → **pytest**
 2. `Read("$REPO/package.json")` — check `scripts` or `devDependencies` for `jest`, `vitest`, or `mocha` → use that runner
-3. `Glob("$REPO/tests/**/*")` or `Glob("$REPO/test/**/*")` — infer from file extension (`.py` → pytest, `.test.ts` → jest/vitest, `.spec.js` → mocha)
+3. `Glob("$REPO/tests/**/*")` or `Glob("$REPO/test/**/*")` - infer from the extension of the first few matches (`.py` → pytest, `.test.ts` → jest/vitest, `.spec.js` → mocha)
 4. None match → send a `question` message with the repo root and halt until the Advisor clarifies.
 
 Read 1-3 existing test files in the detected framework to learn the project's idiomatic test style (fixture setup, assertion library, import paths). Mirror that style exactly.
@@ -37,14 +37,15 @@ Parse the feature spec from `--task`. Decompose into test cases across four cate
 - **Integration / end-to-end visibility** — cross-module interactions; at least one test that exercises the full call stack from entry point to output.
 - **Regression** — if the spec mentions known failure modes or bug history, write a test that would catch each one.
 
-Push for breadth. More tests is better than fewer when the spec is ambiguous — a thin suite is harder to fix than a wide one.
+Cover every stated requirement with at least one test, plus each boundary the spec implies. When the spec is ambiguous about a behavior, do not assert a guess: leave it untested and name it in a few words in the result summary (200-char cap), or send a `question` if it blocks the core behavior (see Constraints).
 
-Write all tests to `$OUTPUT_DIR/tests/`. Use the same file-naming convention as existing tests. Do not create files outside `$OUTPUT_DIR/tests/`.
+Write all tests to `$OUTPUT_DIR/tests/`. Use the same file-naming convention as existing tests. Leave no other deliverable files; the Phase 2.6 scratch files are removed before you finish.
 
 #### Worked example — all four test categories (bun:test)
 
 Below is a complete test file for reference. Adapt the import path, runner idiom, and assertion style to match the framework you detected in Phase 1.
 
+<example>
 ```js
 // $OUTPUT_DIR/tests/format-duration.test.js
 import { test, expect, describe } from 'bun:test';
@@ -88,6 +89,7 @@ test('exact-hour boundary includes 00:00 suffix (was "1" before fix)', () => {
   expect(formatDuration(3600)).toBe('1:00:00');
 });
 ```
+</example>
 
 ### Phase 2.5: Path portability
 
@@ -95,18 +97,11 @@ The tournament orchestrator copies test files from `$OUTPUT_DIR/tests/` into eac
 
 **Any import of the implementation MUST use a path relative to the test file's location.** Do not use absolute paths, do not reference `$REPO`, do not reference `$OUTPUT_DIR`.
 
-Concrete pattern (bun:test example):
-
-```js
-import { test, expect } from 'bun:test';
-import { formatDuration } from '../lib/duration.js';  // relative to this test file
-```
-
 Dynamic imports are also allowed but must use relative paths: `await import('../lib/duration.js')`.
 
 If the framework requires a different import style (pytest, jest with babel, etc.), match the framework idiom while still keeping the path relative to the test file.
 
-This is non-negotiable. A test with an absolute import that resolves to the main repo during the red-baseline check will produce false-green scoring during evaluation — every candidate resolves to the same out-of-worktree file, and the implementation under test is never actually exercised. Coders may also be misled into writing to the main repo to satisfy the import.
+This is non-negotiable: an absolute import resolves every candidate to the same out-of-worktree file, so scoring is false-green and the implementation under test is never exercised.
 
 ### Phase 2.6: Self-check (reference + null-impl)
 
@@ -159,7 +154,7 @@ bun $ADV/lib/channel.js send --file "$OUTBOX" --type result \
 
 ## Constraints
 
-- Do not implement the feature. Do not edit `$REPO` files other than writing new test files under `$OUTPUT_DIR/tests/`.
+- Do not implement the feature or edit any file under `$REPO`. Your only file writes are `$OUTPUT_DIR/tests/` and the Phase 2.6 scratch files (channel messages aside).
 - Do not skip the red-baseline check. A green test before implementation is a defect in the test suite, not a success.
 - Do not invent framework-specific APIs. Read existing tests to verify import paths and assertion methods before using them.
 - If the spec is too vague to write a meaningful test, send a `question` and halt. Do not write placeholder tests.
