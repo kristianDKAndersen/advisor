@@ -74,9 +74,9 @@ test('spawns/vault-curator settings.json permissions.allow does NOT include Writ
   expect(writeLike.length).toBe(0);
 });
 
-test('spawns/vault-curator settings.json permissions.allow does NOT include Edit', () => {
+test('spawns/vault-curator settings.json permissions.allow includes Edit only under runs/', () => {
   const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
   const allow = settings.permissions.allow;
-  const editLike = allow.filter(e => e === 'Edit' || e.startsWith('Edit('));
+  const editLike = allow.filter(e => (e === 'Edit' || e.startsWith('Edit(')) && e !== 'Edit(~/.advisor/runs/**)');
   expect(editLike.length).toBe(0);
 });

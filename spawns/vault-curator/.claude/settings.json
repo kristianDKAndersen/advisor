@@ -4,6 +4,8 @@
       "Read",
       "Grep",
       "Glob",
+      "Edit(~/.advisor/runs/**)",
+      "Bash(cd *)",
       "Bash(bin/advisor-vault *)",
       "Bash(sqlite3 *)",
       "Bash(find *)",
@@ -12,8 +14,7 @@
       "Bash(stat *)"
     ],
     "deny": [
-      "Write",
-      "Edit"
+      "Edit(~/.advisor/vault/**)"
     ]
   },
   "env": {}

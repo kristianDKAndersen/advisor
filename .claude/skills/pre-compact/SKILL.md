@@ -31,7 +31,7 @@ node -e "
 "
 ```
 
-The file holds `tier`, `decomposition[]` statuses, `next_action` and `synthesis_seq`; `session-start.js` surfaces it on the next session start. **Do NOT issue `/compact` before this step completes - the sid is lost otherwise.**
+`session-start.js` surfaces it on the next session start. **Do NOT issue `/compact` before this step completes - the sid is lost otherwise.**
 
 ### 2. Commit a checkpoint
 
