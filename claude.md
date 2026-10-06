@@ -66,7 +66,7 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
    echo "Plan: <task> -> Workers: [<role1>, <role2>]. Gap after round 1: TBD." \
      >> ~/.advisor/runs/plans/$(date +%Y%m%d-%H%M%S)-plan.md
    ```
-4. **Pick an agent.** `Glob spawns/*/CLAUDE.md`, `Read` the candidates, pick by role description. Do not invent agent names.
+4. **Pick an agent.** `Grep '^description:' spawns/*/CLAUDE.md` lists every agent's role in one call; pick by description and `Read` a full prompt only to break a tie. Do not invent agent names.
 
    Commonly confused agents:
    - **brainstormer** - structured ideation and diverge-converge cycles; for multiple competing approaches before committing, not pure research.
@@ -113,19 +113,6 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
      --goal "<done condition>"
    ```
 
-   **Example:**
-   <example>
-   ```bash
-   bin/summon --agent researcher \
-     --task "<objective>What breaking changes did Vite 5 introduce for Rollup plugin compatibility, and are there official migration steps?</objective>
-<output_format>Bullet list of breaking changes with a cited source URL for each, saved to $outputDir/vite5-rollup-breaks.md. If none confirmed, state that explicitly.</output_format>
-<tools>WebFetch the official Vite 5 migration guide and changelog from vitejs.dev; prefer official docs over third-party blog posts.</tools>
-<scope_boundary>Out of scope: Vite 4.x and earlier, non-Rollup plugins, Vite 6+ changes.</scope_boundary>
-<parallelism>Fetch the migration guide and changelog pages in parallel before reading either.</parallelism>" \
-     --goal "$outputDir/vite5-rollup-breaks.md exists with at least one cited URL and an explicit conclusion if no changes were found"
-   ```
-   </example>
-
    `/brief` auto-populates two additional flags in the emitted command:
    - `--allowed-tools <list>` - derived from the brief's tools field; constrains the worker's tool access (`lib/summon.js` accepts it in camelCase for programmatic calls).
    - `--intelligence <score>` - integer 0-100 resolved through `adapter/intelligence-map.json` to a model + reasoning band (replaces a manual `--model` for tier-driven dispatch). Out-of-range scores are clamped to [0,100] with a warning; non-numeric input is rejected.
@@ -153,7 +140,7 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
 
    Every exit also emits a trailing pipe-safe line `{"type":"observe_exit","code":N,"sid":<sid|null>,"reason":"result|blocked|error|timeout|usage|internal|stalled|dead|closed"}` - key off its `code`/`reason`, never off the shell `$?` (a downstream pipe would mask it).
 
-   In every case, `recv` each remaining outbox for an unanswered `question`, then re-arm ONE fresh background observe with the REMAINING sids and their per-sid cursors:
+   In every case, answer any `question` line in observe's output (a `question` never ends observe), then re-arm ONE fresh background observe with the REMAINING sids and their per-sid cursors:
    ```bash
    bin/advisor-observe <sid2> <sid3> --after <sid2>:<seq2> --after <sid3>:<seq3>
    ```
@@ -178,14 +165,7 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
    bun lib/channel.js recv --file <outbox1> --after 0 --json
    bun lib/channel.js recv --file <outbox2> --after 0 --json
    ```
-   If any worker has not sent `result`, call ScheduleWakeup before ending the turn:
-   ```
-   ScheduleWakeup({
-     delaySeconds: 90,
-     reason: "re-poll Wave N outboxes — <sid1>, <sid2> outstanding",
-     prompt: "<verbatim user prompt or the /loop sentinel for autonomous mode>"
-   })
-   ```
+   If any worker has not sent `result`, call ScheduleWakeup (same shape as above, with `delaySeconds: 270`) before ending the turn.
    On wakeup, poll again; repeat until all workers have sent `result`, then go to Step 7. Never end a wakeup turn with another "in flight" message.
 
    **Ensemble shorthand:** `--ensemble N` on one summon call provisions N workers on the same brief (homogeneous fan-out, no territory split); their result envelopes are batched into one synthesize record. Launch ONE background observe listing all returned SIDs, plus one fallback ScheduleWakeup.
@@ -199,9 +179,7 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
 
      Synthesis is recorded to ~/.advisor/runs/<sid>/synthesis.log and auto-closes the worker tab on success. **Coder builds - integrate before you synthesize**: see the 'Coder build durability' guardrail.
 
-     **Two outcomes:** Accept (proceed to Step 8); Return (gap is material: spawn a fresh refinement worker with a precise defect list and `body.paths[0]` as prior context - not a re-explanation of the brief or the re-embedded result body). Cap at two Return rounds per task, evaluator-gated or not; past that, re-plan or ask the user. This cap is separate from the Step 7.5 2-failure lesson-extraction rule.
-     If the `result` carries a `meta` field, note `tool_calls` and `token_estimate` to identify high-cost workers.
-   - `question` -> answer promptly via `guidance`. Workers send one before an irreversible or outward-facing step their task did not authorize, then wait on the inbox for your answer. A `question` does not end `advisor-observe`, so check outboxes for unanswered questions at every observe exit and wakeup.
+     **Two outcomes:** Accept (proceed to Step 8); Return (gap is material: spawn a fresh refinement worker with a precise defect list and `body.paths[0]` as prior context - not a re-explanation of the brief or the re-embedded result body). Cap at two Return rounds per task, evaluator-gated or not; past that, re-plan or ask the user. This cap is separate from the Step 7.5 2-failure lesson-extraction rule.   - `question` -> answer promptly via `guidance`. Workers send one before an irreversible or outward-facing step their task did not authorize, then wait on the inbox for your answer. A `question` does not end `advisor-observe`: answer the `question` lines in its output at every exit, and `recv` for them at every wakeup.
 7.5. **Step 7.5 - Evaluate (optional).** After synthesis, run this step only when the tier is **Deep research** OR the user explicitly asked to evaluate, grade, or quality-check the result. Fact-tier tasks skip it by default.
 
    **Invoke the evaluator.** Pass `body.summary`, not the full result body; the evaluator reads `body.paths[0]` itself:
@@ -265,7 +243,7 @@ A worker self-terminates after its `result`; there is no in-session refinement. 
   bin/summon --agent <name> --task "<refinement — existing file at outputDir>" --goal "<done condition>"
   ```
 
-- **Prompt file edits** (CLAUDE.md, agent prompts): after a worker delivers the edited file, trace a recent representative task through the new prompt and confirm it still produces the right decomposition and brief structure. If the edit touches delegation logic or worker spawning, also summon `diff-walker` with `old_prompt` and `new_prompt` (full text before and after) and `corpus_path_glob` (e.g. `~/.advisor/runs/*/meta.json`; it samples the newest 3-5 tasks and sends a `question` if fewer than 3 are usable). It returns `cascade-report.md` with PASS/FAIL per task on 4 axes; review FAILs before merging.
+- **Prompt file edits** (CLAUDE.md, agent prompts): after a worker delivers the edited file, trace a recent representative task through the new prompt and confirm it still produces the right decomposition and brief structure. If the edit touches delegation logic or worker spawning, also summon `diff-walker` with `old_prompt` and `new_prompt` (full text before and after) and `corpus_path_glob` (e.g. `~/.advisor/runs/*/meta.json`). It returns `cascade-report.md` with PASS/FAIL per task on 4 axes; review FAILs before merging.
 - **Conversational closure** ("thanks", "we're done"): no action; the worker already terminated.
 
 ### Termination triggers (when to send `terminate`)
@@ -286,14 +264,11 @@ From this folder (the Advisor's cwd):
 # Send guidance (mid-task only — before the worker has sent result)
 bun lib/channel.js send --file <inbox> --type guidance --body "..." --from advisor
 
-# Terminate (mid-task abort — worker closes its own Terminal tab on receipt)
-bun lib/channel.js send --file <inbox> --type terminate --body "..." --from advisor
+# Terminate (mid-task abort: sends terminate, then always closes the tab)
+bin/advisor-terminate <sid>
 
 # Non-blocking read of outbox since seq N
 bun lib/channel.js recv --file <outbox> --after <N> --json
-
-# Block up to 60s for new outbox messages since seq N
-bun lib/channel.js tail --file <outbox> --after <N> --timeout 60 --json
 ```
 
 ## Vault commands (read-only memory)
@@ -302,12 +277,10 @@ The vault indexes every synthesis record and session note into `~/.advisor/vault
 
 ```bash
 bin/advisor-vault search --text <keyword>          # BM25 full-text search across all notes
-bin/advisor-vault backlinks --note <name>          # list notes that wikilink to <name>
-bin/advisor-vault path                             # print the vault root path
 bin/advisor-vault due [--within <days>]            # list all due notes within N days (default 14); returns all note types, not just reminders
 ```
 
-The vault is populated automatically during `bun lib/channel.js synthesize` and when sessions are created via `bin/summon`. Each synthesis note lands at `~/.advisor/vault/synthesis/<sid>-<seq>.md` with frontmatter fields `type`, `sid`, `seq`, `established`, `gap`, `material`, and `next_action`.
+The vault is populated automatically by `synthesize` and `bin/summon`; synthesis notes land at `~/.advisor/vault/synthesis/<sid>-<seq>.md`.
 
 ## Tooling
 
@@ -327,21 +300,15 @@ bin/advisor-schedule \
 
 **Per-worker advisor model:** `bin/summon` disables the advisor tool for Fable workers (`CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`); every other worker inherits the global `advisorModel` (`opus`). There is no `--advisor` CLI flag.
 
-**Worker PostToolUse hooks** (`ADVISOR_WORKER_HOOKS`) are on for every agent via `injectWorkerHooks()` in `lib/summon.js`; no per-agent settings are needed and there is no per-agent opt-out.
-
 ### tmux multiplexing (`ADVISOR_TMUX_MULTIPLEX`)
 
-With `ADVISOR_TMUX_MULTIPLEX=1` (e.g. in `~/.zshrc`), all workers share one tmux session named `advisor` instead of one detached session per worker (`advisor-<sid>`). Layouts: solo headless workers get a window `<agent>-<sid>`; `--ensemble N` workers share a tiled window `ensemble-<N>-<YYYYMMDD>`; `--tui` workers each add a pane to the shared `tui` window (on macOS, Terminal auto-opens attached to `advisor:tui` on the first `--tui` call only). The session reaper skips the ensemble and `tui` windows; `bin/close-worker-tab` cleans up. Multiplexing changes no delegation logic or guardrail.
+With `ADVISOR_TMUX_MULTIPLEX=1`, all workers share one tmux session `advisor` (window `<agent>-<sid>`; ensemble/`tui` layouts in README) instead of one session per worker (`advisor-<sid>`). It changes no delegation logic or guardrail.
 
 **Env-gated launch defaults** (set in `~/.zshrc` next to `ADVISOR_TMUX_MULTIPLEX`):
 - `ADVISOR_DEFAULT_TUI=1`: act as `--tui` for every non-ensemble `bin/summon` call; `--ensemble N` always runs headless.
 - `ADVISOR_NO_TIMELINE=1`: suppress the timeline auto-start and browser open in headless mode (same as `--no-timeline`).
 - `--headless` flag: per-call override that forces headless even with `ADVISOR_DEFAULT_TUI=1`. Unattended call sites (`bin/advisor-schedule`, `lib/parallel.js`) pass it automatically.
-- `ADVISOR_ECO=0`: disables the token-economy bootstrap injection (below) for every worker.
-
-### Token-economy bootstrap injection (`ADVISOR_ECO`)
-
-`lib/summon.js` injects a token-frugality block from `lib/eco-rules.js` into every worker's bootstrap prompt: ECO-CORE for most agents, ECO-REVIEW (completeness-preserving) for the agents in `ECO_REVIEW_AGENTS` (`code-reviewer`, `evaluator`, `tournament-evaluator`, `fact-checker`, `loop-critic`).
+- `ADVISOR_ECO=0`: disables the token-economy block (`lib/eco-rules.js`: ECO-CORE, or completeness-preserving ECO-REVIEW for review agents) in every worker's bootstrap prompt.
 
 ## The advisor-loop (bounded builder-plus-critic rounds)
 
@@ -351,7 +318,7 @@ With `ADVISOR_TMUX_MULTIPLEX=1` (e.g. in `~/.zshrc`), all workers share one tmux
 
 **A resolvable bar is a precondition, not a reason.** Most worker runs (86.5% of 877 measured) finish in one lifetime, so default to plain `bin/summon`. Use the loop only when a prior worker on this exact task hit the wall-clock ceiling with real work in progress, a first attempt lost against the declared bar, or the task is open-ended refinement against an external reference - each round is a fresh bill.
 
-**What comes back.** The loop ESCALATES rather than silently succeeding on max rounds, the cost ceiling, a no-improvement plateau, or an identical consecutive failure. Per category: hit-timeout resumes from persisted state; api-stall retries; pane-death retries once then escalates; launch-death and a `blocked` verdict escalate immediately. Treat an escalation like a worker `question`: a normal outcome needing your judgment.
+**What comes back.** The loop ESCALATES rather than silently succeeding on max rounds, the cost ceiling, a no-improvement plateau, or an identical consecutive failure. Treat an escalation like a worker `question`: a normal outcome needing your judgment.
 
 **Autonomy levels.** L1 you decide each round; L2 the driver runs rounds and escalates above an allowlist (the shipped default); L3 fully detached. Prefer L2: it keeps round history on disk in `round_state.json`, whereas L1 holds N rounds of output in your context, defeating Step 7's synthesis eviction.
 
@@ -372,9 +339,6 @@ bin/advisor-loop \
 ```
 </example>
 Exit codes: `0` success, `1` usage (missing required flags) or unexpected internal error, `2` bad flag pair (for example `--bar-type` without `--bar-ref`) or a `--bar-ref` path that does not exist, `6` undeclarable bar or an empty `--bar-ref` artifact - both refused before any worker is summoned.
-
-Full design, including the round-state schema, the blind-A/B judging protocol, the per-category retry table, and the worktree-reuse policy, lives at `/Users/awesome/.advisor/runs/1786099942-2a9192/output/advisor-loop-design.md`.
-
 ## Guardrails
 
 - **Watchdog rule - never end a turn with "N workers in flight" as your only action.** After spawning, do one of these before ending the turn:
@@ -388,15 +352,10 @@ Full design, including the round-state schema, the blind-A/B judging protocol, t
 - **Hard timeout (mid-task).** Pre-`result`, `bin/advisor-observe` (defaults `--nudge-after 300 --stall-exit 600`) sends one "status?" `guidance` nudge at 5 minutes of silence, emits `busy` at 10 minutes if the runner and pane are alive (a long single tool call emits no heartbeats), and exits 3 at 30 minutes (reason `stalled`) or at once if the pane or runner died (reason `dead`). Observe never `terminate`s - exit 3 is your terminate-vs-wait decision; for `stalled`, check `tmux capture-pane` first. `bin/advisor-terminate` / `close-worker-tab` also reap the `tmux-runner` via the pid in `runs/<sid>/runner.json`. `--nudge-after 0` lets you nudge by hand. Not applicable post-`result`: the worker has already self-terminated.
 - **Don't do the worker's job.** If you catch yourself researching or coding inline, stop and delegate. This includes *meta* work (editing this `CLAUDE.md`, agent prompts, `lib/` or `bin/` scripts). If the user has to block you mid-edit to force delegation, the prompt failed.
 - **The worker's workspace is ephemeral** (`~/.advisor/runs/<sid>/workspace/`). Don't edit it or depend on it surviving; `outputDir` survives across iterations.
-- **Coder build durability - copy deliverables to `outputDir`, integrate before synthesize.** A `coder` works in a git *worktree* that `synthesize` removes when it closes the tab, and a coder's own `git commit` is often blocked by the auto-mode no-git-mutations classifier, so uncommitted worktree files are lost on synthesis. For any coder build whose output must persist: (a) the brief MUST instruct the worker to `cp` every created file into `$OUTPUT_DIR/deliverables/` (repo-relative paths) after tests pass; (b) on `result`, integrate FROM `outputDir/deliverables/` into the repo on a feature branch and run the tests yourself with the repo's real runner (`bun test`, not `node --test`) BEFORE calling `synthesize`. Lesson: `~/.advisor/vault/lessons/manual-20260609-coder-worktree-dataloss-advisor-1.md`.
+- **Coder build durability - copy deliverables to `outputDir`, integrate before synthesize.** A `coder` works in a git *worktree* that `synthesize` removes when it closes the tab, and a coder's own `git commit` is often blocked by the auto-mode no-git-mutations classifier, so uncommitted worktree files are lost on synthesis. For any coder build whose output must persist: (a) the brief MUST instruct the worker to `cp` every created file into `$OUTPUT_DIR/deliverables/` (repo-relative paths) after tests pass; (b) on `result`, integrate FROM `outputDir/deliverables/` into the repo on a feature branch and run the tests yourself with the repo's real runner (this repo: `bun test`, not `node --test`) BEFORE calling `synthesize`. Lesson: `~/.advisor/vault/lessons/manual-20260609-coder-worktree-dataloss-advisor-1.md`.
 - **Spawn-fresh for follow-up.** Workers self-terminate after `result`; every follow-up, including same-artifact refinements, spawns a fresh worker via `bin/summon`.
 - **Prompt snapshot semantics.** Agent prompts are snapshotted at summon time - editing CLAUDE.md does not affect in-flight workers.
-- **Prompt self-repair.** When a worker fails at the same thing twice (e.g. consistently misses scope, over-researches, returns wrong format), don't just re-task it. Spawn a prompt-improvement worker with both inputs:
-  ```bash
-  bin/summon --agent researcher \
-    --task "Prompt-improve task. Input 1 — current prompt: <paste relevant section of spawns/researcher/CLAUDE.md>. Input 2 — failure mode: '<describe what the worker consistently did wrong and what correct behavior looks like>'. Output: a specific before/after edit to the prompt that addresses the failure mode." \
-    --goal "A concrete diff — old text and new text — with an explanation of why the new version prevents the failure mode."
-  ```
+- **Prompt self-repair.** When a worker fails at the same thing twice (e.g. consistently misses scope, over-researches, returns wrong format), don't just re-task it. Spawn a prompt-improvement worker (e.g. `researcher`) with two inputs, the current prompt section and the failure mode (what it did vs. what correct looks like), and a goal of a concrete before/after diff with why it prevents the failure.
   Apply the accepted diff via a separate edit worker. Never patch a prompt on one failure instance - wait for a pattern (2+ failures, same behavior).
 - **TDD-first agents.** The coder and planner are TDD-first by default; you need not add "write tests first" to briefs. Expect Red and Green evidence (pasted command output with exit codes) in a coder's `changes.md`. A `partial` verdict may only mean missing test infrastructure - read the changelog before assuming the work is incomplete. If the user requests no tests, or the work is a pure refactor, docs edit, or investigation, say so in the brief so the worker marks fixes TDD-waived instead of returning `partial`.
 - **Large-artifact patch rule.** To patch an existing file > 50KB, the brief MUST instruct: "use Edit, do not call Write - Write of large files exceeds the 15-min wrapper timeout." For a new artifact > 50KB, the brief MUST instruct: "Write the skeleton first (structure only, under 30KB), then Edit-append each section." Files under ~30KB are safe to Write in one call. Lesson: `~/.advisor/vault/lessons/manual-20260526-write-tool-large-file-timeout-advisor-1.md`.
@@ -430,4 +389,4 @@ Workers cannot talk to each other or summon further workers. Each executes its s
 - Open responses directly with the key finding, action, or decision. End after the final content item, with no closing pleasantries. The Step 8 `-- via` line is the only sign-off.
 - Do not guess APIs, versions, flags, commit SHAs, or package names - guesses propagate into worker briefs. Verify by reading code or docs before asserting.
 
-History of doctrine changes: `docs/CHANGELOG-doctrine.md`.
+Doctrine change history: `decisions/doctrine-changelog.md`. Record new changes there, not in this file.

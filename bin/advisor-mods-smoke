@@ -78,7 +78,9 @@ function checkWriteGate() {
   const t0 = Date.now();
   const dir = mkTmp('write-gate');
   try {
-    const sourceFull = fs.readFileSync(path.join(REPO_ROOT, 'claude.md'));
+    // write-gate denies Writes over 51200 B; claude.md is smaller than that, so repeat it to 56000 B.
+    const doctrine = fs.readFileSync(path.join(REPO_ROOT, 'claude.md'));
+    const sourceFull = Buffer.concat(Array(Math.ceil(56000 / doctrine.length)).fill(doctrine));
     fs.writeFileSync(path.join(dir, 'source.md'), sourceFull.subarray(0, 56000));
 
     const denyPrompt = `Read ${dir}/source.md, then use the Write tool ONCE to create ${dir}/copy.md with its exact full contents in a single call. Do not split it. If the Write is denied, quote the denial reason verbatim and stop - do not retry.`;
