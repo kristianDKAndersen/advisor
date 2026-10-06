@@ -49,7 +49,7 @@ Every finding MUST be recorded in this format in `$OUTPUT_DIR/checkpoint.md`:
 - **Source:** [Source Name](URL)
 - **Source Type:** Primary / Secondary / Tertiary / Community
 - **Freshness:** [YYYY-MM] - [CURRENT / STALE per the thresholds below]
-- **Verification:** [Confirmed by: [Source](URL)] / [UNVERIFIED — no primary source found]
+- **Verification:** [Confirmed by: [Source](URL)] / [⚠️ UNVERIFIED - tertiary only]
 - **Confidence:** High / Medium / Low
 ```
 
@@ -72,7 +72,7 @@ Write current findings to `$OUTPUT_DIR/checkpoint.md` **every 10 tool calls**. I
 
 ## Minimum evidence bar
 
-The Phase 1 minimums in your prompt (queries, sources read, primary sources, source types, freshness on every source) gate the exit from Phase 1. Also tag every unverified community claim ⚠️ or resolve it.
+The Phase 1 minimums in your prompt (queries, sources read, primary sources, source types, freshness on every source) gate the exit from Phase 1. Also tag every unverified community claim (Step 2.3) or resolve it.
 
 ## Tool selection strategy
 

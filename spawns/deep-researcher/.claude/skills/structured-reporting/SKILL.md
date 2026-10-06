@@ -27,8 +27,6 @@ Maximum: 4 lines. Must contain:
 - **Confidence:** [High / Medium / Low — from audit verdict]
 - **Recommended Action:** [what to do — one sentence]
 
-The executive summary must be complete enough that a reader who reads nothing else can make an informed decision.
-
 ### Section 2: Key Findings
 
 Lead with the "So What?" — actionable insight before evidence.
@@ -49,7 +47,7 @@ Minimum: 3 findings for any substantive investigation.
 
 For each major finding, include the counter-narrative from `counter-narratives.md`, then state whether it changes the recommended action and why.
 
-If the research topic is contested (political, social, historical), this section must appear **before** Key Findings in the document order to signal epistemic humility.
+If the research topic is contested (political, social, historical), this section must appear **before** Key Findings.
 
 ### Section 4: Technical Analysis
 
@@ -92,8 +90,7 @@ Paste the `AUDIT VERDICT:` paragraph from the end of `ach-matrix.md` verbatim, w
 
 - **Confidence rating:** assign High / Medium / Low to every major finding, consistent with the audit evidence tier (Tier 3-only evidence = Low at most).
 - **State documented facts directly,** not as "it has been reported that ...".
-- **Key evidence** follows the Finding template order in Section 2 (Claim, Evidence quote, Source).
 
 ## Completeness gate
 
-Before returning the report, confirm: Section 1 is ≤4 lines; Section 2 has ≥3 findings; Sections 3 and 4 exist and are non-empty; Section 5 has ≥5 citations (≥2 primary); Section 6 has ≥2 gaps or an explicit "None identified" with justification; Section 7 has the verbatim audit verdict. Add any missing section before returning. Report `verdict: "partial"` only if input data is missing and you cannot generate a section.
+Before returning the report, confirm: Section 1 is ≤4 lines; Section 2 has ≥3 findings; Sections 3 and 4 exist and are non-empty; Section 5 has ≥5 citations (≥2 primary); Section 6 has ≥2 gaps or an explicit "None identified" with justification; Section 7 has the verbatim audit verdict. Add any missing section before returning; if input data is missing and you cannot generate a section, report `verdict: "partial"` (your prompt lists the other partial cases).

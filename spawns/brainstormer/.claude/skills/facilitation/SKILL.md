@@ -271,12 +271,6 @@ Runs at the end of the session, including when Stage 6 was skipped:
 
 ---
 
-## Single-Question Rule
-
-Ask exactly 1 question per turn during elicitation; never combine questions. Correct: "What is the problem in one sentence, without naming a solution?" Incorrect: "What is the problem and who is affected and what does success look like?"
-
----
-
 ## Stuck Stage Protocol
 
 If a stage has not produced its exit artifact minimum after 3 turns:

@@ -59,7 +59,7 @@ Before spawning, write `$OUTPUT_DIR/territory.md` - the single source of truth f
 Validate the table before spawning:
 
 ```bash
-cd "$REPO" && bash "$ADV/spawns/coder/.claude/skills/spawn-team/scripts/validate-territory.sh" \
+bash "$ADV/spawns/coder/.claude/skills/spawn-team/scripts/validate-territory.sh" \
   validate "$OUTPUT_DIR/territory.md"
 ```
 
@@ -97,11 +97,11 @@ Extract `summary`, `paths`, and `verdict` from each worker's final message.
 ### 2. Verify territory integrity
 
 ```bash
-cd "$REPO" && bash "$ADV/spawns/coder/.claude/skills/spawn-team/scripts/validate-territory.sh" \
+bash "$ADV/spawns/coder/.claude/skills/spawn-team/scripts/validate-territory.sh" \
   verify "$OUTPUT_DIR/territory.md"
 ```
 
-It compares `git diff --name-only` against the declared territories. A file modified by a worker outside its row is an **integrity violation**: log it under "Integrity violations" with worker_id, file, and the change. Then decide: if the change is legitimate, leave it and document why; if it overstepped scope, revert it via `git checkout <file>` and re-run that fix in `coder-self`.
+It compares `git diff --name-only` against the declared territories. A file modified by a worker outside its row is an **integrity violation**: log it under "Integrity violations" with worker_id, file, and the change. Then decide: if the change is legitimate, leave it and document why; if it overstepped scope, undo only that worker's hunks with Edit (read them from `git diff <file>`; never `git checkout` - your prompt bans git mutations) and re-run that fix in `coder-self`.
 
 ### 3. Apply the residual `coder-self` row
 
@@ -128,7 +128,3 @@ Append an **Orchestration Summary** at the end:
 ```
 
 If any worker is `blocked` OR any integrity violation is logged, your master verdict in Phase 4 is `partial`, even if every other fix landed.
-
-## Failure mode to re-check before assigning groups
-
-Fix B "needs the helper from fix A" but both were marked independent: the B-worker cannot find the helper because workers run in parallel. Re-read each fix's dependencies; dependent fixes share a group.

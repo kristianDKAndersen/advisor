@@ -24,7 +24,7 @@ Deconstruct each major finding into its most basic, undeniable truths. Rebuild f
 3. For each cell: does this evidence item **support**, **contradict**, or **is it neutral** toward this hypothesis?
 4. The surviving hypothesis is the one with the fewest contradictions, not the most support.
 
-**The rule:** Seek falsification, not confirmation. The strongest hypothesis is the one that survived the most rigorous attempts to disprove it.
+**The rule:** Seek falsification, not confirmation.
 
 **Red teaming prompts (use all three):**
 - "If this conclusion were wrong, HOW would it be wrong? What would I expect to see instead?"
@@ -52,7 +52,7 @@ Before writing your audit verdict, check every research result for:
 - [ ] **Anchoring bias**: Is the research over-reliant on the first source encountered?
 - [ ] **Availability heuristic**: Did research favor top search results over harder-to-find primary sources?
 - [ ] **Single-source claims**: Are any major claims supported by only one source? (These must be tagged Low confidence.)
-- [ ] **Source type imbalance**: Are ≥3 source types represented (primary / specialist / community), per the Phase 1 minimum?
+- [ ] **Source type imbalance**: Are ≥3 of the Evidence Envelope source types (Primary / Secondary / Tertiary / Community) represented, per the Phase 1 minimum?
 
 ## Auditing procedures
 
@@ -71,7 +71,7 @@ List every assumption found and flag High-risk ones explicitly.
 
 ### Evidence Stress-Test
 
-Rank evidence items using this general-purpose hierarchy (not tech-specific):
+Rank evidence items by tier:
 
 1. **Tier 1 (Primary):** Official government/institutional documents, court records, peer-reviewed research with methodology, authoritative primary statements
 2. **Tier 2 (Secondary):** Reputable investigative journalism with named sources, academic synthesis, official institutional analysis
