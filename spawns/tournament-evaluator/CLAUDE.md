@@ -25,7 +25,7 @@ Repo root: <repo_root>
 
 If any field is missing or JSON is malformed, send a `question` and halt.
 
-**Validation:** if `worktree_path` is missing or empty for any candidate, set that candidate's `verdict: "blocked"` with `rationale: "missing worktree_path"` and skip to the next candidate. Do not halt.
+**Validation:** if `worktree_path` is missing or empty for any candidate, rank that candidate with `tests_passing: false`, note "missing worktree_path" in `rationale`, and continue. Do not halt.
 
 ## Workflow
 
@@ -33,20 +33,20 @@ If any field is missing or JSON is malformed, send a `question` and halt.
 
 For each candidate:
 
-**1. Run tests:** use the candidate's own `test_command`, never the global one: `(cd <candidate.worktree_path> && <candidate.test_command>) > "$OUTPUT_DIR/<sid>.log" 2>&1; echo "exit=$?"`, then read only `tail -n 30` of the log. Exit code 0 → `tests_passing: true`; non-zero → `false`. For counts: parse pytest `-q` summary line (`N passed, M failed`) or jest `--json`. When unparseable, set `tests_total: null, tests_passed: null`. Ranking uses the boolean regardless.
+**1. Run tests:** use the candidate's own `test_command`, never the global one: `(cd <candidate.worktree_path> && <candidate.test_command>) > "$OUTPUT_DIR/<sid>.log" 2>&1; echo "exit=$?"`, then read only `tail -n 30` of the log. Exit code 0 → `tests_passing: true`; non-zero → `false`. For counts: parse pytest `-q` summary line (`N passed, M failed`) or jest `--json` via `grep -o '"num[A-Za-z]*Tests":[0-9]*' "$OUTPUT_DIR/<sid>.log"`. When unparseable, set `tests_total: null, tests_passed: null`. Ranking uses the boolean regardless.
 
 **2. Measure diff:** `git -C <worktree_path> diff --shortstat HEAD` - sum insertions + deletions = `diff_lines`.
 
-**3. Score pattern_consistency (0.0-1.0).** Read 2-3 sibling files from `repo_root` (NOT from worktree_path) for the existing-code baseline. Compare the candidate's diff against it on: import style, error-handling idiom, function naming/length, comment density. Score 1.0/0.75/0.5/0.25/0.0 for 4/3/2/1/0 axes matching. One-sentence justification per candidate.
+**3. Score pattern_consistency (0.0-1.0).** Read 2-3 sibling files from `repo_root` (NOT from worktree_path) once, before the loop, and reuse them as the baseline for every candidate. Compare the candidate's diff against it on: import style, error-handling idiom, function naming/length, comment density. Score 1.0/0.75/0.5/0.25/0.0 for 4/3/2/1/0 axes matching. One-sentence justification per candidate.
 
 ### Phase 2: Ranking
 
 1. `tests_passing: true` always ranks above `false`.
-2. Among all-passing: higher `pattern_consistency` wins; tie → lower `diff_lines` wins.
+2. Within each group (passing, then failing): higher `pattern_consistency` wins; tie → lower `diff_lines` wins.
 
 `total_score = (tests_passing ? 0.5 : 0.0) + pattern_consistency * 0.3 + (1 - candidate_diff/max(max_diff,1)) * 0.2` - informational only; rules above are authoritative.
 
-**Zero-pass case:** Set `winner_sid: null`, `verdict: "blocked"`. Still emit full `ranked[]`.
+**Zero-pass case:** set `winner_sid: null` and still emit full `ranked[]`.
 
 ### Phase 3: Write scores.json
 
@@ -80,6 +80,7 @@ Set `verdict: "blocked"` when `winner_sid` is null.
 
 ## Approach
 - Read existing files before writing. Don't re-read unless changed.
+- Thorough in reasoning, concise in output.
 - Skip files over 100KB unless required.
 - No sycophantic openers or closing fluff.
 - No emojis or em-dashes.
