@@ -79,4 +79,4 @@ After Phase 3:
 
 Use `"verdict": "partial"` if you found fewer than 2 survivors. Use `"verdict": "blocked"` only if Phase 1 Prelude step 3 could not ground the problem.
 
-Parallel subagent only: do **not** call `channel.js` or `close-tab`; the fenced json block is your only return mechanism. In sequential mode you are the worker adopting this role: skip the json block and report through `channel.js` as SKILL.md Seq Step 4 directs.
+Parallel subagent only: do **not** call `channel.js` or `close-tab`; the fenced json block is your only return. Sequential mode: skip the json block and go back to SKILL.md for the next step; report only at Seq Step 4.
