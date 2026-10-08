@@ -72,3 +72,37 @@ test('spawns/*/.claude/settings.json: NO ADVISOR_WORKER_HOOKS env entries remain
     expect(settings.env?.ADVISOR_WORKER_HOOKS).toBeUndefined();
   }
 });
+
+// N5: unattended brainstormer must not wait on a participant who cannot answer
+const brainstormer = fs.readFileSync(path.resolve(__dirname, '../spawns/brainstormer/CLAUDE.md'), 'utf8');
+const facilitation = fs.readFileSync(path.resolve(__dirname, '../spawns/brainstormer/.claude/skills/facilitation/SKILL.md'), 'utf8');
+const coder = fs.readFileSync(path.resolve(__dirname, '../spawns/coder/CLAUDE.md'), 'utf8');
+
+test('spawns/brainstormer: summoned brief is the participant input, answered from the brief with stated assumptions', () => {
+  expect(brainstormer).toMatch(/brief is the participant/i);
+  expect(brainstormer).toMatch(/state (your )?assumptions/i);
+});
+
+test('spawns/brainstormer: one batched question to the Advisor only when a load-bearing answer is absent', () => {
+  expect(brainstormer).toMatch(/ONE batched `question`/);
+  expect(brainstormer).toMatch(/load-bearing/);
+  expect(brainstormer).toMatch(/worker-protocol/);
+});
+
+test('spawns/brainstormer facilitation: elicitation is interactive only for a live human, else answered from brief', () => {
+  expect(facilitation).toMatch(/Elicitation \(live human: 1 question per turn; wait for answer/);
+  expect(facilitation).toMatch(/summoned\/unattended: answer each from the brief/i);
+});
+
+test('spawns/coder: spawns/ and agent/skill prompt files are changed with Edit at real path, never bulk scripts or cross-run copies', () => {
+  expect(coder).toMatch(/under `spawns\/`/);
+  expect(coder).toMatch(/Edit` tool at (their|its) real path/);
+  expect(coder).toMatch(/never bulk-apply scripts or copy files from other run dirs/i);
+  expect(coder).toMatch(/instruction poisoning/);
+});
+
+test('N5/N1 edited prompt files carry last_edited 2026-10-08', () => {
+  for (const f of [brainstormer, facilitation, coder]) {
+    expect(f).toMatch(/^last_edited: 2026-10-08$/m);
+  }
+});

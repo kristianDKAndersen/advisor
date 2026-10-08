@@ -131,3 +131,28 @@ test('summon --tool-budget N states N in the inbox task message', () => {
   );
   expect(first.body).toMatch(/budget of 7 tool calls/);
 }, 30000);
+
+test('composeTaskBody: wall-clock line states the effective timeout seconds', () => {
+  const body = composeTaskBody({ sid: '1700000006-ffff6', task: 't', goal: 'g', timeoutSec: 1500 });
+  expect(body).toMatch(/ends your session at its timeout \(1500s\)/);
+  const explicit = composeTaskBody({ sid: '1700000006-ffff6', task: 't', goal: 'g', timeoutSec: 321 });
+  expect(explicit).toMatch(/timeout \(321s\)/);
+});
+
+test('composeTaskBody: wall-clock line keeps old wording when no timeout is known', () => {
+  const body = composeTaskBody({ sid: '1700000006-ffff6', task: 't', goal: 'g' });
+  expect(body).toContain('the wrapper ends your session at its timeout. Send');
+});
+
+test('provisionOne body: coder default and explicit --timeout reach the wall-clock line', () => {
+  const { scaledCoderTimeout } = require('../lib/summon');
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'summon.js'), 'utf8');
+  expect(src).toMatch(/composeTaskBody\(\{[^}]*timeoutSec: effectiveTimeoutSec/);
+  expect(scaledCoderTimeout('short')).toBe(1500);
+});
+
+test('composeBootstrapPrompt: deliverables line gives an exact mkdir -p + quoted cp form', () => {
+  const prompt = composeBootstrapPrompt(argsFor('1700000007-aaaa7'));
+  expect(prompt).not.toContain('<repo-relative path>');
+  expect(prompt).toContain('mkdir -p "$OUTPUT_DIR/deliverables/$(dirname "<path>")" && cp "<path>" "$OUTPUT_DIR/deliverables/<path>"');
+});

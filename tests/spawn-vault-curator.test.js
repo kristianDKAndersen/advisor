@@ -80,3 +80,16 @@ test('spawns/vault-curator settings.json permissions.allow includes Edit only un
   const editLike = allow.filter(e => (e === 'Edit' || e.startsWith('Edit(')) && e !== 'Edit(~/.advisor/runs/**)');
   expect(editLike.length).toBe(0);
 });
+
+test('vault-curator settings.json has no unrestricted sqlite3 allow', () => {
+  const allow = JSON.parse(fs.readFileSync(settingsPath, 'utf8')).permissions.allow;
+  const sq = allow.filter((a) => /sqlite3/.test(a));
+  expect(sq).not.toContain('Bash(sqlite3 *)');
+  for (const a of sq) expect(a).toMatch(/^Bash\(sqlite3 -readonly -safe /);
+});
+
+test('vault-curator CLAUDE.md sqlite3 examples use -readonly -safe', () => {
+  const lines = fs.readFileSync(claudeMdPath, 'utf8').split('\n').filter((l) => /^sqlite3 /.test(l));
+  expect(lines.length).toBeGreaterThan(0);
+  for (const l of lines) expect(l).toMatch(/^sqlite3 -readonly -safe /);
+});

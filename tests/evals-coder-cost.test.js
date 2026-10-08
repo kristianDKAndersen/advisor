@@ -4,15 +4,16 @@ import os from 'os';
 import path from 'path';
 import { execSync, spawn, spawnSync } from 'child_process';
 
-const FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-fixture-'));
+// Fixed per process, not mkdtemp: --rerun-each re-evaluates this file but keeps run.js
+// cached, so run.js's REPO_ROOT/RESULTS_DIR must name the dirs beforeAll rebuilds each pass.
+const FIXTURE_ROOT = path.join(os.tmpdir(), `coder-cost-fixture-${process.pid}`);
 // Private TMPDIR for this file: run.js (in-process and every spawned child) sweeps
 // coder-cost-* dirs under os.tmpdir(), which must never be the shared one.
 const ORIGINAL_TMPDIR = process.env.TMPDIR;
 const ISOLATED_TMP = path.join(FIXTURE_ROOT, 'tmp');
-fs.mkdirSync(ISOLATED_TMP);
 process.env.TMPDIR = ISOLATED_TMP;
-const RESULTS_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-results-'));
-const EVAL_FIXTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-evaldir-'));
+const RESULTS_ROOT = path.join(ISOLATED_TMP, 'coder-cost-results');
+const EVAL_FIXTURE_DIR = path.join(ISOLATED_TMP, 'coder-cost-evaldir');
 process.env.CODER_COST_REPO_ROOT = FIXTURE_ROOT;
 process.env.CODER_COST_RESULTS_DIR = RESULTS_ROOT;
 process.env.CODER_COST_CASES_FILE = path.join(EVAL_FIXTURE_DIR, 'cases.jsonl');
@@ -20,7 +21,6 @@ process.env.CODER_COST_CONFIGS_FILE = path.join(EVAL_FIXTURE_DIR, 'configs.json'
 // Deterministic stand-in for ~/.claude/settings.json (real enabledPlugins vary
 // machine to machine) so buildRunSettings' plugin-override output is stable.
 const USER_SETTINGS_FIXTURE = path.join(EVAL_FIXTURE_DIR, 'user-settings.json');
-fs.writeFileSync(USER_SETTINGS_FIXTURE, JSON.stringify({ enabledPlugins: { 'some-plugin': true, 'another-plugin': false } }));
 process.env.CODER_COST_USER_SETTINGS_FILE = USER_SETTINGS_FIXTURE;
 
 const runner = require('../evals/coder-cost/run.js');
@@ -29,7 +29,7 @@ const { priceForModel } = require('../bin/advisor-cost');
 
 const RUN_JS_PATH = path.join(__dirname, '..', 'evals', 'coder-cost', 'run.js');
 
-const STUB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-cost-stub-'));
+const STUB_DIR = path.join(ISOLATED_TMP, 'coder-cost-stub');
 const STUB_CLAUDE_PATH = path.join(STUB_DIR, 'claude');
 
 const WRONG_IMPL = 'function add(a, b) { return a + b - 1; }\nmodule.exports = { add };\n';
@@ -44,6 +44,12 @@ const HIDDEN_TEST = [
 let baseSha, solutionSha;
 
 beforeAll(() => {
+  // afterAll deletes every root and bun reruns hooks under --rerun-each, so rebuild the
+  // whole tree each time. TMPDIR must be reset too: afterAll restores the shared one.
+  fs.rmSync(FIXTURE_ROOT, { recursive: true, force: true });
+  process.env.TMPDIR = ISOLATED_TMP;
+  for (const d of [ISOLATED_TMP, RESULTS_ROOT, EVAL_FIXTURE_DIR, STUB_DIR]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(USER_SETTINGS_FIXTURE, JSON.stringify({ enabledPlugins: { 'some-plugin': true, 'another-plugin': false } }));
   execSync('git init -q', { cwd: FIXTURE_ROOT });
   execSync('git config user.email test@example.com', { cwd: FIXTURE_ROOT });
   execSync('git config user.name test', { cwd: FIXTURE_ROOT });

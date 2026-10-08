@@ -26,7 +26,9 @@ const agentDir = path.join(ADVISOR_ROOT, 'spawns', AGENT_NAME);
 // Clean up leftover test-mcp-* dirs from previous failed runs.
 const spawnsDir = path.join(ADVISOR_ROOT, 'spawns');
 for (const entry of fs.readdirSync(spawnsDir)) {
-  if (entry.startsWith('test-mcp-')) {
+  // Only stale dirs: a concurrent suite run in this checkout owns fresh ones.
+  const ts = Number(entry.slice('test-mcp-'.length));
+  if (entry.startsWith('test-mcp-') && !(TS - ts < 600000)) {
     fs.rmSync(path.join(spawnsDir, entry), { recursive: true, force: true });
   }
 }
