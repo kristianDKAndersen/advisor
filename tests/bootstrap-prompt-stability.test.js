@@ -150,3 +150,9 @@ test('provisionOne body: coder default and explicit --timeout reach the wall-clo
   expect(src).toMatch(/composeTaskBody\(\{[^}]*timeoutSec: effectiveTimeoutSec/);
   expect(scaledCoderTimeout('short')).toBe(1500);
 });
+
+test('composeBootstrapPrompt: deliverables line gives an exact mkdir -p + quoted cp form', () => {
+  const prompt = composeBootstrapPrompt(argsFor('1700000007-aaaa7'));
+  expect(prompt).not.toContain('<repo-relative path>');
+  expect(prompt).toContain('mkdir -p "$OUTPUT_DIR/deliverables/$(dirname "<path>")" && cp "<path>" "$OUTPUT_DIR/deliverables/<path>"');
+});

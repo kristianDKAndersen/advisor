@@ -5,8 +5,7 @@
 // Coverage:
 //   T1  --timeoutSec 1500  → meta JSON returned on stdout contains timeoutSec:1500
 //   T2  --timeoutSec 1500  → meta.json on disk contains timeoutSec:1500
-//   T3  no --timeoutSec    → meta JSON omits the field (the bash wrapper supplies
-//                            the user-facing default; lib/summon.js itself does not)
+//   T3  no --timeoutSec    → non-coder meta JSON gets the 1500s default from lib/summon.js
 
 import { test, expect, afterAll } from 'bun:test';
 import { spawnSync } from 'child_process';
@@ -59,10 +58,19 @@ test('T2: --timeoutSec 1500 persists to meta.json on disk', () => {
   expect(metaOnDisk.timeoutSec).toBe(1500);
 });
 
-test('T3: omitting --timeoutSec leaves the field unset in meta JSON', () => {
+test('T3: omitting --timeoutSec defaults a non-coder to 1500 in meta JSON', () => {
   const { meta, metaOnDisk } = provision([]);
-  expect(meta.timeoutSec).toBeUndefined();
-  expect(metaOnDisk.timeoutSec).toBeUndefined();
+  expect(meta.timeoutSec).toBe(1500);
+  expect(metaOnDisk.timeoutSec).toBe(1500);
+});
+
+test('T3b: bin/summon passes --timeoutSec only when --timeout-sec was given', () => {
+  const src = fs.readFileSync(path.resolve(import.meta.dir, '../bin/summon'), 'utf8');
+  expect(src).toMatch(/^TIMEOUT_SEC=""$/m);
+  expect(src).not.toMatch(/^TIMEOUT_SEC="1500"$/m);
+  expect(src).toContain('[[ -n "$TIMEOUT_SEC"    ]] && NODE_ARGS+=(--timeoutSec');
+  // effective value is read back from lib/summon.js output, after provisioning
+  expect(src.indexOf('META=$(node "$ROOT/lib/summon.js"')).toBeLessThan(src.indexOf('TIMEOUT_SEC=$(echo "$META"'));
 });
 
 // --timeout alias tests (new short-form CLI flag)

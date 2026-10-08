@@ -41,7 +41,7 @@ function makeGitRepo() {
 // Run provisionOne for one agent in an isolated runs-root, cwd = a real git repo,
 // and return the parsed result object (includes launchScript, workspace, repo,
 // and timeoutSec when defined).
-function provision(agent, { sid, task = 'test task' }) {
+function provision(agent, { sid, task = 'test task', timeoutSec }) {
   const helperDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wai-helper-'));
   const helper = path.join(helperDir, 'provision.js');
   fs.writeFileSync(
@@ -51,6 +51,7 @@ const result = summon.provisionOne({
   agent: ${JSON.stringify(agent)},
   task: ${JSON.stringify(task)},
   goal: 'test goal',
+  ...(${JSON.stringify(timeoutSec)} !== undefined && { timeoutSec: ${JSON.stringify(timeoutSec)} }),
   cwd: ${JSON.stringify(tmpRepo)},
   isTestSession: true,
 }, ${JSON.stringify(sid)});
@@ -153,6 +154,26 @@ test('[WAI-d] scaled timeout bump is coder-only (doc-agent/planner unaffected)',
   expect(coder.timeoutSec).toBe(2400);
   for (const agent of ['doc-agent', 'planner']) {
     const r = provision(agent, { sid: `wai-d-${agent}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, task: BIG_TASK });
-    expect(r.timeoutSec).toBeUndefined();
+    expect(r.timeoutSec).toBe(1500);
   }
+});
+
+// bin/summon no longer injects --timeoutSec, so lib/summon.js must resolve the
+// effective timeout itself: scaled for coder, 1500 for others, explicit wins.
+test('[WAI-e] coder with no timeout gets the scaled value; wall-clock line shows it', { timeout: TEST_TIMEOUT }, () => {
+  const r = provision('coder', { sid: `wai-e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, task: 'x'.repeat(800) });
+  expect(r.timeoutSec).toBe(1800);
+  const first = JSON.parse(fs.readFileSync(r.inbox, 'utf8').trim().split('\n')[0]);
+  expect(first.body).toContain('its timeout (1800s)');
+});
+
+test('[WAI-f] explicit timeoutSec wins over coder scaling', { timeout: TEST_TIMEOUT }, () => {
+  const r = provision('coder', { sid: `wai-f-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, task: BIG_TASK, timeoutSec: 900 });
+  expect(r.timeoutSec).toBe(900);
+});
+
+test('[WAI-g] non-coder with no timeout gets 1500 in the wall-clock line', { timeout: TEST_TIMEOUT }, () => {
+  const r = provision('planner', { sid: `wai-g-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, task: BIG_TASK });
+  const first = JSON.parse(fs.readFileSync(r.inbox, 'utf8').trim().split('\n')[0]);
+  expect(first.body).toContain('its timeout (1500s)');
 });

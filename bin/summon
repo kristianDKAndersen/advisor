@@ -21,10 +21,10 @@ ALLOWED_TOOLS=""
 ENSEMBLE=""
 MAX_TOOL_CALLS=""
 TOOL_BUDGET=""
-# Default 15 min: long enough for planner/researcher passes; can be overridden
-# with --timeout-sec. tmux-runner.js has a 300s safety net if this is unset,
-# which is too aggressive for non-trivial work — hence the explicit default here.
-TIMEOUT_SEC="1500"
+# Empty unless the caller passes --timeout-sec. lib/summon.js resolves the
+# effective value (coder: scaledCoderTimeout; others: 1500) and we read it back
+# from META below, because tmux-runner.js's 300s fallback is too aggressive.
+TIMEOUT_SEC=""
 REQUIRED_OUTPUT=""
 TUI=""
 NO_TIMELINE=""
@@ -120,6 +120,7 @@ NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
 [[ -n "$SUB_TEAM_MODEL" ]] && NODE_ARGS+=(--sub-team-model "$SUB_TEAM_MODEL")
 [[ -n "$CONTINUES"      ]] && NODE_ARGS+=(--continues      "$CONTINUES")
 META=$(node "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
+TIMEOUT_SEC=$(echo "$META" | node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8')); const s=m.sessions?m.sessions[0]:m; console.log(s.timeoutSec ?? 1500)")
 
 # Parse paths out of the JSON (node one-liner, no deps).
 extract() { echo "$META" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).$1)"; }
