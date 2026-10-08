@@ -52,6 +52,15 @@ async function main() {
   );
 }
 
+// claude-haiku-5-5 prices per request on prompt length: > 100000 tokens uses a
+// separate rate card, so those requests fold into "claude-haiku-5-5:long".
+function modelKey(model, promptTokens) {
+  if (promptTokens > 100000 && model.replace(/-\d{8}$/, '') === 'claude-haiku-5-5') {
+    return 'claude-haiku-5-5:long';
+  }
+  return model;
+}
+
 // Sums usage across transcript lines, deduping by message.id (Claude Code
 // repeats the same message.usage on one JSONL line per content block) and
 // skipping message.model === "<synthetic>" (non-billable synthetic turns).
@@ -99,7 +108,7 @@ function sumUsageFromLines(lines) {
     breakdown.cache_read_input_tokens += cache_read_input_tokens;
     breakdown.cache_creation_input_tokens += (cache_5m + cache_1h);
 
-    const model = inner.model || 'unknown';
+    const model = modelKey(inner.model || 'unknown', input_tokens + cache_read_input_tokens + cache_5m + cache_1h);
     if (!by_model[model]) {
       by_model[model] = {
         input_tokens: 0,
@@ -137,7 +146,7 @@ function sumUsageFromLines(lines) {
         breakdown.cache_read_input_tokens += aCacheRead;
         breakdown.cache_creation_input_tokens += (aCache5m + aCache1h);
 
-        const aModel = it.model || 'unknown';
+        const aModel = modelKey(it.model || 'unknown', aInput + aCacheRead + aCache5m + aCache1h);
         if (!by_model[aModel]) {
           by_model[aModel] = {
             input_tokens: 0,

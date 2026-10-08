@@ -565,3 +565,82 @@ describe('CLI: live cost for an unaccrued sid (never synthesized)', () => {
     expect(r.stderr).toMatch(/no telemetry found for/i);
   });
 });
+
+describe('claude-haiku-5-5 two rate cards', () => {
+  const M = 1_000_000;
+  const full = { input_tokens: M, output_tokens: M, cache_read_input_tokens: M, cache_creation_5m_input_tokens: M, cache_creation_1h_input_tokens: M };
+  const v2 = (by_model, extra = {}) => ({ sid: 'h55', counting: 'dedupe-v3', total_used: 1, breakdown: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 1, cache_creation_input_tokens: 1 }, by_model, ...extra });
+
+  it('plain claude-haiku-5-5 prices at the <=100K card', () => {
+    const p = priceForModel('claude-haiku-5-5');
+    expect([p.input, p.output, p.cache_read, p.cache_creation, p.cache_write_1h]).toEqual([0.10, 0.50, 0.01, 0.125, 0.20]);
+    expect(p.known).toBe(true);
+  });
+  it('claude-haiku-5-5:long resolves to the >100K card, never the plain row', () => {
+    const p = priceForModel('claude-haiku-5-5:long');
+    expect([p.input, p.output, p.cache_read, p.cache_creation, p.cache_write_1h]).toEqual([0.50, 2.50, 0.05, 0.625, 1.00]);
+    expect(p.known).toBe(true);
+  });
+  it('plain id never resolves to the :long row', () => {
+    expect(priceForModel('claude-haiku-5-5').input).toBe(0.10);
+  });
+  it('haiku-4-5 pricing is unchanged (incl. date suffix)', () => {
+    for (const id of ['claude-haiku-4-5', 'claude-haiku-4-5-20251001']) {
+      const p = priceForModel(id);
+      expect([p.input, p.output, p.cache_read, p.cache_creation, p.cache_write_1h]).toEqual([1, 5, 0.10, 1.25, 2]);
+    }
+  });
+  it('by_model plain row: exact dollar math (0.10+0.50+0.01+0.125+0.20 = 0.935)', () => {
+    const n = normalizeEntry(v2({ 'claude-haiku-5-5': full }));
+    expect(n.cost).toBeCloseTo(0.935, 9);
+    expect(n.unpriced).toEqual([]);
+    expect(n.tierUnknown).toBe(false);
+  });
+  it('by_model :long row: exact dollar math (0.50+2.50+0.05+0.625+1.00 = 4.675)', () => {
+    const n = normalizeEntry(v2({ 'claude-haiku-5-5:long': full }));
+    expect(n.cost).toBeCloseTo(4.675, 9);
+    expect(n.unpriced).toEqual([]);
+  });
+  it('mixed session: plain + :long + haiku-4-5 sum per card', () => {
+    const n = normalizeEntry(v2({ 'claude-haiku-5-5': full, 'claude-haiku-5-5:long': full, 'claude-haiku-4-5-20251001': full }));
+    expect(n.cost).toBeCloseTo(0.935 + 4.675 + 9.35, 9);
+    expect(n.tierUnknown).toBe(false);
+  });
+  it('legacy/aggregate row naming haiku-5-5 prices at <=100K card and is flagged', () => {
+    const n = normalizeEntry({ sid: 'leg', model: 'claude-haiku-5-5', input_tokens: M, output_tokens: M, cache_read: M, cache_creation: M, total: 4 * M });
+    expect(n.cost).toBeCloseTo(0.10 + 0.50 + 0.01 + 0.125, 9);
+    expect(n.tierUnknown).toBe(true);
+  });
+  it('legacy row without a model is not flagged and keeps legacy pricing', () => {
+    const n = normalizeEntry({ sid: 'leg2', input_tokens: M, output_tokens: 0, cache_read: 0, cache_creation: 0, total: M });
+    expect(n.cost).toBeCloseTo(3, 9);
+    expect(n.tierUnknown).toBe(false);
+  });
+  it('estimateCost prices haiku-5-5 at the <=100K card; priceForModel marks it tierUnknown', () => {
+    expect(estimateCost(M, M, 0, 0, 'claude-haiku-5-5')).toBeCloseTo(0.60, 9);
+    expect(priceForModel('claude-haiku-5-5').tierUnknown).toBe(true);
+    expect(priceForModel('claude-haiku-5-5:long').tierUnknown).toBeFalsy();
+    expect(priceForModel('claude-haiku-4-5').tierUnknown).toBeFalsy();
+  });
+
+  describe('CLI flag', () => {
+    let stateDir;
+    beforeAll(() => {
+      stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'advisor-cost-h55-test-'));
+      const rows = [
+        { sid: 'legacy-h55', model: 'claude-haiku-5-5', input_tokens: M, output_tokens: 0, cache_read: 0, cache_creation: 0, total: M },
+        v2({ 'claude-haiku-5-5:long': full }, { sid: 'clean-long' }),
+      ];
+      fs.writeFileSync(path.join(stateDir, 'token-usage.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+    });
+    afterAll(() => { fs.rmSync(stateDir, { recursive: true, force: true }); });
+
+    it('prints haiku55-tier-unknown only on the legacy row', () => {
+      const r = spawnSync('bun', [BIN], { encoding: 'utf8', env: { ...process.env, ADVISOR_STATE_DIR: stateDir }, timeout: 15000 });
+      expect(r.status).toBe(0);
+      const lines = r.stdout.split('\n');
+      expect(lines.find(l => l.startsWith('legacy-h55'))).toContain('haiku55-tier-unknown');
+      expect(lines.find(l => l.startsWith('clean-long'))).not.toContain('haiku55-tier-unknown');
+    });
+  });
+});
