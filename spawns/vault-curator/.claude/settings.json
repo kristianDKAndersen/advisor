@@ -7,7 +7,7 @@
       "Edit(~/.advisor/runs/**)",
       "Bash(cd *)",
       "Bash(bin/advisor-vault *)",
-      "Bash(sqlite3 *)",
+      "Bash(sqlite3 -readonly -safe *)",
       "Bash(find *)",
       "Bash(ls *)",
       "Bash(wc *)",

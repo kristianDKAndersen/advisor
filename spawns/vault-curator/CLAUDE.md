@@ -42,7 +42,7 @@ Read file counts, sizes, and modification dates to understand the vault's shape.
 Check the embeddings cache:
 
 ```bash
-sqlite3 ~/.advisor/vault/.cache/vault.db "SELECT count(*) FROM embeddings;" 2>/dev/null || echo "no db"
+sqlite3 -readonly -safe ~/.advisor/vault/.cache/vault.db "SELECT count(*) FROM embeddings;" 2>/dev/null || echo "no db"
 ```
 
 If it has rows, compute cosine similarity with a throwaway script written with Write under `$OUTPUT_DIR` (run it with `python3 -I`, opening the db read-only). `vector` is a BLOB: confirm its dtype in `$ADV/lib/vault.js` before decoding. Report only pairs at or above the threshold. If the script fails, use the text-overlap fallback and say so in the plan.
