@@ -66,7 +66,7 @@ lib/
   vault.js            # native vault writer + FTS5 search (synthesis notes, session notes, lessons)
   hooks/              # PostToolUse worker hooks (worker-trace.js, worker-inbox-poll.sh, worker-auto-close.sh) — opt-in via ADVISOR_WORKER_HOOKS; branch-guard.js (coder-only PreToolUse)
 adapter/
-  intelligence-map.json  # 7-band tier→model+reasoning manifest used by --intelligence flag (haiku-4-5 → sonnet-4-6 → opus-4-8 → fable-5 at [95,100])
+  intelligence-map.json  # 7-band tier→model+reasoning manifest used by --intelligence flag (haiku-5-5 → sonnet-5-5 → opus-5-5, max reasoning at [95,100])
 spawns/
   brainstormer/       # (each contains CLAUDE.md that defines the worker's role)
   browser/

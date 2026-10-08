@@ -192,3 +192,64 @@ test('stop-telemetry: transcript over 1000 lines is counted in full', () => {
   const row = runHook(tmpDir, transcriptPath);
   expect(row.total_used).toBe(1200 * 2);
 });
+
+function haikuLine(id, model, usage) {
+  return JSON.stringify({ message: { role: 'assistant', id, model, usage } });
+}
+
+test('stop-telemetry: haiku-5-5 prompt <=100000 stays on the plain key; >100000 goes to :long (boundary)', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  fs.writeFileSync(transcriptPath, [
+    haikuLine('h_below', 'claude-haiku-5-5', { input_tokens: 50000, output_tokens: 1, cache_read_input_tokens: 49999 }),
+    haikuLine('h_at', 'claude-haiku-5-5', { input_tokens: 40000, output_tokens: 2, cache_read_input_tokens: 30000, cache_creation: { ephemeral_5m_input_tokens: 20000, ephemeral_1h_input_tokens: 10000 } }),
+    haikuLine('h_above', 'claude-haiku-5-5', { input_tokens: 40000, output_tokens: 4, cache_read_input_tokens: 30000, cache_creation: { ephemeral_5m_input_tokens: 20000, ephemeral_1h_input_tokens: 10001 } }),
+  ].join('\n') + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(Object.keys(row.by_model).sort()).toEqual(['claude-haiku-5-5', 'claude-haiku-5-5:long']);
+  expect(row.by_model['claude-haiku-5-5'].input_tokens).toBe(90000);
+  expect(row.by_model['claude-haiku-5-5'].output_tokens).toBe(3);
+  expect(row.by_model['claude-haiku-5-5'].cache_creation_1h_input_tokens).toBe(10000);
+  expect(row.by_model['claude-haiku-5-5:long']).toEqual({
+    input_tokens: 40000, output_tokens: 4, cache_read_input_tokens: 30000,
+    cache_creation_5m_input_tokens: 20000, cache_creation_1h_input_tokens: 10001,
+  });
+  // Session totals unchanged by the split.
+  expect(row.breakdown.input_tokens).toBe(130000);
+  expect(row.total_used).toBe(50000 + 1 + 49999 + 40000 + 2 + 30000 + 30000 + 40000 + 4 + 30000 + 30001);
+});
+
+test('stop-telemetry: dated haiku-5-5 snapshot normalizes; repeated message.id counted once', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  const big = haikuLine('h_dated', 'claude-haiku-5-5-20260101', { input_tokens: 100001, output_tokens: 3 });
+  fs.writeFileSync(transcriptPath, [big, big].join('\n') + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(Object.keys(row.by_model)).toEqual(['claude-haiku-5-5:long']);
+  expect(row.by_model['claude-haiku-5-5:long'].input_tokens).toBe(100001);
+});
+
+test('stop-telemetry: claude-haiku-4-5 and other models are never split, even with huge prompts', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  fs.writeFileSync(transcriptPath, [
+    haikuLine('a', 'claude-haiku-4-5', { input_tokens: 500000, output_tokens: 1 }),
+    haikuLine('b', 'claude-haiku-4-5-20251001', { input_tokens: 500000, output_tokens: 1 }),
+    haikuLine('c', 'claude-sonnet-5', { input_tokens: 500000, output_tokens: 1 }),
+    haikuLine('d', 'claude-opus-5-5', { input_tokens: 500000, output_tokens: 1 }),
+  ].join('\n') + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(Object.keys(row.by_model).sort()).toEqual(['claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'claude-opus-5-5', 'claude-sonnet-5']);
+});
+
+test('stop-telemetry: haiku-5-5 advisor_message iteration is split on its own prompt size', () => {
+  const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+  fs.writeFileSync(transcriptPath, haikuLine('x', 'claude-sonnet-5', {
+    input_tokens: 10, output_tokens: 1,
+    iterations: [{ type: 'advisor_message', model: 'claude-haiku-5-5', input_tokens: 100001, output_tokens: 2 }],
+  }) + '\n');
+
+  const row = runHook(tmpDir, transcriptPath);
+  expect(row.by_model['claude-haiku-5-5:long'].input_tokens).toBe(100001);
+  expect(row.by_model['claude-haiku-5-5']).toBeUndefined();
+});

@@ -20,6 +20,8 @@ const telemetryBackfill = require('../lib/telemetry-backfill');
 
 // Price per million tokens, USD, by exact model id (longest-prefix match so
 // date-suffixed ids like claude-haiku-4-5-20251001 resolve to claude-haiku-4-5).
+// claude-haiku-5-5 has two rate cards chosen per request by prompt size: the plain row is
+// prompt <= 100K, the ':long' row (by_model key written by telemetry) is prompt > 100K.
 // cache_creation = 5m cache write rate (kept for back-compat with the old field name).
 // cache_write_1h = 1h TTL cache write rate (distinct from the 5m rate; do not conflate).
 const PRICE_TABLE = {
@@ -32,6 +34,8 @@ const PRICE_TABLE = {
   'claude-sonnet-5':   { input: 2,  output: 10, cache_read: 0.20, cache_creation: 2.5,  cache_write_1h: 4  },
   'claude-sonnet-4-6': { input: 3,  output: 15, cache_read: 0.30, cache_creation: 3.75, cache_write_1h: 6  },
   'claude-haiku-4-5':  { input: 1,  output: 5,  cache_read: 0.10, cache_creation: 1.25, cache_write_1h: 2  },
+  'claude-haiku-5-5':  { input: 0.10, output: 0.50, cache_read: 0.01, cache_creation: 0.125, cache_write_1h: 0.20 },
+  'claude-haiku-5-5:long': { input: 0.50, output: 2.50, cache_read: 0.05, cache_creation: 0.625, cache_write_1h: 1.00 },
   'claude-fable-5-1':  { input: 10, output: 50, cache_read: 0.25, cache_creation: 12.5, cache_write_1h: 20 },
   'claude-fable-5':    { input: 10, output: 50, cache_read: 1,    cache_creation: 12.5, cache_write_1h: 20 },
 };
@@ -41,11 +45,15 @@ const DEFAULT_PRICE = PRICE_TABLE['claude-sonnet-5-5'];
 // Longest key first so e.g. "claude-opus-5-5" is tried before "claude-opus-5".
 const PRICE_KEYS = Object.keys(PRICE_TABLE).sort((a, b) => b.length - a.length);
 
+// Rows whose per-request prompt size is invisible must price these at the <=100K card and be flagged.
+const TIER_SPLIT_KEYS = new Set(['claude-haiku-5-5']);
+const HAIKU55_FLAG = 'haiku55-tier-unknown';
+
 function priceForModel(modelId) {
   if (modelId) {
     for (const key of PRICE_KEYS) {
       if (modelId === key || modelId.startsWith(key + '-')) {
-        return { ...PRICE_TABLE[key], known: true };
+        return { ...PRICE_TABLE[key], known: true, tierUnknown: TIER_SPLIT_KEYS.has(key) };
       }
     }
   }
@@ -78,6 +86,18 @@ function lastPerSid(entries) {
     map.set(e.sid, e);
   }
   return [...map.values()];
+}
+
+// Sums per-model cost over a by_model map; unknown model ids are returned as unpriced.
+function priceByModel(byModel) {
+  let cost = 0;
+  const unpriced = [];
+  for (const [modelId, u] of Object.entries(byModel)) {
+    const r = costForModelUsage(modelId, u);
+    cost += r.cost;
+    if (!r.known) unpriced.push(modelId);
+  }
+  return { cost, unpriced };
 }
 
 // Prices one by_model entry's five fields against its model's rates.
@@ -120,17 +140,17 @@ function normalizeEntry(e) {
 
   let cost;
   let unpriced = [];
+  let tierUnknown = false;
   if (isV2 && e.by_model && Object.keys(e.by_model).length > 0) {
-    cost = 0;
-    for (const [modelId, u] of Object.entries(e.by_model)) {
-      const r = costForModelUsage(modelId, u);
-      cost += r.cost;
-      if (!r.known) unpriced.push(modelId);
-    }
+    ({ cost, unpriced } = priceByModel(e.by_model));
   } else {
     // legacy shape (and v2 rows missing by_model): price breakdown totals at
     // the legacy default rate — no model is available to resolve per-model rates.
-    const legacyRate = { input: 3, output: 15, cache_read: 0.30, cache_creation: 3.75 };
+    // An aggregate row that does name a split-card model (haiku-5-5) is priced at
+    // that model's <=100K card and flagged: per-request size is not visible here.
+    const named = e.model ? priceForModel(e.model) : null;
+    tierUnknown = !!(named && named.tierUnknown);
+    const legacyRate = tierUnknown ? named : { input: 3, output: 15, cache_read: 0.30, cache_creation: 3.75 };
     cost =
       (base.input_tokens / 1_000_000) * legacyRate.input +
       (base.output_tokens / 1_000_000) * legacyRate.output +
@@ -145,6 +165,7 @@ function normalizeEntry(e) {
     cost,
     legacy: !isV2,
     unpriced,
+    tierUnknown,
   };
 }
 
@@ -224,6 +245,7 @@ function buildRows({ stateDirectory, sidFilter, lastN, byAgent } = {}) {
       cost: n.cost,
       legacy: n.legacy,
       unpriced: n.unpriced,
+      tierUnknown: n.tierUnknown,
     };
   });
 
@@ -235,7 +257,7 @@ function buildRows({ stateDirectory, sidFilter, lastN, byAgent } = {}) {
     for (const r of rows) {
       const agent = sessionMap.get(r.sid) || 'unknown';
       if (!agents.has(agent)) {
-        agents.set(agent, { agent, input: 0, output: 0, cache_read: 0, cache_creation: 0, cost: 0, count: 0, legacyCount: 0, unpriced: [] });
+        agents.set(agent, { agent, input: 0, output: 0, cache_read: 0, cache_creation: 0, cost: 0, count: 0, legacyCount: 0, unpriced: [], tierUnknown: false });
       }
       const a = agents.get(agent);
       a.input       += r.input;
@@ -244,6 +266,7 @@ function buildRows({ stateDirectory, sidFilter, lastN, byAgent } = {}) {
       a.cache_creation += r.cache_creation;
       a.cost        += r.cost;
       if (r.legacy) a.legacyCount++;
+      if (r.tierUnknown) a.tierUnknown = true;
       for (const m of r.unpriced) if (!a.unpriced.includes(m)) a.unpriced.push(m);
       a.count++;
     }
@@ -272,6 +295,7 @@ function rowFlags(r) {
   const flags = [];
   if (r.legacy) flags.push('legacy(~2.14x over-counted, cost not adjusted)');
   for (const m of r.unpriced || []) flags.push(`unpriced:${m}`);
+  if (r.tierUnknown) flags.push(HAIKU55_FLAG);
   return flags.length ? '  ' + flags.join(' ') : '';
 }
 
@@ -292,6 +316,7 @@ function printTable({ rows, noMap }, byAgent) {
       const flags = [];
       if (r.legacyCount) flags.push(`legacy(${r.legacyCount}, ~2.14x over-counted, cost not adjusted)`);
       for (const m of r.unpriced || []) flags.push(`unpriced:${m}`);
+      if (r.tierUnknown) flags.push(HAIKU55_FLAG);
       console.log(pad(r.agent, 16) + padNum(fmt(r.input), 12) + padNum(fmt(r.output), 12) + padNum(fmt(r.cache_read), 12) + padNum(fmt(r.cache_creation), 12) + padNum(fmtCost(r.cost), 12) + r.count + (flags.length ? '  ' + flags.join(' ') : ''));
     }
     const totInput = rows.reduce((s, r) => s + r.input, 0);
@@ -316,8 +341,8 @@ function printTable({ rows, noMap }, byAgent) {
     console.log('─'.repeat(92));
     console.log(pad('TOTAL', 38) + padNum(fmt(totInput), 12) + padNum(fmt(totOutput), 12) + padNum(fmt(totRead), 12) + padNum(fmt(totWr), 12) + fmtCost(totCost));
   }
-  console.log('\nPricing (per MTok, input/output/cache_read/cache_write_5m/cache_write_1h): haiku-4-5 1/5/0.10/1.25/2  sonnet-4-6 3/15/0.30/3.75/6  sonnet-5(.5) 2/10/0.20/2.5/4  opus-5(.5)/4-8/4-7/4-6 4-5/20-25/0.20-0.50/5-6.25/8-10  fable-5(.1) 10/50/0.25-1/12.5/20');
-  console.log('cr=cache_read  cw=cache_creation(5m write)  default for unknown model: sonnet-5-5, flagged unpriced:<model>');
+  console.log('\nPricing (per MTok, input/output/cache_read/cache_write_5m/cache_write_1h): haiku-5-5 0.10/0.50/0.01/0.125/0.20 (prompt<=100K; >100K 0.50/2.50/0.05/0.625/1.00)  haiku-4-5 1/5/0.10/1.25/2  sonnet-4-6 3/15/0.30/3.75/6  sonnet-5(.5) 2/10/0.20/2.5/4  opus-5(.5)/4-8/4-7/4-6 4-5/20-25/0.20-0.50/5-6.25/8-10  fable-5(.1) 10/50/0.25-1/12.5/20');
+  console.log('cr=cache_read  cw=cache_creation(5m write)  default for unknown model: sonnet-5-5, flagged unpriced:<model>; haiku55-tier-unknown = aggregate row priced at the <=100K card, may under-count up to 5x');
   console.log('legacy = pre-dedupe-v2 row, no model; tokens over-counted ~2.14x median; cost NOT adjusted (priced at the legacy default rate)');
 }
 
@@ -374,10 +399,13 @@ function resolveRunSidForUuid(stDir, uuid) {
 
 function printLiveRow(runSid, live, claudeUuid) {
   const b = live.breakdown;
-  const cost = estimateCost(b.input_tokens, b.output_tokens, b.cache_read_input_tokens, b.cache_creation_input_tokens, null);
+  const priced = live.by_model && Object.keys(live.by_model).length > 0
+    ? priceByModel(live.by_model)
+    : { cost: estimateCost(b.input_tokens, b.output_tokens, b.cache_read_input_tokens, b.cache_creation_input_tokens, null), unpriced: [] };
+  const flags = priced.unpriced.map(m => `unpriced:${m}`);
   console.log(pad('SID', 38) + pad('INPUT', 12) + pad('OUTPUT', 12) + pad('CACHE_READ', 12) + pad('CACHE_WR', 12) + 'EST COST');
   console.log('─'.repeat(92));
-  console.log(pad(runSid, 38) + padNum(fmt(b.input_tokens), 12) + padNum(fmt(b.output_tokens), 12) + padNum(fmt(b.cache_read_input_tokens), 12) + padNum(fmt(b.cache_creation_input_tokens), 12) + fmtCost(cost));
+  console.log(pad(runSid, 38) + padNum(fmt(b.input_tokens), 12) + padNum(fmt(b.output_tokens), 12) + padNum(fmt(b.cache_read_input_tokens), 12) + padNum(fmt(b.cache_creation_input_tokens), 12) + fmtCost(priced.cost) + (flags.length ? '  ' + flags.join(' ') : ''));
   if (claudeUuid && claudeUuid !== runSid) {
     console.log(`(claude session: ${claudeUuid})`);
   }
@@ -404,6 +432,8 @@ The session-map writer (worker-session-map hook) must ship first.
 
 Pricing (per million tokens; cache_write_5m / cache_write_1h are separate rates):
   Model                        input   output  cache_read  cache_write_5m  cache_write_1h
+  claude-haiku-5-5             $0.10   $0.50   $0.01       $0.125          $0.20   (prompt <= 100K)
+  claude-haiku-5-5:long        $0.50   $2.50   $0.05       $0.625          $1      (prompt > 100K; by_model key from telemetry)
   claude-haiku-4-5             $1      $5      $0.10       $1.25           $2
   claude-sonnet-4-6            $3      $15     $0.30       $3.75           $6
   claude-sonnet-5(.5)          $2      $10     $0.20       $2.50           $4

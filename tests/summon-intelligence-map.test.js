@@ -9,26 +9,26 @@ import { resolveIntelligence } from '../lib/summon.js';
 // Band 1: haiku low [0, 29]
 test('score 0 resolves to haiku low band', () => {
   const r = resolveIntelligence(0);
-  expect(r.model).toBe('claude-haiku-4-5-20251001');
+  expect(r.model).toBe('claude-haiku-5-5');
   expect(r.reasoning).toBe('low');
 });
 
 test('score 29 resolves to haiku low band (upper boundary)', () => {
   const r = resolveIntelligence(29);
-  expect(r.model).toBe('claude-haiku-4-5-20251001');
+  expect(r.model).toBe('claude-haiku-5-5');
   expect(r.reasoning).toBe('low');
 });
 
 // Band 2: haiku high [30, 49]
 test('score 30 resolves to haiku high band (lower boundary)', () => {
   const r = resolveIntelligence(30);
-  expect(r.model).toBe('claude-haiku-4-5-20251001');
+  expect(r.model).toBe('claude-haiku-5-5');
   expect(r.reasoning).toBe('high');
 });
 
 test('score 49 resolves to haiku high band (upper boundary)', () => {
   const r = resolveIntelligence(49);
-  expect(r.model).toBe('claude-haiku-4-5-20251001');
+  expect(r.model).toBe('claude-haiku-5-5');
   expect(r.reasoning).toBe('high');
 });
 
@@ -124,4 +124,12 @@ test('score -1 clamps to the 0 band instead of throwing', () => {
 
 test('non-numeric score still throws RangeError mentioning [0,100]', () => {
   expect(() => resolveIntelligence('abc')).toThrow(/\[0,100\]/);
+});
+
+// Validator: no band should reference a haiku-4 model
+test('no band references a haiku-4 model', () => {
+  for (let score = 0; score <= 100; score++) {
+    const r = resolveIntelligence(score);
+    expect(r.model).not.toMatch(/haiku-4/);
+  }
 });
