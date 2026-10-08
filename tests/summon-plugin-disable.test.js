@@ -25,7 +25,9 @@ const agentDir = path.join(ADVISOR_ROOT, 'spawns', AGENT_NAME);
 
 const spawnsDir = path.join(ADVISOR_ROOT, 'spawns');
 for (const entry of fs.readdirSync(spawnsDir)) {
-  if (entry.startsWith('test-plugins-')) {
+  // Only stale dirs: a concurrent suite run in this checkout owns fresh ones.
+  const ts = Number(entry.slice('test-plugins-'.length));
+  if (entry.startsWith('test-plugins-') && !(TS - ts < 600000)) {
     fs.rmSync(path.join(spawnsDir, entry), { recursive: true, force: true });
   }
 }
