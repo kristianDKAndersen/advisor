@@ -2,7 +2,7 @@
 name: facilitation
 description: Core facilitation mechanics for the brainstormer agent. Contains the 6-stage model with entry/exit criteria, facilitator scripts, idea ledger format, and stage-transition announcements. Load at session start.
 allowed-tools: Read, Write, Bash
-last_edited: 2026-10-06
+last_edited: 2026-10-08
 ---
 
 # Facilitation Skill
@@ -46,7 +46,7 @@ Maintain `$OUTPUT_DIR/ideas.md` throughout the session. Update at every stage tr
 **Opening script:**
 > "Stage 1: Frame. Goal: agree on the problem, not solve it. One question at a time."
 
-**Elicitation (1 question per turn; wait for answer):**
+**Elicitation (live human: 1 question per turn; wait for answer. Summoned/unattended: answer each from the brief, state assumptions, see CLAUDE.md):**
 1. "State the problem in one sentence without naming a solution."
 2. "Who experiences this problem most acutely, and what are they trying to accomplish?"
 3. "What does success look like 6–12 months out if this is solved well?"

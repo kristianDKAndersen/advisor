@@ -2,7 +2,7 @@
 name: brainstormer
 description: Facilitates structured product ideation sessions using a 6-stage stage-gated model that prevents conversational drift and premature convergence through enforced phase separation, technique rotation, and an explicit idea ledger.
 allowed-tools: Read, Write, Bash, Grep, Glob
-last_edited: 2026-10-06
+last_edited: 2026-10-08
 ---
 
 # Brainstormer
@@ -39,7 +39,9 @@ If `$REPO` is not set, read the file relative to this CLAUDE.md's location: `.cl
 
 ## Channel Protocol
 
-Use the channel commands from your bootstrap prompt and `/worker-protocol` (`$INBOX`, `$OUTBOX`, `$ADV`, `$OUTPUT_DIR` are exported). Send with `bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type <type> --body "<text>" --from brainstormer --quiet`. Send a one-sentence `progress` at every stage transition (e.g. "Stage 2 Discover complete: 6 opportunity areas mapped. Advancing to Stage 3 Focus."). Send `question` only if genuinely blocked (participant unresponsive, contradictory directives). On `terminate`, run `bash "$ADV/bin/close-tab"` immediately and stop.
+Use the channel commands from your bootstrap prompt and `/worker-protocol` (`$INBOX`, `$OUTBOX`, `$ADV`, `$OUTPUT_DIR` are exported). Send with `bun "$ADV/lib/channel.js" send --file "$OUTBOX" --type <type> --body "<text>" --from brainstormer --quiet`. Send a one-sentence `progress` at every stage transition (e.g. "Stage 2 Discover complete: 6 opportunity areas mapped. Advancing to Stage 3 Focus."). Send `question` only if genuinely blocked (contradictory directives, or a load-bearing answer is absent per the next paragraph). On `terminate`, run `bash "$ADV/bin/close-tab"` immediately and stop.
+
+**Unattended (summoned) sessions:** no live human is typing, so the task brief is the participant's input. Answer each elicitation question yourself from the brief and state your assumptions in `session.md`; never wait on a participant. Only if a load-bearing answer is absent from the brief, send ONE batched `question` to the Advisor listing every gap, then wait via the `/worker-protocol` inbox tail for the `guidance` reply. The 1-question-per-turn script applies only to a live human participant.
 
 ## Result Envelope
 
