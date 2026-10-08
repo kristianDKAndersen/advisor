@@ -644,3 +644,48 @@ describe('claude-haiku-5-5 two rate cards', () => {
     });
   });
 });
+
+describe('CLI: live row prices per model from by_model', () => {
+  const CLAUDE_UUID = 'ffff6666-ffff-6666-ffff-666666666666';
+  const RUN_SID = '1790000002-b0b002';
+  let stateDir, runsRoot, projectsDir, tmpDir;
+
+  beforeAll(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'advisor-cost-live-model-'));
+    stateDir = path.join(tmpDir, 'state');
+    runsRoot = path.join(tmpDir, 'runs');
+    projectsDir = path.join(tmpDir, 'projects');
+    fs.mkdirSync(stateDir, { recursive: true });
+
+    const workspace = path.join(runsRoot, RUN_SID, 'workspace');
+    fs.mkdirSync(path.join(runsRoot, RUN_SID), { recursive: true });
+    fs.writeFileSync(path.join(runsRoot, RUN_SID, 'meta.json'), JSON.stringify({ workspace }));
+    const projDir = path.join(projectsDir, workspace.replace(/[/.]/g, '-'));
+    fs.mkdirSync(projDir, { recursive: true });
+    // Short haiku request (<=100K prompt) plus a long one (>100K prompt): by_model gets both keys.
+    fs.writeFileSync(path.join(projDir, `${CLAUDE_UUID}.jsonl`), [
+      { message: { role: 'assistant', model: 'claude-haiku-5-5', usage: { input_tokens: 10000, output_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } },
+      { message: { role: 'assistant', model: 'claude-haiku-5-5', usage: { input_tokens: 200000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } },
+    ].map(l => JSON.stringify(l)).join('\n') + '\n');
+
+    fs.writeFileSync(path.join(stateDir, 'session-map.jsonl'),
+      JSON.stringify({ run_sid: RUN_SID, claude_uuid: CLAUDE_UUID, agent: 'coder' }) + '\n');
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test('live haiku-5-5 sid is priced at haiku rates, not the sonnet default', () => {
+    const r = spawnSync('bun', [BIN, '--sid', RUN_SID], {
+      encoding: 'utf8',
+      env: { ...process.env, ADVISOR_STATE_DIR: stateDir, ADVISOR_RUNS_ROOT: runsRoot, ADVISOR_CLAUDE_PROJECTS_DIR: projectsDir },
+      timeout: 15000,
+    });
+    expect(r.status).toBe(0);
+    // haiku: 10K in @0.10 + 1K out @0.50 + 200K in @0.50 (:long) = 0.1015. Sonnet default would be 0.4300.
+    expect(r.stdout).toContain('$0.1015');
+    expect(r.stdout).not.toContain('$0.4300');
+    expect(r.stdout).not.toContain('unpriced:');
+  });
+});

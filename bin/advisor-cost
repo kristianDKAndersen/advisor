@@ -88,6 +88,18 @@ function lastPerSid(entries) {
   return [...map.values()];
 }
 
+// Sums per-model cost over a by_model map; unknown model ids are returned as unpriced.
+function priceByModel(byModel) {
+  let cost = 0;
+  const unpriced = [];
+  for (const [modelId, u] of Object.entries(byModel)) {
+    const r = costForModelUsage(modelId, u);
+    cost += r.cost;
+    if (!r.known) unpriced.push(modelId);
+  }
+  return { cost, unpriced };
+}
+
 // Prices one by_model entry's five fields against its model's rates.
 function costForModelUsage(modelId, u) {
   const r = priceForModel(modelId);
@@ -130,12 +142,7 @@ function normalizeEntry(e) {
   let unpriced = [];
   let tierUnknown = false;
   if (isV2 && e.by_model && Object.keys(e.by_model).length > 0) {
-    cost = 0;
-    for (const [modelId, u] of Object.entries(e.by_model)) {
-      const r = costForModelUsage(modelId, u);
-      cost += r.cost;
-      if (!r.known) unpriced.push(modelId);
-    }
+    ({ cost, unpriced } = priceByModel(e.by_model));
   } else {
     // legacy shape (and v2 rows missing by_model): price breakdown totals at
     // the legacy default rate — no model is available to resolve per-model rates.
@@ -392,10 +399,13 @@ function resolveRunSidForUuid(stDir, uuid) {
 
 function printLiveRow(runSid, live, claudeUuid) {
   const b = live.breakdown;
-  const cost = estimateCost(b.input_tokens, b.output_tokens, b.cache_read_input_tokens, b.cache_creation_input_tokens, null);
+  const priced = live.by_model && Object.keys(live.by_model).length > 0
+    ? priceByModel(live.by_model)
+    : { cost: estimateCost(b.input_tokens, b.output_tokens, b.cache_read_input_tokens, b.cache_creation_input_tokens, null), unpriced: [] };
+  const flags = priced.unpriced.map(m => `unpriced:${m}`);
   console.log(pad('SID', 38) + pad('INPUT', 12) + pad('OUTPUT', 12) + pad('CACHE_READ', 12) + pad('CACHE_WR', 12) + 'EST COST');
   console.log('─'.repeat(92));
-  console.log(pad(runSid, 38) + padNum(fmt(b.input_tokens), 12) + padNum(fmt(b.output_tokens), 12) + padNum(fmt(b.cache_read_input_tokens), 12) + padNum(fmt(b.cache_creation_input_tokens), 12) + fmtCost(cost));
+  console.log(pad(runSid, 38) + padNum(fmt(b.input_tokens), 12) + padNum(fmt(b.output_tokens), 12) + padNum(fmt(b.cache_read_input_tokens), 12) + padNum(fmt(b.cache_creation_input_tokens), 12) + fmtCost(priced.cost) + (flags.length ? '  ' + flags.join(' ') : ''));
   if (claudeUuid && claudeUuid !== runSid) {
     console.log(`(claude session: ${claudeUuid})`);
   }
