@@ -454,3 +454,253 @@ test('mergeReport: first run is written unchanged; later runs append under a "##
   expect(third).toContain('run two')
   expect(third).toContain('run three')
 })
+
+// ─── Feed watcher ──────────────────────────────────────────────────────
+
+import {
+  parseFeedsConfig,
+  decodeEntities,
+  parseRss,
+  parseAtom,
+  parseKev,
+  parseGhsa,
+  parseFeed,
+  isFeedDue,
+  diffFeed,
+  recordFailure,
+  isNotifyWorthy,
+  annotateItem,
+  mergeRecent,
+  buildFeedToast,
+  buildFeedNotification,
+  buildStartupToast,
+  feedLockPath,
+  formatRecentItems,
+  formatFeedStatus,
+} from '../hooks/register.js'
+
+const RSS = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Chan</title><link>https://x.example/</link>
+<atom:link href="https://x.example/feed" rel="self"/>
+<item><title><![CDATA[Fix for <b>Next.js</b> & friends]]></title><link>https://x.example/a?x=1&amp;y=2</link><guid isPermaLink="false">g-1</guid><pubDate>Thu, 23 Oct 2026 08:00:00 GMT</pubDate><description>&lt;p&gt;Body &amp;amp; more &#39;q&#39; &#x41;&lt;/p&gt;</description><dc:creator>x</dc:creator></item>
+<item rdf:about="z"><media:title>wrong</media:title><title>Second &quot;item&quot;</title><atom:link href="https://self/" rel="self"/><link>javascript:alert(1)</link><guid>g-2</guid></item>
+<item><title>Third</title><atom:link href="https://self/" rel="self"/><link>https://x.example/c</link></item>
+<item><title>Truncated here`
+
+const ATOM = `<feed xmlns="http://www.w3.org/2005/Atom"><title>S</title><link href="https://socket.example/" rel="self"/>
+<entry><title type="html">A &amp; B</title><link rel="alternate" href="https://socket.example/blog/a"/><id>tag:1</id><updated>2026-10-23T08:00:00Z</updated><summary><![CDATA[<p>npm package <b>axios</b></p>]]></summary></entry>
+<entry><title>Second</title><link href='https://socket.example/blog/b'/><id>tag:2</id><updated>2026-10-22T08:00:00Z</updated></entry></feed>`
+
+const KEV = JSON.stringify({
+  vulnerabilities: [
+    { cveID: 'CVE-2026-1', vendorProject: 'Acme', product: 'Widget', vulnerabilityName: 'Acme Widget RCE', dateAdded: '2026-10-01', shortDescription: 'd' },
+    { cveID: 'CVE-2026-2', vendorProject: 'Beta', product: 'Gadget', vulnerabilityName: 'Beta Gadget XSS', dateAdded: '2026-10-20' },
+    { bad: 1 },
+  ],
+})
+
+const GHSA = JSON.stringify([
+  { ghsa_id: 'GHSA-aaaa', severity: 'critical', summary: 'Malicious code in evil-pkg', html_url: 'https://github.com/advisories/GHSA-aaaa', published_at: '2026-10-23T00:00:00Z', vulnerabilities: [{ package: { ecosystem: 'npm', name: 'evil-pkg' } }] },
+  { ghsa_id: 'GHSA-bbbb', severity: 'high', summary: 'x', html_url: 'javascript:1', vulnerabilities: null },
+])
+
+test('decodeEntities: named, decimal and hex entities in one pass; unknown entities stay', () => {
+  expect(decodeEntities('&lt;a&gt; &amp;amp; &quot;q&quot; &#39;s&#39; &#x41;&#65; &bogus;')).toBe('<a> &amp; "q" \'s\' AA &bogus;')
+})
+
+test('parseRss: CDATA, entities, namespaces, tag stripping, http(s)-only links, truncated tail skipped', () => {
+  const items = parseRss(RSS)
+  expect(items.length).toBe(3)
+  expect(items[0].title).toBe('Fix for Next.js & friends')
+  expect(items[0].link).toBe('https://x.example/a?x=1&y=2')
+  expect(items[0].key).toBe('g-1')
+  expect(items[0].date).toBe('Thu, 23 Oct 2026 08:00:00 GMT')
+  expect(items[0].text).toBe("Body &amp; more 'q' A")
+  expect(items[1].title).toBe('Second "item"')
+  expect(items[1].link).toBe('')
+  expect(items[1].key).toBe('g-2')
+  expect(items[2].link).toBe('https://x.example/c')
+  expect(items[2].key).toBe('https://x.example/c')
+})
+
+test('parseAtom: entry title/link[href]/id/updated/summary, rel=alternate, single-quoted href', () => {
+  const items = parseAtom(ATOM)
+  expect(items.length).toBe(2)
+  expect(items[0]).toMatchObject({ title: 'A & B', link: 'https://socket.example/blog/a', key: 'tag:1', date: '2026-10-23T08:00:00Z', text: 'npm package axios' })
+  expect(items[1].link).toBe('https://socket.example/blog/b')
+})
+
+test('parseKev and parseGhsa: field mapping and untrusted links', () => {
+  const kev = parseKev(KEV)
+  expect(kev.length).toBe(2)
+  expect(kev[1]).toMatchObject({
+    key: 'CVE-2026-2',
+    title: 'KEV: CVE-2026-2 Beta Gadget - Beta Gadget XSS',
+    link: 'https://nvd.nist.gov/vuln/detail/CVE-2026-2',
+    date: '2026-10-20',
+  })
+  const ghsa = parseGhsa(GHSA)
+  expect(ghsa.length).toBe(2)
+  expect(ghsa[0]).toMatchObject({ key: 'GHSA-aaaa', title: 'critical: Malicious code in evil-pkg', link: 'https://github.com/advisories/GHSA-aaaa' })
+  expect(ghsa[0].text).toContain('npm evil-pkg')
+  expect(ghsa[1].link).toBe('')
+  expect(matchesWatchlist({ title: ghsa[0].title, products: [ghsa[0].text] }, ['evil-pkg'])).toBe(true)
+})
+
+test('parsers: malformed or wrong-typed input yields [] and never throws', () => {
+  for (const bad of [null, undefined, 42, '', '<<<>>>', '<rss><item><title>x', 'not json', '{"vulnerabilities":"x"}', '{"a":1}', '[1,null,"x"]']) {
+    expect(parseRss(bad as never)).toEqual([])
+    expect(parseAtom(bad as never)).toEqual([])
+    expect(parseKev(bad as never)).toEqual([])
+    expect(parseGhsa(bad as never)).toEqual([])
+  }
+  expect(parseFeed('nope', RSS)).toEqual([])
+})
+
+test('parseFeed: newest-first order, 200-item window, title cap', () => {
+  expect(parseFeed('kev-json', KEV)[0].key).toBe('CVE-2026-2')
+  const asc = `<rss><channel>${[1, 2, 3].map(n => `<item><title>t${n}</title><guid>${n}</guid><pubDate>2026-10-0${n}T00:00:00Z</pubDate></item>`).join('')}</channel></rss>`
+  expect(parseFeed('rss', asc).map(i => i.key)).toEqual(['3', '2', '1'])
+  const big = `<rss><channel>${Array.from({ length: 300 }, (_, n) => `<item><title>${'t'.repeat(300)}</title><guid>${n}</guid></item>`).join('')}</channel></rss>`
+  const win = parseFeed('rss', big)
+  expect(win.length).toBe(200)
+  expect(win[0].title.length <= 200).toBe(true)
+  expect(win[0].key).toBe('0')
+})
+
+test('parseFeedsConfig: keeps valid entries, drops bad format/notify/url/interval/duplicate ids', () => {
+  const ok = { id: 'a', name: 'A', url: 'https://a.example/feed.xml', format: 'rss', intervalMin: 60, notify: 'watchlist' }
+  const cfg = parseFeedsConfig(JSON.stringify([
+    ok,
+    { ...ok, id: 'b', format: 'yaml' },
+    { ...ok, id: 'c', notify: 'sometimes' },
+    { ...ok, id: 'd', url: 'file:///etc/passwd' },
+    { ...ok, id: 'e', intervalMin: 0 },
+    { ...ok, id: 'a' },
+    { ...ok, id: 'f', url: 'https://api.github.com/advisories?type=malware&per_page=30', format: 'ghsa-json' },
+    null,
+  ]))
+  expect(cfg.map(f => f.id)).toEqual(['a', 'f'])
+  expect(parseFeedsConfig('garbage')).toEqual([])
+  expect(parseFeedsConfig('{}')).toEqual([])
+})
+
+test('isFeedDue: never fetched is due; interval minus 60s slack', () => {
+  const feed = { id: 'a', intervalMin: 60 }
+  expect(isFeedDue(feed, undefined, NOW)).toBe(true)
+  expect(isFeedDue(feed, { failures: 1 }, NOW)).toBe(true)
+  expect(isFeedDue(feed, { lastFetched: NOW - 30 * 60000 }, NOW)).toBe(false)
+  expect(isFeedDue(feed, { lastFetched: NOW - 58 * 60000 }, NOW)).toBe(false)
+  expect(isFeedDue(feed, { lastFetched: NOW - 60 * 60000 + 30000 }, NOW)).toBe(true)
+})
+
+const mk = (...keys: string[]) => keys.map(key => ({ key, title: 't' + key, link: '', date: '', text: '' }))
+
+test('diffFeed: first success is a silent baseline, then only unseen items are new', () => {
+  const base = diffFeed(undefined, mk('1', '2', '3'), NOW)
+  expect(base.ok).toBe(true)
+  expect(base.baseline).toBe(true)
+  expect(base.fresh).toEqual([])
+  expect(base.entry.seen).toEqual(['1', '2', '3'])
+  expect(base.entry.lastFetched).toBe(NOW)
+  expect(base.entry.failures).toBe(0)
+  const next = diffFeed(base.entry, mk('4', '1', '2', '3'), NOW + 1)
+  expect(next.baseline).toBe(false)
+  expect(next.fresh.map(i => i.key)).toEqual(['4'])
+  expect(next.entry.seen).toEqual(['4', '1', '2', '3'])
+  expect(diffFeed(next.entry, mk('4', '1', '2', '3'), NOW + 2).fresh).toEqual([])
+})
+
+test('diffFeed: a full window re-polled is never new; seen keeps old keys, capped at 500', () => {
+  const keys = Array.from({ length: 200 }, (_, n) => 'k' + n)
+  const base = diffFeed(undefined, mk(...keys), NOW)
+  expect(diffFeed(base.entry, mk(...keys), NOW + 1).fresh).toEqual([])
+  expect(diffFeed({ seen: ['a', 'b'] }, mk('c'), NOW).entry.seen).toEqual(['c', 'a', 'b'])
+  const old = Array.from({ length: 600 }, (_, n) => 'o' + n)
+  const capped = diffFeed({ seen: old }, mk('n1'), NOW)
+  expect(capped.entry.seen.length).toBe(500)
+  expect(capped.entry.seen[0]).toBe('n1')
+})
+
+test('diffFeed: zero parsed items is a failure, never a baseline; recordFailure keeps seen', () => {
+  const r = diffFeed(undefined, [], NOW)
+  expect(r.ok).toBe(false)
+  expect(r.entry.seen).toBe(undefined)
+  expect(r.entry.failures).toBe(1)
+  const f = recordFailure({ seen: ['x'], failures: 1, lastFetched: 1 }, NOW, 'HTTP 503')
+  expect(f).toMatchObject({ seen: ['x'], failures: 2, lastFetched: NOW, lastResult: 'error: HTTP 503' })
+})
+
+test('isNotifyWorthy: always, never, watchlist on title+text', () => {
+  const item = { key: 'k', title: 'Axios compromised', link: '', date: '', text: 'npm package axios' }
+  expect(isNotifyWorthy({ notify: 'always' }, item, [])).toBe(true)
+  expect(isNotifyWorthy({ notify: 'never' }, item, ['axios'])).toBe(false)
+  expect(isNotifyWorthy({ notify: 'watchlist' }, item, ['axios'])).toBe(true)
+  expect(isNotifyWorthy({ notify: 'watchlist' }, { ...item, title: 'Other' }, ['axios'])).toBe(true)
+  expect(isNotifyWorthy({ notify: 'watchlist' }, { ...item, title: 'Other', text: 'nothing' }, ['axios'])).toBe(false)
+  expect(isNotifyWorthy({ notify: 'watchlist' }, item, [])).toBe(false)
+})
+
+test('annotateItem: tags watchlist and KEV, drops body text', () => {
+  const feed = { id: 'kev', name: 'CISA KEV', format: 'kev-json', notify: 'always' }
+  const a = annotateItem(feed, { key: 'CVE-1', title: 'KEV: CVE-1 Next.js - flaw', link: 'https://nvd.nist.gov/vuln/detail/CVE-1', date: '', text: 'long' }, ['next.js'], NOW)
+  expect(a).toEqual({ at: NOW, feedId: 'kev', feed: 'CISA KEV', key: 'CVE-1', title: 'KEV: CVE-1 Next.js - flaw', link: 'https://nvd.nist.gov/vuln/detail/CVE-1', watch: true, kev: true, worthy: true })
+  const b = annotateItem({ ...feed, format: 'rss', notify: 'never' }, { key: 'x', title: 'Plain', link: '', date: '', text: '' }, ['next.js'], NOW)
+  expect(b).toMatchObject({ watch: false, kev: false, worthy: false })
+})
+
+test('mergeRecent: newest first, capped at 100', () => {
+  const mkA = (n: number) => ({ at: n, feedId: 'f', feed: 'F', key: 'k' + n, title: 't', link: '', watch: false, kev: false, worthy: false })
+  const merged = mergeRecent(Array.from({ length: 99 }, (_, n) => mkA(n)), [mkA(1000), mkA(1001)])
+  expect(merged.length).toBe(100)
+  expect(merged[0].at).toBe(1000)
+  expect(mergeRecent(undefined as never, [mkA(1)]).length).toBe(1)
+})
+
+test('buildFeedToast and buildFeedNotification: counts, stack clause, watchlist-first top title', () => {
+  expect(buildFeedToast(3, 1)).toBe('CTI feeds: 3 new (1 on your stack) - /cti feed')
+  expect(buildFeedToast(2, 0)).toBe('CTI feeds: 2 new - /cti feed')
+  const it = (title: string, worthy: boolean, watch = false) => ({ at: NOW, feedId: 'f', feed: 'F', key: title, title, link: '', watch, kev: false, worthy })
+  expect(buildFeedNotification([it('a', false)])).toBe(null)
+  expect(buildFeedNotification([])).toBe(null)
+  expect(buildFeedNotification([it('a', false), it('only', true)])).toBe('CTI feed: only')
+  expect(buildFeedNotification([it('plain', true), it('stack', true, true)])).toBe('CTI feed: 2 new - stack')
+  expect(buildFeedNotification([it('x'.repeat(300), true)])!.length <= 140).toBe(true)
+})
+
+test('buildStartupToast: unread digest alerts, feed items, both, neither', () => {
+  const digest = { finishedAt: 2000, alerts: [{ id: 'a' }, { id: 'b' }] }
+  const recent = [
+    { at: 3000, worthy: true },
+    { at: 3100, worthy: false },
+    { at: 500, worthy: true },
+  ]
+  expect(buildStartupToast({ digest, digestViewedAt: 1000, recent: [], feedViewedAt: 0 })).toBe('CTI: 2 alerts today - /cti for details')
+  expect(buildStartupToast({ digest: { ...digest, alerts: [{ id: 'a' }] }, recent: [], feedViewedAt: 0 })).toBe('CTI: 1 alert today - /cti for details')
+  expect(buildStartupToast({ digest, digestViewedAt: 1000, recent, feedViewedAt: 1000 })).toBe('CTI: 2 alerts today - /cti for details - 1 new feed item')
+  expect(buildStartupToast({ digest, digestViewedAt: 2000, recent, feedViewedAt: 1000 })).toBe('CTI: 1 new feed item - /cti feed')
+  expect(buildStartupToast({ digest: undefined, recent: [recent[0], { at: 3200, worthy: true }], feedViewedAt: 1000 })).toBe('CTI: 2 new feed items - /cti feed')
+  expect(buildStartupToast({ digest: { finishedAt: 2000, alerts: [] }, digestViewedAt: 0, recent, feedViewedAt: 5000 })).toBe(null)
+  expect(buildStartupToast({ digest: 'junk', recent: 'junk', feedViewedAt: 'x' } as never)).toBe(null)
+})
+
+test('feedLockPath: one lock per 5-minute slot, distinct from the day-claim locks', () => {
+  const slot = Math.floor(NOW / 300000)
+  expect(feedLockPath('/h/.advisor/cti', NOW)).toBe('/h/.advisor/cti/.locks/feeds-' + slot)
+  expect(feedLockPath('/h/.advisor/cti', NOW + 299999 - (NOW % 300000))).toBe('/h/.advisor/cti/.locks/feeds-' + slot)
+  expect(feedLockPath('/h/.advisor/cti', NOW + 300000)).toBe('/h/.advisor/cti/.locks/feeds-' + (slot + 1))
+})
+
+test('formatRecentItems and formatFeedStatus', () => {
+  expect(formatRecentItems([])).toBe('No new feed items yet.')
+  const recent = Array.from({ length: 40 }, (_, n) => ({ at: NOW - n * 60000, feedId: 'f', feed: 'Feed', key: 'k' + n, title: 'title' + n, link: 'https://e.example/' + n, watch: n === 0, kev: n === 1, worthy: false }))
+  const lines = formatRecentItems(recent).split('\n')
+  expect(lines.length).toBe(30)
+  expect(lines[0]).toBe('10-23 09:30 [WATCHLIST] Feed: title0 <https://e.example/0>')
+  expect(lines[1]).toContain('[KEV]')
+  expect(lines[2]).not.toContain('[')
+  const feeds = [{ id: 'a', name: 'Alpha' }, { id: 'b', name: 'Beta' }]
+  const out = formatFeedStatus(feeds, { a: { lastFetched: NOW, lastResult: 'ok: 2 new', failures: 0 }, b: { failures: 2, lastFetched: NOW, lastResult: 'error: HTTP 503' } }, NOW)
+  expect(out).toContain('Alpha: last fetch 09:30, ok: 2 new, failures 0')
+  expect(out).toContain('Beta: last fetch 09:30, error: HTTP 503, failures 2')
+  expect(formatFeedStatus([{ id: 'c', name: 'Gamma' }], {}, NOW)).toContain('Gamma: never fetched')
+})
