@@ -1,0 +1,182 @@
+[
+  {
+    "id": "nvd-kev-recent",
+    "name": "NVD CVE API 2.0 - recently added KEV",
+    "category": "vulnerability",
+    "url": "https://services.nvd.nist.gov/rest/json/cves/2.0?hasKev&kevStartDate={{since}}&kevEndDate={{until}}&resultsPerPage=20",
+    "format": "json",
+    "auth": "none",
+    "notes": "CVEs added to CISA KEV in window (~160KB/15 items). Update date range daily. Unkeyed NVD limit ~5 req/30s. Ask: CVE id, vendor, description, cisaExploitAdd."
+  },
+  {
+    "id": "nvd-critical-recent",
+    "name": "NVD CVE API 2.0 - new CRITICAL CVEs",
+    "category": "vulnerability",
+    "url": "https://services.nvd.nist.gov/rest/json/cves/2.0?cvssV3Severity=CRITICAL&resultsPerPage=10&pubStartDate={{since}}&pubEndDate={{until}}",
+    "format": "json",
+    "auth": "none",
+    "notes": "Critical CVEs published in window (~20KB/10 items; check totalResults). Update dates daily. Ask: id, published, first description, baseScore."
+  },
+  {
+    "id": "ghsa-critical",
+    "name": "GitHub Advisory DB - critical reviewed",
+    "category": "vulnerability",
+    "url": "https://api.github.com/advisories?type=reviewed&severity=critical&per_page=8&sort=published&direction=desc",
+    "format": "json",
+    "auth": "none",
+    "notes": "Newest critical reviewed advisories (~100KB). Unauthenticated limit 60 req/h. Ask: ghsa_id, summary, ecosystem/package, published_at."
+  },
+  {
+    "id": "sans-isc",
+    "name": "SANS Internet Storm Center diary",
+    "category": "vulnerability",
+    "url": "https://isc.sans.edu/rssfeed_full.xml",
+    "format": "rss",
+    "auth": "none",
+    "notes": "Daily handler diaries on active exploitation/scans (~41KB). Ask: titles + dates of newest 10 items."
+  },
+  {
+    "id": "ghsa-malware-latest",
+    "name": "GitHub Advisory DB - malware (all ecosystems)",
+    "category": "supply-chain",
+    "url": "https://api.github.com/advisories?type=malware&per_page=8&sort=published&direction=desc",
+    "format": "json",
+    "auth": "none",
+    "notes": "Newest malicious-package advisories, npm+PyPI etc (~15KB). Several per day. 60 req/h unauth. Ask: summary, package/ecosystem, published_at."
+  },
+  {
+    "id": "ghsa-malware-pypi",
+    "name": "GitHub Advisory DB - PyPI malware",
+    "category": "supply-chain",
+    "url": "https://api.github.com/advisories?type=malware&ecosystem=pip&per_page=8",
+    "format": "json",
+    "auth": "none",
+    "notes": "Newest PyPI malicious-package advisories (~20KB). Change ecosystem=npm for npm. Ask: summary, published_at."
+  },
+  {
+    "id": "socket-blog",
+    "name": "Socket.dev research blog",
+    "category": "supply-chain",
+    "url": "https://socket.dev/api/blog/feed.atom",
+    "format": "atom",
+    "auth": "none",
+    "notes": "Atom, ~108KB; npm/PyPI campaign write-ups, several posts/week. Ask: newest 10 titles+dates+one-line summary."
+  },
+  {
+    "id": "stepsecurity-blog",
+    "name": "StepSecurity blog",
+    "category": "supply-chain",
+    "url": "https://www.stepsecurity.io/blog/rss.xml",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~99KB; CI/CD and package compromises (e.g. GitHub Actions, PyPI). Ask: newest 10 titles+dates."
+  },
+  {
+    "id": "ransomware-live-victims",
+    "name": "ransomware.live recent victims",
+    "category": "ransomware",
+    "url": "https://api.ransomware.live/v2/recentvictims",
+    "format": "json",
+    "auth": "none",
+    "notes": "~82KB, newest first, fields victim/group/country/attackdate. Updated continuously. Ask: first 25 victims, group, country, date."
+  },
+  {
+    "id": "ransomlook-recent",
+    "name": "RansomLook recent posts",
+    "category": "ransomware",
+    "url": "https://www.ransomlook.io/api/recent/10",
+    "format": "json",
+    "auth": "none",
+    "notes": "~5KB, last 10 leak-site posts with post_title/group_name/discovered. Raise number for more but size grows."
+  },
+  {
+    "id": "ransomlook-rss",
+    "name": "RansomLook RSS last entries",
+    "category": "ransomware",
+    "url": "https://www.ransomlook.io/rss.xml",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~28KB; titles are 'Victim By group'. Cross-check against ransomware.live. Ask: titles+dates, count per group."
+  },
+  {
+    "id": "dfir-report",
+    "name": "The DFIR Report",
+    "category": "ransomware",
+    "url": "https://thedfirreport.com/feed/",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~14KB; few posts/month; intrusion/ransomware case studies. Ask: titles+dates of latest 5."
+  },
+  {
+    "id": "bleepingcomputer",
+    "name": "BleepingComputer",
+    "category": "breach",
+    "url": "https://www.bleepingcomputer.com/feed/",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~13KB, ~15 newest items, many per day; breaches, ransomware, malware. Ask: titles+pubDate, flag breach/ransomware/supply-chain."
+  },
+  {
+    "id": "the-record",
+    "name": "The Record (Recorded Future News)",
+    "category": "breach",
+    "url": "https://therecord.media/feed",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~5KB, newest items; breaches, ransomware, nation-state policy. Items use CDATA titles. Ask: titles+dates+one-line descriptions."
+  },
+  {
+    "id": "hibp-latest-breach",
+    "name": "Have I Been Pwned - latest breach",
+    "category": "breach",
+    "url": "https://haveibeenpwned.com/api/v3/latestbreach",
+    "format": "json",
+    "auth": "none",
+    "notes": "~1.7KB, single newest breach added (name, domain, BreachDate, AddedDate, PwnCount). Cheap daily check; full /breaches is 1.1MB."
+  },
+  {
+    "id": "unit42",
+    "name": "Palo Alto Unit 42",
+    "category": "state-actor",
+    "url": "https://unit42.paloaltonetworks.com/feed/",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~25KB; APT/campaign and malware research, several posts/week. Ask: titles+dates, attributed actors."
+  },
+  {
+    "id": "eset-welivesecurity",
+    "name": "ESET WeLiveSecurity",
+    "category": "state-actor",
+    "url": "https://www.welivesecurity.com/en/feed/",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~70KB; ESET Research APT reports mixed with consumer posts. Ask: only APT/state-linked items (titles, actor, date)."
+  },
+  {
+    "id": "cisa-news",
+    "name": "CISA News",
+    "category": "general",
+    "url": "https://www.cisa.gov/news.xml",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~5KB; joint CISA/FBI/NSA advisories incl. state-actor and ransomware (#StopRansomware). Ask: titles+dates."
+  },
+  {
+    "id": "securityweek",
+    "name": "SecurityWeek",
+    "category": "general",
+    "url": "https://feeds.feedburner.com/securityweek",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~12KB; vulns, breaches, APT news daily. Ask: titles+dates, tag category."
+  },
+  {
+    "id": "hacker-news",
+    "name": "The Hacker News",
+    "category": "general",
+    "url": "https://feeds.feedburner.com/TheHackersNews",
+    "format": "rss",
+    "auth": "none",
+    "notes": "~60KB; broad daily coverage incl. exploited zero-days, supply chain, APTs. Ask: titles+dates, tag category."
+  }
+]

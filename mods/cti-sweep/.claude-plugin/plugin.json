@@ -1,0 +1,15 @@
+{
+  "name": "cti-sweep",
+  "version": "0.1.0",
+  "description": "Once per local day, runs a background Cyber Threat Intelligence subagent at session start and notifies only for critical or watchlisted findings",
+  "author": { "name": "Advisor" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "watchlist": {
+      "type": "string",
+      "title": "Watchlist",
+      "description": "Comma-separated products; a finding naming one of them (whole-token, case-insensitive) raises an alert",
+      "default": "Node.js, Bun, npm, LiteLLM, Claude Code, Anthropic, macOS, Chrome, Docker, GitHub, GitLab, Vercel, Railway, Zeabur, TiDB Cloud, Slack, Atlassian, Jira, Confluence, Figma, Statsig, Sentry, Postman, Homebrew, PyPI, NGINX, WordPress, OpenSSL, OpenSSH, Signal, Tor, Plex, OVHcloud, Bullhorn, Onamae, AOMEI, Next.js, React"
+    }
+  }
+}
