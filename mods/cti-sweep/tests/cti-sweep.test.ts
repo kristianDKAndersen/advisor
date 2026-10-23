@@ -477,6 +477,10 @@ import {
   feedLockPath,
   formatRecentItems,
   formatFeedStatus,
+  isOwnAgentReport,
+  pruneOwnAgents,
+  selectStaleFeedLocks,
+  DROP_REASON,
 } from '../hooks/register.js'
 
 const RSS = `<?xml version="1.0"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Chan</title><link>https://x.example/</link>
@@ -703,4 +707,59 @@ test('formatRecentItems and formatFeedStatus', () => {
   expect(out).toContain('Alpha: last fetch 09:30, ok: 2 new, failures 0')
   expect(out).toContain('Beta: last fetch 09:30, error: HTTP 503, failures 2')
   expect(formatFeedStatus([{ id: 'c', name: 'Gamma' }], {}, NOW)).toContain('Gamma: never fetched')
+})
+
+test('isOwnAgentReport: only the sweep agent\'s own hand-back is matched', () => {
+  const ids = new Set(['a1b2c3'])
+  const peer = { kind: 'peer' }
+  expect(isOwnAgentReport('<agent-message from="a1b2c3">\n```json\n[]\n```', ids, peer)).toBe(true)
+  expect(isOwnAgentReport('  \n<agent-message from="a1b2c3">x', ids, peer)).toBe(true)
+  expect(isOwnAgentReport('<agent-message from="zzz999">x', ids, peer)).toBe(false)
+  expect(isOwnAgentReport('<agent-message from="a1b2c3x">x', ids, peer)).toBe(false)
+  expect(isOwnAgentReport('please read <agent-message from="a1b2c3"> for me', ids, { kind: 'user' })).toBe(false)
+  expect(isOwnAgentReport('<agent-message from="a1b2c3">x', new Set(), peer)).toBe(false)
+  expect(isOwnAgentReport('<agent-message from="a1b2c3">x', [], peer)).toBe(false)
+  expect(isOwnAgentReport('Agent a1b2c3 finished: result', ids, { kind: 'task-notification' })).toBe(true)
+  expect(isOwnAgentReport('Agent a1b2c3x finished', ids, { kind: 'task-notification' })).toBe(false)
+  expect(isOwnAgentReport('Agent a1b2c3 finished', ids, { kind: 'user' })).toBe(false)
+  expect(isOwnAgentReport(undefined as never, ids, peer)).toBe(false)
+})
+
+test('DROP_REASON is fixed text that cannot carry agent output', () => {
+  expect(DROP_REASON).toBe('cti-sweep: sweep result kept out of the conversation - see /cti')
+})
+
+test('pruneOwnAgents: drops entries older than 24h and junk', () => {
+  const day = 24 * HOUR
+  const out = pruneOwnAgents({ old: NOW - day - 1, fresh: NOW - day + 1000, junk: 'x' } as never, NOW)
+  expect(out).toEqual({ fresh: NOW - day + 1000 })
+  expect(pruneOwnAgents(undefined, NOW)).toEqual({})
+  expect(pruneOwnAgents('junk' as never, NOW)).toEqual({})
+})
+
+test('feedLockPath: forced polls get their own lock, scheduled ones share the slot', () => {
+  const slot = Math.floor(NOW / 300000)
+  expect(feedLockPath('/h/.advisor/cti', NOW, false)).toBe('/h/.advisor/cti/.locks/feeds-' + slot)
+  expect(feedLockPath('/h/.advisor/cti', NOW, true)).toBe('/h/.advisor/cti/.locks/feeds-f' + NOW)
+  expect(feedLockPath('/h/.advisor/cti', NOW + 1, true)).not.toBe(feedLockPath('/h/.advisor/cti', NOW, true))
+})
+
+test('selectStaleFeedLocks: only feed locks older than 2 days', () => {
+  const day = 24 * HOUR
+  const slotOf = (ms: number) => Math.floor(ms / 300000)
+  const names = [
+    'feeds-' + slotOf(NOW - 3 * day),
+    'feeds-' + slotOf(NOW - day),
+    'feeds-f' + (NOW - 3 * day),
+    'feeds-f' + (NOW - day),
+    '2026-10-01-a1',
+    '2026-10-01-f' + (NOW - 5 * day),
+    'feeds-',
+    'feeds-abc',
+    'feeds-f',
+    'other',
+  ]
+  expect(selectStaleFeedLocks(names, NOW)).toEqual([names[0], names[2]])
+  expect(selectStaleFeedLocks([], NOW)).toEqual([])
+  expect(selectStaleFeedLocks(undefined as never, NOW)).toEqual([])
 })

@@ -671,9 +671,78 @@ export function buildStartupToast({ digest, digestViewedAt, recent, feedViewedAt
   return feeds ? `CTI: ${items} - /cti feed` : null
 }
 
-// Slot locks are never pruned. // eco: one empty dir per polled 5-minute slot; upgrade when .locks needs cleanup
-export function feedLockPath(ctiDir, now) {
-  return ctiDir + '/.locks/feeds-' + Math.floor(now / FEED_SLOT_MS)
+// A forced poll takes its own lock, so a baseline poll in the same slot cannot refuse it.
+export function feedLockPath(ctiDir, now, force) {
+  return ctiDir + '/.locks/feeds-' + (force ? 'f' + now : Math.floor(now / FEED_SLOT_MS))
+}
+
+const LOCK_TTL_MS = 2 * 24 * 3600000
+const LOCK_PRUNE_EVERY_MS = 24 * 3600000
+const OWN_AGENT_TTL_MS = 24 * 3600000
+export const DROP_REASON = 'cti-sweep: sweep result kept out of the conversation - see /cti'
+
+// Names under .locks/ that are feed slot or forced locks older than LOCK_TTL_MS.
+export function selectStaleFeedLocks(names, now) {
+  if (!Array.isArray(names)) return []
+  return names.filter(name => {
+    const slot = /^feeds-(\d+)$/.exec(name)
+    const forced = /^feeds-f(\d+)$/.exec(name)
+    const at = slot ? Number(slot[1]) * FEED_SLOT_MS : forced ? Number(forced[1]) : NaN
+    return Number.isFinite(at) && now - at > LOCK_TTL_MS
+  })
+}
+
+export function pruneOwnAgents(ids, now) {
+  const out = {}
+  if (!ids || typeof ids !== 'object') return out
+  for (const [id, at] of Object.entries(ids)) {
+    if (typeof at === 'number' && now - at <= OWN_AGENT_TTL_MS) out[id] = at
+  }
+  return out
+}
+
+// True only for the sweep agent's own hand-back: a peer message from its id, or a task notification naming it.
+export function isOwnAgentReport(text, ids, origin) {
+  if (typeof text !== 'string') return false
+  const list = ids ? [...ids] : []
+  if (!list.length) return false
+  const head = /^\s*<agent-message from="([^"]*)">/.exec(text)
+  if (head && list.includes(head[1])) return true
+  if (origin && origin.kind === 'task-notification') {
+    return list.some(id => id && new RegExp('(?<![\\w-])' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![\\w-])').test(text))
+  }
+  return false
+}
+
+const ownAgents = new Set()
+let ownAgentsLoaded = false
+
+async function loadOwnAgents($) {
+  const stored = pruneOwnAgents(await $.store.get('ownAgents'), await $.clock.now())
+  if (!ownAgentsLoaded) {
+    for (const id of Object.keys(stored)) ownAgents.add(id)
+    ownAgentsLoaded = true
+  }
+  return stored
+}
+
+async function recordOwnAgent($, agentId) {
+  ownAgents.add(agentId)
+  const now = await $.clock.now()
+  const stored = await loadOwnAgents($)
+  stored[agentId] = now
+  await $.store.set('ownAgents', stored)
+}
+
+async function pruneFeedLocks($, ctiDir, now) {
+  const last = await $.store.get('lockPrunedAt')
+  if (typeof last === 'number' && now - last < LOCK_PRUNE_EVERY_MS) return
+  await $.store.set('lockPrunedAt', now)
+  const dir = ctiDir + '/.locks'
+  const ls = await $.process.run(['ls', '-1', dir])
+  if (ls.exitCode !== 0) return
+  const stale = selectStaleFeedLocks(String(ls.stdout).split('\n').filter(Boolean), now)
+  if (stale.length) await $.process.run(['rm', '-r', ...stale.map(n => dir + '/' + n)])
 }
 
 function stamp(ms) {
@@ -833,8 +902,13 @@ async function pollFeeds($, force) {
     const due = force ? feeds : feeds.filter(f => isFeedDue(f, before.feeds[f.id], now))
     if (!due.length) return { ok: false, reason: 'none-due' }
     await $.process.run(['mkdir', '-p', ctiDir + '/.locks', ctiDir + '/feeds'])
-    const lock = await $.process.run(['mkdir', feedLockPath(ctiDir, now)])
+    const lock = await $.process.run(['mkdir', feedLockPath(ctiDir, now, force)])
     if (lock.exitCode !== 0) return { ok: false, reason: 'locked' }
+    try {
+      await pruneFeedLocks($, ctiDir, now)
+    } catch (err) {
+      safeLog($, 'lock prune failed: ' + (err && err.message))
+    }
     const results = []
     for (let i = 0; i < due.length; i += FEED_CONCURRENCY) {
       const chunk = due.slice(i, i + FEED_CONCURRENCY)
@@ -956,6 +1030,7 @@ async function runSweep($, force) {
     })
     const spawned = await $.agent.spawn({ subagentType: AGENT_TYPE, model: 'sonnet', description: 'CTI sweep', prompt })
     if (!spawned.agentId) throw new Error('spawn refused: ' + (spawned.deny || 'no agent id'))
+    await recordOwnAgent($, spawned.agentId)
     const parsed = parseAgentAnswer(await waitForAnswer($, spawned.agentId))
     if (!parsed.ok) throw new Error('agent answer unusable: ' + parsed.error)
 
@@ -1046,6 +1121,16 @@ export function register(on, options) {
     }
     return next(e)
   })
+
+  on('prompt.submit', async ($, e, next) => {
+    try {
+      await loadOwnAgents($)
+      if (isOwnAgentReport(e && e.text, ownAgents, e && e.origin)) return { drop: DROP_REASON }
+    } catch (err) {
+      safeLog($, 'prompt.submit hook failed: ' + (err && err.message))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'cti' }, async ($, e) => {
     try {
