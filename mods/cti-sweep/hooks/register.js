@@ -374,12 +374,59 @@ export function buildReport(date, findings, alerts, invalid) {
   ].join('\n')
 }
 
-function digestText(digest) {
+// Old-shape digests (one run, no runs/alertsAt/last) read as a single prior run.
+function digestView(d) {
+  const finishedAt = Number(d.finishedAt) || 0
+  const alertsAt = d.alertsAt === undefined ? finishedAt : Number(d.alertsAt) || 0
+  const list = Array.isArray(d.alerts) ? d.alerts : []
+  // Alerts stored before per-alert `at` existed were added when the digest last gained alerts.
+  const alerts = list.map(a => (a && Number(a.at) ? a : { ...a, at: alertsAt }))
+  return {
+    alerts,
+    finishedAt,
+    runs: Number(d.runs) || 1,
+    alertsAt,
+    last: d.last || { at: finishedAt, findings: Number(d.findings) || 0, alerts: alerts.length },
+  }
+}
+
+export function mergeDigest(prev, run) {
+  const p = prev && typeof prev === 'object' && prev.date === run.date ? digestView(prev) : null
+  const prevAlerts = p ? p.alerts : []
+  const known = new Set(prevAlerts.map(a => a.id))
+  const added = []
+  for (const a of run.alerts) {
+    if (known.has(a.id)) continue
+    known.add(a.id)
+    added.push({ ...a, at: run.finishedAt })
+  }
+  return {
+    date: run.date,
+    finishedAt: run.finishedAt,
+    findings: (p ? Number(prev.findings) || 0 : 0) + run.findings,
+    invalid: (p ? Number(prev.invalid) || 0 : 0) + run.invalid,
+    alerts: [...added, ...prevAlerts],
+    reportPath: run.reportPath,
+    runs: (p ? p.runs : 0) + 1,
+    alertsAt: added.length ? run.finishedAt : p ? p.alertsAt : 0,
+    last: { at: run.finishedAt, findings: run.findings, alerts: run.alerts.length },
+  }
+}
+
+export function buildSweepDoneToast(res) {
+  if (!res || typeof res !== 'object') return null
+  if (!res.ok) return res.reason === 'failed' ? null : 'CTI sweep not run: ' + res.reason
+  const n = (c, w) => `${c} ${w}${c === 1 ? '' : 's'}`
+  return `CTI sweep done: ${n(res.findings, 'new finding')}, ${n(res.alerts, 'new alert')} (${n(res.alertsToday, 'alert')} today) - /cti`
+}
+
+export function digestText(digest) {
   if (!digest || typeof digest !== 'object') return 'No CTI sweep has completed yet.'
+  const v = digestView(digest)
   const lines = [
-    `CTI sweep ${digest.date}: ${digest.findings} findings, ${digest.alerts.length} alerts, ${digest.invalid} invalid.`,
+    `CTI sweep ${digest.date}: ${v.alerts.length} ${v.alerts.length === 1 ? 'alert' : 'alerts'} today across ${v.runs} ${v.runs === 1 ? 'run' : 'runs'} (last ${clockLabel(v.last.at)}: ${v.last.findings} new ${v.last.findings === 1 ? 'finding' : 'findings'})`,
   ]
-  for (const a of digest.alerts) lines.push(`- [${a.severity}] ${a.title} (${a.id})`)
+  for (const a of v.alerts) lines.push(`- [${a.severity}] ${a.title} (${a.id})`)
   lines.push(`Report: ${digest.reportPath}`)
   return lines.join('\n')
 }
@@ -660,10 +707,9 @@ export function buildFeedNotification(items) {
 }
 
 export function buildStartupToast({ digest, digestViewedAt, recent, feedViewedAt }) {
-  const alerts =
-    digest && typeof digest === 'object' && Array.isArray(digest.alerts) && Number(digest.finishedAt) > (Number(digestViewedAt) || 0)
-      ? digest.alerts.length
-      : 0
+  const digestViewed = Number(digestViewedAt) || 0
+  const view = digest && typeof digest === 'object' && Array.isArray(digest.alerts) ? digestView(digest) : null
+  const alerts = view ? view.alerts.filter(a => a.at > digestViewed).length : 0
   const viewed = Number(feedViewedAt) || 0
   const feeds = Array.isArray(recent) ? recent.filter(i => i && i.worthy && i.at > viewed).length : 0
   const items = `${feeds} new feed ${feeds === 1 ? 'item' : 'items'}`
@@ -1000,6 +1046,7 @@ function waitForAnswer($, agentId) {
   })
 }
 
+// toastText null skips the toast (a forced run's done toast already reports the alerts).
 async function notify($, text, toastText = text) {
   try {
     const sent = await $.ui.notify(text, { title: NOTIFY_TITLE })
@@ -1007,6 +1054,7 @@ async function notify($, text, toastText = text) {
   } catch (err) {
     safeLog($, 'notify failed: ' + (err && err.message))
   }
+  if (toastText === null) return
   try {
     await $.ui.toast(toastText)
   } catch {
@@ -1046,7 +1094,7 @@ async function runSweep($, force) {
     await $.fs.write(reportPath, mergeReport(existingReport, buildReport(date, parsed.findings, alerts, parsed.invalid), clockLabel(finishedAt)))
     await $.store.set('seen', markSeen(seen, parsed.findings, finishedAt))
     await $.store.set('lastSuccess', finishedAt)
-    await $.store.set('digest', {
+    const digest = mergeDigest(await $.store.get('digest'), {
       date,
       finishedAt,
       findings: parsed.findings.length,
@@ -1054,10 +1102,11 @@ async function runSweep($, force) {
       alerts: alerts.map(f => ({ id: f.id, title: f.title, severity: f.severity })),
       reportPath,
     })
+    await $.store.set('digest', digest)
     await $.store.set(key, { status: 'done', startedAt: now, finishedAt, attempts: attempt })
     const note = buildNotification(alerts, watchlist)
-    if (note) await notify($, note.text)
-    return { ok: true, alerts: alerts.length, findings: parsed.findings.length, reportPath }
+    if (note) await notify($, note.text, force ? null : undefined)
+    return { ok: true, alerts: alerts.length, findings: parsed.findings.length, alertsToday: digest.alerts.length, reportPath }
   } catch (err) {
     safeLog($, 'sweep failed: ' + (err && err.message))
     await $.store.set(key, { status: 'failed', startedAt: now, finishedAt: await $.clock.now(), attempts: attempt })
@@ -1066,11 +1115,28 @@ async function runSweep($, force) {
   }
 }
 
-async function safeSweep($, force) {
+export async function safeSweep($, force) {
   try {
-    return await runSweep($, force)
+    const res = await runSweep($, force)
+    // Failures already toasted via notify in runSweep.
+    const text = force ? buildSweepDoneToast(res) : null
+    if (text) {
+      try {
+        await $.ui.toast(text)
+      } catch {
+        // no surface bound
+      }
+    }
+    return res
   } catch (err) {
     safeLog($, 'sweep crashed: ' + (err && err.message))
+    if (force) {
+      try {
+        await $.ui.toast('CTI sweep crashed - see log')
+      } catch {
+        // no surface bound
+      }
+    }
     return { ok: false, reason: 'crashed' }
   }
 }
@@ -1153,7 +1219,7 @@ export function register(on, options) {
         const decision = decideClaim(record, await $.clock.now(), true)
         if (!decision.ok) return { text: 'CTI sweep not started: ' + decision.reason + '.' }
         void safeSweep($, true)
-        return { text: 'CTI sweep started in the background; a notification follows if anything alerts.' }
+        return { text: 'CTI sweep started in the background; a toast reports the result.' }
       }
       if (arg === 'status') {
         const date = localDateKey(await $.clock.now())

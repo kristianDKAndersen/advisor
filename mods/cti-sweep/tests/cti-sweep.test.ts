@@ -763,3 +763,211 @@ test('selectStaleFeedLocks: only feed locks older than 2 days', () => {
   expect(selectStaleFeedLocks([], NOW)).toEqual([])
   expect(selectStaleFeedLocks(undefined as never, NOW)).toEqual([])
 })
+
+// ─── Forced-sweep toast and cumulative daily digest ───────────────────
+
+import { buildSweepDoneToast, mergeDigest, digestText } from '../hooks/register.js'
+
+const runOf = (finishedAt: number, ids: string[], findings = ids.length, date = '2026-10-23') => ({
+  date,
+  finishedAt,
+  findings,
+  invalid: 0,
+  alerts: ids.map(id => ({ id, title: 't-' + id, severity: 'high' })),
+  reportPath: '/r/' + date + '.md',
+})
+
+test('buildSweepDoneToast: outcome, refusal, failure', () => {
+  expect(buildSweepDoneToast({ ok: true, findings: 0, alerts: 0, alertsToday: 12 })).toBe('CTI sweep done: 0 new findings, 0 new alerts (12 alerts today) - /cti')
+  expect(buildSweepDoneToast({ ok: true, findings: 1, alerts: 1, alertsToday: 1 })).toBe('CTI sweep done: 1 new finding, 1 new alert (1 alert today) - /cti')
+  expect(buildSweepDoneToast({ ok: false, reason: 'done' })).toBe('CTI sweep not run: done')
+  expect(buildSweepDoneToast({ ok: false, reason: 'locked' })).toBe('CTI sweep not run: locked')
+  expect(buildSweepDoneToast({ ok: false, reason: 'failed' })).toBe(null)
+  expect(buildSweepDoneToast(undefined as never)).toBe(null)
+})
+
+test('mergeDigest: same-day union deduped by id, newest first, sums, last run', () => {
+  const first = mergeDigest(undefined, runOf(1000, ['a', 'b'], 5))
+  expect(first.runs).toBe(1)
+  expect(first.alertsAt).toBe(1000)
+  const second = mergeDigest(first, runOf(2000, ['c', 'a'], 3))
+  expect(second.alerts.map((a: { id: string }) => a.id)).toEqual(['c', 'a', 'b'])
+  expect(second.findings).toBe(8)
+  expect(second.runs).toBe(2)
+  expect(second.alertsAt).toBe(2000)
+  expect(second.finishedAt).toBe(2000)
+  expect(second.last).toEqual({ at: 2000, findings: 3, alerts: 2 })
+  const third = mergeDigest(second, runOf(3000, [], 0))
+  expect(third.alerts.length).toBe(3)
+  expect(third.runs).toBe(3)
+  expect(third.alertsAt).toBe(2000)
+  expect(third.last).toEqual({ at: 3000, findings: 0, alerts: 0 })
+  expect(mergeDigest(third, runOf(4000, ['a'])).alertsAt).toBe(2000)
+})
+
+test('mergeDigest: new date starts fresh', () => {
+  const prev = mergeDigest(undefined, runOf(1000, ['a', 'b'], 5, '2026-10-22'))
+  const next = mergeDigest(prev, runOf(2000, [], 0))
+  expect(next.alerts).toEqual([])
+  expect(next.runs).toBe(1)
+  expect(next.findings).toBe(0)
+  expect(next.alertsAt).toBe(0)
+})
+
+test('mergeDigest: old-shape digest merges as one prior run', () => {
+  const old = { date: '2026-10-23', finishedAt: 500, findings: 4, invalid: 1, alerts: [{ id: 'a', title: 't', severity: 'high' }], reportPath: '/r' }
+  const merged = mergeDigest(old, runOf(900, ['b'], 2))
+  expect(merged.alerts.map((a: { id: string }) => a.id)).toEqual(['b', 'a'])
+  expect(merged.runs).toBe(2)
+  expect(merged.findings).toBe(6)
+  expect(merged.invalid).toBe(1)
+  const quiet = mergeDigest(old, runOf(900, [], 0))
+  expect(quiet.alertsAt).toBe(500)
+  expect(mergeDigest('junk' as never, runOf(900, ['b'])).runs).toBe(1)
+})
+
+test('digestText: day totals, last run, alert lines; old shape renders', () => {
+  const merged = mergeDigest(mergeDigest(undefined, runOf(1000, ['a'], 2)), runOf(2000, [], 0))
+  const text = digestText(merged)
+  const lines = text.split('\n')
+  expect(lines[0]).toMatch(/^CTI sweep 2026-10-23: 1 alert today across 2 runs \(last \d\d:\d\d: 0 new findings\)$/)
+  expect(lines[1]).toBe('- [high] t-a (a)')
+  expect(lines[2]).toBe('Report: /r/2026-10-23.md')
+  const old = digestText({ date: '2026-10-23', finishedAt: 500, findings: 4, invalid: 0, alerts: [], reportPath: '/r' })
+  expect(old).toMatch(/0 alerts today across 1 run \(last \d\d:\d\d: 4 new findings\)/)
+  expect(digestText(undefined)).toBe('No CTI sweep has completed yet.')
+})
+
+test('buildStartupToast: a later 0-alert run does not re-raise viewed alerts', () => {
+  const merged = mergeDigest(mergeDigest(undefined, runOf(1000, ['a'])), runOf(3000, [], 0))
+  expect(buildStartupToast({ digest: merged, digestViewedAt: 2000, recent: [], feedViewedAt: 0 })).toBe(null)
+  expect(buildStartupToast({ digest: merged, digestViewedAt: 500, recent: [], feedViewedAt: 0 })).toBe('CTI: 1 alert today - /cti for details')
+  const old = { finishedAt: 2000, alerts: [{ id: 'a' }] }
+  expect(buildStartupToast({ digest: old, digestViewedAt: 1000, recent: [], feedViewedAt: 0 })).toBe('CTI: 1 alert today - /cti for details')
+})
+
+test('buildStartupToast: counts only alerts added after the last view', () => {
+  const merged = mergeDigest(mergeDigest(undefined, runOf(1000, ['a', 'b', 'c'])), runOf(3000, ['d']))
+  expect(merged.alerts.length).toBe(4)
+  expect(buildStartupToast({ digest: merged, digestViewedAt: 2000, recent: [], feedViewedAt: 0 })).toBe('CTI: 1 alert today - /cti for details')
+  expect(buildStartupToast({ digest: merged, digestViewedAt: 500, recent: [], feedViewedAt: 0 })).toBe('CTI: 4 alerts today - /cti for details')
+  expect(buildStartupToast({ digest: merged, digestViewedAt: 3000, recent: [], feedViewedAt: 0 })).toBe(null)
+  const old = { finishedAt: 2000, alerts: [{ id: 'x' }, { id: 'y' }] }
+  expect(buildStartupToast({ digest: old, digestViewedAt: 1000, recent: [], feedViewedAt: 0 })).toBe('CTI: 2 alerts today - /cti for details')
+  const oldThenNew = mergeDigest({ date: '2026-10-23', finishedAt: 1000, alerts: [{ id: 'x' }], reportPath: '/r' }, runOf(3000, ['d']))
+  expect(buildStartupToast({ digest: oldThenNew, digestViewedAt: 2000, recent: [], feedViewedAt: 0 })).toBe('CTI: 1 alert today - /cti for details')
+})
+
+test('mergeDigest: duplicate ids inside one run are added once', () => {
+  const merged = mergeDigest(undefined, runOf(1000, ['a', 'b', 'a']))
+  expect(merged.alerts.map(a => a.id)).toEqual(['a', 'b'])
+  expect(merged.last.alerts).toBe(3)
+})
+
+import { register, safeSweep } from '../hooks/register.js'
+
+const SWEEP_NOW = new Date(2026, 9, 26, 12, 0, 0).getTime()
+const sweepAnswer = (ids: string[]) =>
+  '```json\n' +
+  JSON.stringify({
+    date: '2026-10-26',
+    findings: ids.map(id => ({
+      id,
+      title: 'Bad thing ' + id,
+      category: 'vulnerability',
+      severity: 'critical',
+      exploited: true,
+      products: ['acme'],
+      summary: 's',
+      action: 'patch',
+      sources: ['https://example.com/advisory/' + id],
+    })),
+  }) +
+  '\n```'
+
+// Stub $ for safeSweep: answer is delivered through the turn.complete handler, like the real agent.
+function sweepHarness(opts: { answer?: string | null; spawn?: object; lockExit?: number; toastThrows?: boolean; storeGetThrows?: boolean } = {}) {
+  const toasts: string[] = []
+  const notices: string[] = []
+  const handlers: Record<string, Function> = {}
+  register(((name: string, ...rest: unknown[]) => {
+    handlers[name] = rest[rest.length - 1] as Function
+    return { catch() {} }
+  }) as never, { watchlist: '' } as never)
+  const store = new Map<string, unknown>()
+  const $: any = {
+    store: {
+      get: async (k: string) => {
+        if (opts.storeGetThrows) throw new Error('store down')
+        return store.get(k)
+      },
+      set: async (k: string, v: unknown) => void store.set(k, v),
+    },
+    env: { get: async () => '/home/u' },
+    clock: {
+      now: async () => SWEEP_NOW,
+      after: (_ms: number, _cb: () => void) => {
+        setTimeout(() => handlers['turn.complete']($, { agentId: 'ag1', answer: opts.answer === undefined ? sweepAnswer([]) : opts.answer }, async () => {}), 0)
+      },
+    },
+    process: { run: async () => ({ exitCode: opts.lockExit ?? 0 }) },
+    fs: { read: async () => { throw new Error('none') }, write: async () => {} },
+    agent: { spawn: async () => opts.spawn ?? { agentId: 'ag1' } },
+    plugin: { root: '/p' },
+    ui: {
+      log: () => {},
+      notify: async (t: string) => { notices.push(t); return { isSent: true } },
+      toast: async (t: string, ...extra: unknown[]) => {
+        if (opts.toastThrows) throw new Error('no surface')
+        toasts.push(t + (extra.length ? ' +opts' : ''))
+      },
+    },
+  }
+  return { $, toasts, notices, store }
+}
+
+test('safeSweep: forced run toasts the outcome, scheduled run does not', async () => {
+  const forced = sweepHarness({ answer: sweepAnswer([]) })
+  expect((await safeSweep(forced.$, true)).ok).toBe(true)
+  expect(forced.toasts).toEqual(['CTI sweep done: 0 new findings, 0 new alerts (0 alerts today) - /cti'])
+  const scheduled = sweepHarness({ answer: sweepAnswer([]) })
+  expect((await safeSweep(scheduled.$, false)).ok).toBe(true)
+  expect(scheduled.toasts).toEqual([])
+  const refused = sweepHarness({ lockExit: 1 })
+  expect((await safeSweep(refused.$, true)).reason).toBe('locked')
+  expect(refused.toasts).toEqual(['CTI sweep not run: locked'])
+})
+
+test('safeSweep: a failed sweep gives one failure toast and no done toast', async () => {
+  const h = sweepHarness({ spawn: {} })
+  expect((await safeSweep(h.$, true)).reason).toBe('failed')
+  expect(h.toasts.length).toBe(1)
+  expect(h.toasts[0]).toMatch(/^CTI sweep failed: spawn refused/)
+})
+
+test('safeSweep: a toast that throws is swallowed', async () => {
+  const h = sweepHarness({ answer: sweepAnswer([]), toastThrows: true })
+  expect((await safeSweep(h.$, true)).ok).toBe(true)
+})
+
+test('safeSweep: a crash toasts for forced runs only', async () => {
+  const forced = sweepHarness({ storeGetThrows: true })
+  expect((await safeSweep(forced.$, true)).reason).toBe('crashed')
+  expect(forced.toasts).toEqual(['CTI sweep crashed - see log'])
+  const scheduled = sweepHarness({ storeGetThrows: true })
+  expect((await safeSweep(scheduled.$, false)).reason).toBe('crashed')
+  expect(scheduled.toasts).toEqual([])
+  const noSurface = sweepHarness({ storeGetThrows: true, toastThrows: true })
+  expect((await safeSweep(noSurface.$, true)).reason).toBe('crashed')
+})
+
+test('safeSweep: forced run with alerts shows one toast, scheduled keeps the alert toast', async () => {
+  const forced = sweepHarness({ answer: sweepAnswer(['a1', 'a2']) })
+  expect((await safeSweep(forced.$, true)).alerts).toBe(2)
+  expect(forced.notices.length).toBe(1)
+  expect(forced.toasts).toEqual(['CTI sweep done: 2 new findings, 2 new alerts (2 alerts today) - /cti'])
+  const scheduled = sweepHarness({ answer: sweepAnswer(['a1', 'a2']) })
+  await safeSweep(scheduled.$, false)
+  expect(scheduled.notices.length).toBe(1)
+  expect(scheduled.toasts).toEqual([scheduled.notices[0]])
+})
