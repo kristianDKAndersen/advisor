@@ -27,7 +27,9 @@
 //   7. every changed policy path has `<path>: "<decision>"` in --decisions         exit 7
 //   8. the push remote and the PR remote (--pr-remote, else the push remote, else origin)
 //      each have exactly one fetch URL and one push URL, both <host>/<owner>/<repo> of the same
-//      repo; only the PR remote's host must pass `gh auth status` (a push alone needs no gh)  exit 2;
+//      repo; GitHub hosts only (policy): every action, a push alone included, needs the remote's
+//      host to pass `gh auth status`; an scp-style or ssh:// host is first resolved with
+//      `ssh -G` (its `hostname` line), so an SSH alias never reaches gh                exit 2;
 //      PR <n>'s head is HEAD (no --push) or the pushed branch of the push repo     exit 3 PR_HEAD;
 //      with a PR, merge-base(HEAD, its baseRefOid) is the merge-base of check 3; push only,
 //      --target is the commit `git ls-remote` reports for the remote's HEAD or the pushed branch
@@ -72,6 +74,8 @@ const USAGE = `Usage: advisor-publish --repo <path> --target <ref> --review <rev
 Publish gate: checks the review binding, verdict, claims, advisor artifacts and policy
 paths for the PR (merge-base(HEAD, target)..HEAD), then prints (dry run) or runs
 (--execute) the push and gh commands. At least one action is required.
+GitHub hosts only (policy): the remote's host must pass gh auth status for every action, a
+push alone included; an SSH host alias is resolved with ssh -G first.
 
 Exit codes: 0 pass, 2 usage or unresolvable remote, 3 stale or missing audit or PR head
 mismatch, 4 verdict or Blockers, 5 claims, 6 advisor artifacts, 7 policy path without
@@ -329,10 +333,12 @@ if (undecided.length > 0) finish(7, 'POLICY_PATH', undecided);
 function parseUrl(name, url) {
   let host = '';
   let path = '';
+  let viaSsh = true;
   let shown = url.replace(/^([a-z][a-z0-9+.-]*:\/\/).*@/is, '$1');
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
     try {
       const u = new URL(url);
+      viaSsh = u.protocol === 'ssh:';
       host = u.hostname.toLowerCase();
       path = decodeURIComponent(u.pathname);
       u.username = '';
@@ -347,11 +353,19 @@ function parseUrl(name, url) {
   if (!/^[a-z0-9][a-z0-9.-]*$/.test(host) || segs.length !== 2 || !segs.every((s) => /^[\w.-]+$/.test(s))) {
     usageExit(`cannot resolve <host>/<owner>/<repo> from remote ${name} URL '${shown}'; fix it with git remote set-url ${name} <url>`);
   }
+  if (viaSsh) {
+    const alias = host;
+    const g = run('ssh', ['-G', alias], { allowFail: true });
+    host = ((g.stdout || '').match(/^hostname[ \t]+(\S+)$/im) || [])[1]?.toLowerCase() || '';
+    if (g.status !== 0 || !/^[a-z0-9][a-z0-9.-]*$/.test(host)) {
+      usageExit(`cannot resolve SSH host alias '${alias}' of remote ${name} with ssh -G ${alias}; fix ~/.ssh/config or git remote set-url ${name} <url>`);
+    }
+  }
   return { host, slug: segs.join('/'), shown };
 }
 // git push sends to every push URL and ls-remote <name> reads the fetch URL, so each remote has
-// exactly one of each, naming the same repo. Only the PR remote needs gh.
-function resolveRemote(name, { gh }) {
+// exactly one of each, naming the same repo. GitHub hosts only: every remote's host passes gh auth.
+function resolveRemote(name) {
   const urls = (push) => {
     const r = run('git', ['remote', 'get-url', ...(push ? ['--push'] : []), '--all', name], { allowFail: true });
     return r.status === 0 ? r.stdout.split('\n').filter((u) => u.trim()) : [];
@@ -365,14 +379,14 @@ function resolveRemote(name, { gh }) {
   if (fetchRepo.host !== pushRepo.host || fetchRepo.slug.toLowerCase() !== pushRepo.slug.toLowerCase()) {
     usageExit(`remote ${name} fetches ${fetchRepo.host}/${fetchRepo.slug} but pushes to ${pushRepo.host}/${pushRepo.slug}; use one remote per repo (git remote set-url --push ${name} <fetch url>)`);
   }
-  if (gh && run('gh', ['auth', 'status', '--hostname', pushRepo.host], { allowFail: true }).status !== 0) {
-    usageExit(`remote ${name} host ${pushRepo.host} is not a GitHub host gh is authenticated for; run gh auth login --hostname ${pushRepo.host}`);
+  if (run('gh', ['auth', 'status', '--hostname', pushRepo.host], { allowFail: true }).status !== 0) {
+    usageExit(`GitHub hosts only (policy); ${pushRepo.host} is not one (remote ${name}; if it is a GitHub host, run gh auth login --hostname ${pushRepo.host})`);
   }
   return { name, ...pushRepo };
 }
 const prRemoteName = opts.prRemote || (opts.push ? opts.push.remote : 'origin');
-const pushRemote = opts.push ? resolveRemote(opts.push.remote, { gh: texts.length > 0 && opts.push.remote === prRemoteName }) : null;
-const prRemote = texts.length === 0 ? null : pushRemote && pushRemote.name === prRemoteName ? pushRemote : resolveRemote(prRemoteName, { gh: true });
+const pushRemote = opts.push ? resolveRemote(opts.push.remote) : null;
+const prRemote = texts.length === 0 ? null : pushRemote && pushRemote.name === prRemoteName ? pushRemote : resolveRemote(prRemoteName);
 const ghEnv = prRemote && { GH_HOST: prRemote.host, GH_REPO: prRemote.slug };
 
 // PR <n> must be the PR under audit: its head is H (or, before a push, the pushed branch) and its

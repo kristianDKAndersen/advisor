@@ -78,6 +78,8 @@ function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL, bas
   );
   chmodSync(join(shim, 'gh'), 0o755);
   chmodSync(join(shim, 'git'), 0o755);
+  write(shim, 'ssh', '#!/bin/sh\neval last=\\${$#}\necho "hostname $last"\n');
+  chmodSync(join(shim, 'ssh'), 0o755);
   return { dir, repo, bare, base, head, log, reads, runs: join(dir, 'runs') };
 }
 
@@ -341,11 +343,11 @@ test('B4 the remote host is pinned (GH_HOST, gh api --hostname); a nested path o
   expect(leak.stdout).toContain('GH_HOST=github.com GH_REPO=o/r gh pr comment 7 -R o/r');
   const nested = makeFixture({ origin: 'https://gitlab.com/grp/sub/proj.git' });
   expect(run(nested, [...base(nested), '--push', 'origin', 'feat']).code).toBe(2);
-  // A push alone makes no gh call, so a two-segment GitLab remote dry-runs.
+  // GitHub hosts only: a two-segment GitLab remote exits 2 even for a push alone.
   const gitlab = makeFixture({ origin: 'https://gitlab.com/grp/proj.git' });
   const res = run(gitlab, [...base(gitlab), '--push', 'origin', 'feat']);
-  expect(res.code).toBe(0);
-  expect(res.out).toContain('gitlab.com');
+  expect(res.code).toBe(2);
+  expect(res.out).toContain('GitHub hosts only (policy); gitlab.com is not one');
 });
 
 test('W1 --pr must be the PR whose head is the audited HEAD (or the pushed branch): exit 3, no gh write', () => {
@@ -620,7 +622,7 @@ test('R2-W4 (round-1 W8) --json failures carry status and executed; a missing --
   });
 });
 
-test('R2-W5 a push alone needs no gh: a GitLab push dry-runs with exit 0 and gh is never called; a malformed host still exits 2', () => {
+test('R2-W5 GitHub hosts only: a GitLab push alone exits 2 and a GitHub push alone runs gh auth; a malformed host exits 2', () => {
   const gl = makeFixture({ origin: 'https://gitlab.com/grp/proj.git' });
   const res = run(gl, [...base(gl), '--push', 'origin', 'feat']);
   const gh = makeFixture();
@@ -628,10 +630,46 @@ test('R2-W5 a push alone needs no gh: a GitLab push dry-runs with exit 0 and gh 
   const bad = makeFixture({ origin: 'ssh://-oProxyCommand=x/o/r.git' });
   expect({
     gitlab: res.code,
-    gitlabTarget: res.stdout.includes('target grp/proj on gitlab.com'),
     ghCalls: (existsSync(gh.reads) ? readFileSync(gh.reads, 'utf8') : '').includes('gh '),
     badHost: run(bad, [...base(bad), '--push', 'origin', 'feat']).code,
-  }).toEqual({ gitlab: 0, gitlabTarget: true, ghCalls: false, badHost: 2 });
+  }).toEqual({ gitlab: 2, ghCalls: true, badHost: 2 });
+});
+
+// The default ssh shim answers `ssh -G <host>` with hostname <host>; a test overrides it with writeSsh.
+function writeSsh(fx, body) {
+  write(join(fx.dir, 'shim'), 'ssh', `#!/bin/sh\n${body}\n`);
+  chmodSync(join(fx.dir, 'shim', 'ssh'), 0o755);
+}
+
+test('CB7e github-personal alias resolves to github.com and is pinned', () => {
+  const fx = makeFixture({ origin: 'git@github-personal:o/r.git' });
+  writeSsh(fx, 'if [ "$1" = -G ] && [ "$2" = github-personal ]; then printf "user git\\nhostname github.com\\nport 22\\n"; exit 0; fi\nexit 255');
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat', '--pr', '7', '--comment', thanks(fx), '--claims', passingClaims(fx)]);
+  expect(res.code).toBe(0);
+  expect(res.stdout).toContain('target o/r on github.com');
+  expect(res.stdout).toContain('GH_HOST=github.com GH_REPO=o/r gh pr comment 7 -R o/r');
+  const reads = readFileSync(fx.reads, 'utf8');
+  expect(reads).toContain('gh auth status --hostname github.com');
+  expect(reads).not.toContain('github-personal');
+  expect(res.stdout).not.toMatch(/GH_HOST=github-personal/);
+});
+
+test('CB7e ssh -G failure exits 2 naming the alias', () => {
+  const fx = makeFixture({ origin: 'git@github-personal:o/r.git' });
+  writeSsh(fx, 'echo "ssh: Could not resolve" >&2\nexit 255');
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat']);
+  expect(res.code).toBe(2);
+  expect(res.out).toContain('github-personal');
+  expect(res.out).toContain('ssh -G');
+});
+
+test('CB7e push-only runs gh auth status for the resolved host', () => {
+  const fx = makeFixture();
+  expect(run(fx, [...base(fx), '--push', 'origin', 'feat']).code).toBe(0);
+  expect(readFileSync(fx.reads, 'utf8')).toContain('gh auth status --hostname github.com');
+  const other = run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { SHIM_AUTH_HOST: 'ghe.example.com' } });
+  expect(other.code).toBe(2);
+  expect(other.out).toContain('advisor-publish: GitHub hosts only (policy); github.com is not one');
 });
 
 test('R2-W6 every push URL is validated: a second URL or push URL, or a fetch URL naming another repo, exits 2', () => {
