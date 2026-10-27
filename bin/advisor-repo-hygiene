@@ -1,0 +1,288 @@
+#!/usr/bin/env bun
+// bin/advisor-repo-hygiene - find, and with --execute clean, what advisor runs leave in a target repo.
+//
+// Usage:
+//   advisor-repo-hygiene --repo <path> [--max-age-hours 24] [--execute] [--json]
+//
+// Every check is read-only unless --execute is passed:
+//   TRACKED_RESIDUE     a modified tracked file whose diff vs HEAD has .advisor-output/ or
+//                       .advisor-preserved/ lines. --execute runs `git checkout HEAD -- <file>`
+//                       only when every changed line is an advisor line (or blank); a file
+//                       with any other change is reported and never touched.
+//   STALE_WORKTREE      a non-main worktree under realpath(os.tmpdir()) or the runs root
+//                       (ADVISOR_RUNS_ROOT, default ~/.advisor/runs) that is prunable (path
+//                       missing), or detached with a path mtime older than --max-age-hours.
+//                       --execute runs `git worktree remove --force <path>` for existing paths
+//                       and `git worktree prune` for missing ones. The prune is skipped when it
+//                       would also drop a missing worktree this tool may not touch. Locked
+//                       worktrees and ws/<sid> worktrees whose runs/<sid>/runner.json pid is
+//                       alive are never touched.
+//   UNIGNORED_ARTIFACT  an untracked, unignored path under .advisor-output/, .advisor-preserved/
+//                       or graphify-out/, or a file named GRAPH_REPORT.md. --execute adds
+//                       .advisor-output/ to info/exclude (lib/session.js ensureLocalExclude);
+//                       the others are only reported.
+// --execute reverts tracked residue first, then rescans, so an .advisor-output/ that the
+// reverted .gitignore stops ignoring is handled in the same run; a final rescan sets the exit.
+// Output: one `path RULE message` line per finding, or with --json one object
+// {repo, execute, actions:[{rule,path,command,ok,error?}], findings:[{rule,path,fixable,command,message}], exit_code}.
+//
+// Exit codes: 0 clean, or every finding fixed under --execute; 1 findings remain; 2 usage;
+// 3 not a git repo; 4 an --execute action (or a git read) failed.
+
+const { execFileSync } = require('node:child_process');
+const { existsSync, statSync, readFileSync, realpathSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { join, resolve, dirname, basename, sep } = require('node:path');
+const { RUNS_ROOT, ensureLocalExclude, localExcludePath } = require('../lib/session.js');
+
+const USAGE = `Usage: advisor-repo-hygiene --repo <path> [--max-age-hours 24] [--execute] [--json]
+
+Reports advisor residue in a target repo: TRACKED_RESIDUE (advisor-only edits to tracked
+files), STALE_WORKTREE (old or missing temp/run worktrees) and UNIGNORED_ARTIFACT
+(advisor output that git add -A would commit). Read-only unless --execute.
+
+Flags:
+  --repo <path>          Git repository to check
+  --max-age-hours <n>    Age after which a detached temp worktree is stale (default: 24)
+  --execute              Revert, remove, prune and exclude what is safe to fix
+  --json                 Print one JSON object instead of one line per finding
+
+Exit codes: 0 clean or all fixed, 1 findings remain, 2 usage, 3 not a git repo,
+4 an --execute action failed.
+`;
+
+function usageExit(msg) {
+  if (msg) console.error(`advisor-repo-hygiene: ${msg}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const opts = { maxAgeHours: 24, execute: false, json: false };
+const argv = process.argv.slice(2);
+if (argv.length === 0 || argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(2);
+}
+while (argv.length > 0) {
+  const arg = argv.shift();
+  const val = () => {
+    const v = argv.shift();
+    if (v === undefined) usageExit(`${arg} needs a value`);
+    return v;
+  };
+  switch (arg) {
+    case '--repo': opts.repo = resolve(val()); break;
+    case '--max-age-hours': {
+      const n = Number(val());
+      if (!Number.isFinite(n) || n <= 0) usageExit('--max-age-hours needs a number > 0');
+      opts.maxAgeHours = n;
+      break;
+    }
+    case '--execute': opts.execute = true; break;
+    case '--json': opts.json = true; break;
+    default: usageExit(`unknown flag: ${arg}`);
+  }
+}
+if (!opts.repo) usageExit('--repo is required');
+
+let repo;
+try {
+  repo = execFileSync('git', ['-C', opts.repo, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+} catch (_e) {
+  repo = '';
+}
+if (!repo) {
+  console.error(`advisor-repo-hygiene: not a git repository: ${opts.repo}`);
+  process.exit(3);
+}
+
+const git = (args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+const q = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+const cmd = (...a) => a.map(q).join(' ');
+
+// realpath of p, or of its deepest existing ancestor with the rest re-appended (missing paths).
+function real(p) {
+  let head = resolve(p);
+  const tail = [];
+  for (;;) {
+    try {
+      return join(realpathSync(head), ...tail);
+    } catch (_e) {
+      const up = dirname(head);
+      if (up === head) return resolve(p);
+      tail.unshift(basename(head));
+      head = up;
+    }
+  }
+}
+
+const ROOTS = [real(tmpdir()), real(RUNS_ROOT)];
+const underRoot = (p) => ROOTS.some((r) => p.startsWith(r + sep));
+const ADVISOR_LINE = /^(\*\*)?\/?\.advisor-(output|preserved)(\/\**)?$/;
+const ARTIFACT_DIRS = ['.advisor-output', '.advisor-preserved', 'graphify-out'];
+
+function scanTracked() {
+  const findings = [];
+  const parts = git(['--no-optional-locks', 'status', '--porcelain', '-uno', '-z']).split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (entry.length < 4) continue;
+    const xy = entry.slice(0, 2);
+    const file = entry.slice(3);
+    if (xy[0] === 'R' || xy[0] === 'C') i++; // -z puts the rename source in the next field
+    if (!xy.includes('M')) continue;
+    const changed = git(['diff', 'HEAD', '-U0', '--no-color', '--no-ext-diff', '--', file])
+      .split('\n')
+      .filter((l) => /^[+-](?![+-]{2} )/.test(l))
+      .map((l) => l.slice(1).trim());
+    const advisor = changed.filter((l) => ADVISOR_LINE.test(l));
+    if (advisor.length === 0) continue;
+    const fixable = changed.every((l) => l === '' || ADVISOR_LINE.test(l));
+    const command = cmd('git', '-C', repo, 'checkout', 'HEAD', '--', file);
+    findings.push({
+      rule: 'TRACKED_RESIDUE',
+      path: file,
+      fixable,
+      command,
+      message: fixable
+        ? `diff is only advisor lines; revert with: ${command}`
+        : `diff mixes advisor lines (${advisor.join(', ')}) with other changes; remove them by hand`
+    });
+  }
+  return findings;
+}
+
+function listWorktrees() {
+  const wts = [];
+  let cur = null;
+  for (const line of git(['worktree', 'list', '--porcelain']).split('\n')) {
+    if (line.startsWith('worktree ')) {
+      cur = { path: line.slice(9), branch: '', detached: false, bare: false, locked: false, prunable: false };
+      wts.push(cur);
+    } else if (!cur) continue;
+    else if (line === 'detached') cur.detached = true;
+    else if (line === 'bare') cur.bare = true;
+    else if (line.startsWith('branch ')) cur.branch = line.slice(7);
+    else if (line === 'locked' || line.startsWith('locked ')) cur.locked = true;
+    else if (line === 'prunable' || line.startsWith('prunable ')) cur.prunable = true;
+  }
+  for (const w of wts) {
+    w.real = real(w.path);
+    if (!existsSync(w.path)) w.prunable = true;
+  }
+  return wts;
+}
+
+// A ws/<sid> branch or a path under runs/<sid>/ names a session; its runner.json pid alive = hands off.
+function liveRunner(w) {
+  const sids = [];
+  const m = /^refs\/heads\/ws\/(.+)$/.exec(w.branch);
+  if (m) sids.push(m[1]);
+  const runs = real(RUNS_ROOT);
+  if (w.real.startsWith(runs + sep)) sids.push(w.real.slice(runs.length + 1).split(sep)[0]);
+  return sids.some((sid) => {
+    try {
+      const pid = JSON.parse(readFileSync(join(RUNS_ROOT, sid, 'runner.json'), 'utf8')).pid;
+      if (!Number.isInteger(pid) || pid <= 0) return false;
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return e.code === 'EPERM';
+    }
+  });
+}
+
+function scanWorktrees() {
+  const all = listWorktrees();
+  const self = real(repo);
+  const cutoff = Date.now() - opts.maxAgeHours * 3600 * 1000;
+  const stale = all.filter((w, i) => {
+    if (i === 0 || w.bare || w.locked || w.real === self || !underRoot(w.real) || liveRunner(w)) return false;
+    if (w.prunable) return true;
+    if (!w.detached) return false;
+    try {
+      return statSync(w.path).mtimeMs < cutoff;
+    } catch (_e) {
+      return false;
+    }
+  });
+  // `git worktree prune` is repo-wide: never run it while it would drop a worktree not in `stale`.
+  const blockers = all.filter((w) => w.prunable && !w.locked && !stale.includes(w)).map((w) => w.path);
+  return stale.map((w) => {
+    const command = w.prunable ? cmd('git', '-C', repo, 'worktree', 'prune') : cmd('git', '-C', repo, 'worktree', 'remove', '--force', w.path);
+    let message = w.prunable ? `path is missing; prune with: ${command}` : `detached and untouched for over ${opts.maxAgeHours}h; remove with: ${command}`;
+    const fixable = !(w.prunable && blockers.length > 0);
+    if (!fixable) message = `path is missing; prune skipped because it would also drop ${blockers.join(', ')}`;
+    return { rule: 'STALE_WORKTREE', path: w.path, prunable: w.prunable, fixable, command, message };
+  });
+}
+
+function scanArtifacts() {
+  const found = new Map();
+  for (const f of git(['ls-files', '--others', '--exclude-standard', '-z']).split('\0')) {
+    if (!f) continue;
+    const segs = f.split('/');
+    const d = segs.findIndex((s, k) => k < segs.length - 1 && ARTIFACT_DIRS.includes(s));
+    let p;
+    if (d >= 0) p = segs.slice(0, d + 1).join('/') + '/';
+    else if (segs[segs.length - 1] === 'GRAPH_REPORT.md') p = f;
+    else continue;
+    if (found.has(p)) continue;
+    const fixable = d >= 0 && segs[d] === '.advisor-output';
+    const command = fixable ? `echo .advisor-output/ >> ${q(localExcludePath(repo))}` : '';
+    found.set(p, {
+      rule: 'UNIGNORED_ARTIFACT',
+      path: p,
+      fixable,
+      command,
+      message: fixable
+        ? `untracked and unignored, git add -A would commit it; exclude with: ${command}`
+        : 'untracked and unignored, git add -A would commit it; delete or ignore it by hand'
+    });
+  }
+  return [...found.values()];
+}
+
+const scan = () => [...scanTracked(), ...scanWorktrees(), ...scanArtifacts()];
+
+const actions = [];
+function act(f, fn) {
+  try {
+    fn();
+    actions.push({ rule: f.rule, path: f.path, command: f.command, ok: true });
+  } catch (e) {
+    actions.push({ rule: f.rule, path: f.path, command: f.command, ok: false, error: String(e.stderr || e.message).trim() });
+  }
+}
+
+let findings;
+try {
+  if (opts.execute) {
+    for (const f of scanTracked()) if (f.fixable) act(f, () => git(['checkout', 'HEAD', '--', f.path]));
+    let pruned = false;
+    for (const f of scanWorktrees()) {
+      if (!f.fixable) continue;
+      if (!f.prunable) act(f, () => git(['worktree', 'remove', '--force', f.path]));
+      else if (!pruned) {
+        pruned = true;
+        act(f, () => git(['worktree', 'prune']));
+      }
+    }
+    const out = scanArtifacts().find((f) => f.fixable);
+    if (out) act(out, () => ensureLocalExclude(repo));
+  }
+  findings = scan();
+} catch (e) {
+  console.error(`advisor-repo-hygiene: git failed: ${String(e.stderr || e.message).trim()}`);
+  process.exit(4);
+}
+
+const exitCode = actions.some((a) => !a.ok) ? 4 : findings.length > 0 ? 1 : 0;
+if (opts.json) {
+  console.log(JSON.stringify({ repo, execute: opts.execute, actions, findings, exit_code: exitCode }, null, 2));
+} else {
+  for (const a of actions) console.log(`${a.path} ${a.rule} ${a.ok ? 'fixed' : 'FAILED'}: ${a.command}${a.ok ? '' : ` (${a.error})`}`);
+  for (const f of findings) console.log(`${f.path} ${f.rule} ${f.message}`);
+  if (exitCode === 0) console.log('clean');
+}
+process.exit(exitCode);
