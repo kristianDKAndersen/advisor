@@ -1,0 +1,443 @@
+#!/usr/bin/env bun
+// bin/advisor-prose-lint - enforce a repo's measurable prose rules from a conventions digest.
+//
+// Usage:
+//   advisor-prose-lint --digest <conventions-digest.md> (--repo <path> --base <ref> | --text <file>...) [--json]
+//
+// Rules come ONLY from the yaml fence under "## Measurable rules" in the digest that
+// bin/advisor-conventions writes (no built-in defaults). Keys used: max_sentence_words,
+// max_comment_sentences, max_comment_words, max_line_length, banned_chars, banned_phrases,
+// file_max_lines. policy_paths is ignored. banned_phrases match case-insensitive and literal.
+//
+// Diff mode (--repo + --base) lints the lines added in `git diff <base>..HEAD`, reading each
+// touched file at HEAD so fences and block comments resolve. A finding is kept when it
+// overlaps an added line (a sentence or comment block that spans a touched line counts);
+// max_line_length and file_max_lines apply to every touched file of any type. Comments are
+// found by extension: # for sh/bash/zsh/py/yaml/yml; // and /* */ for js/mjs/cjs/jsx/ts/tsx;
+// <!-- --> and prose for md. max_comment_* apply per comment block (consecutive comment-only
+// lines, or one trailing comment). max_sentence_words applies to comment and md prose
+// sentences; banned_* to comment and md prose text. Code strings and other file types are
+// only checked for max_line_length and file_max_lines.
+// Text mode (--text, repeatable) lints whole files as markdown prose, skipping max_line_length.
+//
+// Sentence splitting replicates splitSentences in bin/advisor-claims-check (markdown-aware,
+// code fences skipped, no split after e.g./i.e./vs.); deviation: table rows are skipped.
+//
+// Output: `path:line rule message` per finding, or one JSON object with --json. Read-only.
+// Exit codes: 0 clean, 1 violations, 2 usage, 3 no measurable block in the digest.
+
+const { readFileSync } = require('node:fs');
+const { extname } = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+const USAGE = `Usage: advisor-prose-lint --digest <conventions-digest.md> (--repo <path> --base <ref> | --text <file>...) [--json]
+
+Lints a repo's measurable prose rules (the "## Measurable rules" yaml fence of a digest built
+by advisor-conventions). Read-only.
+
+Flags:
+  --digest <file>   conventions-digest.md holding the measurable block
+  --repo <path>     Git repository (diff mode)
+  --base <ref>      Lint the lines added in <base>..HEAD (diff mode)
+  --text <file>...  Lint files as prose (text mode; repeatable)
+  --json            Print one JSON object instead of one finding per line
+
+Exit codes: 0 clean, 1 violations, 2 usage, 3 no measurable block.
+`;
+
+function usageExit(msg) {
+  if (msg) console.error(`advisor-prose-lint: ${msg}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const opts = { text: [], json: false };
+const argv = process.argv.slice(2);
+if (argv.length === 0 || argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(2);
+}
+while (argv.length > 0) {
+  const arg = argv.shift();
+  const val = () => {
+    const v = argv.shift();
+    if (v === undefined) usageExit(`${arg} needs a value`);
+    return v;
+  };
+  switch (arg) {
+    case '--digest': opts.digest = val(); break;
+    case '--repo': opts.repo = val(); break;
+    case '--base': opts.base = val(); break;
+    case '--text':
+      opts.text.push(val());
+      while (argv.length > 0 && !argv[0].startsWith('--')) opts.text.push(argv.shift());
+      break;
+    case '--json': opts.json = true; break;
+    default: usageExit(`unknown flag: ${arg}`);
+  }
+}
+if (!opts.digest) usageExit('--digest is required');
+const textMode = opts.text.length > 0;
+if (textMode && (opts.repo || opts.base)) usageExit('--text cannot be combined with --repo/--base');
+if (!textMode && !(opts.repo && opts.base)) usageExit('give --repo and --base (diff mode) or --text (text mode)');
+
+function readOrExit(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (e) {
+    return usageExit(`cannot read ${path}: ${e.message}`);
+  }
+}
+
+// --- rules ------------------------------------------------------------
+
+const INT_KEYS = ['max_sentence_words', 'max_comment_sentences', 'max_comment_words', 'max_line_length', 'file_max_lines'];
+const LIST_KEYS = ['banned_chars', 'banned_phrases'];
+
+// Returns the validated rules, or null when the digest has no measurable block.
+function loadRules(path) {
+  const lines = readOrExit(path).split('\n');
+  const head = lines.findIndex((l) => /^##\s+Measurable rules\s*$/.test(l));
+  if (head < 0) return null;
+  let i = head + 1;
+  while (i < lines.length && !lines[i].trim()) i++;
+  if (!/^```ya?ml\s*$/.test(lines[i] || '')) return null;
+  const close = lines.findIndex((l, j) => j > i && /^```\s*$/.test(l));
+  if (close < 0) return null;
+  let data;
+  try {
+    data = Bun.YAML.parse(lines.slice(i + 1, close).join('\n'));
+  } catch (e) {
+    return usageExit(`measurable block in ${path} is not valid yaml: ${e.message}`);
+  }
+  if (data === null || data === undefined) return null;
+  if (typeof data !== 'object' || Array.isArray(data)) return usageExit(`measurable block in ${path} is not a yaml mapping`);
+  const rules = {};
+  for (const key of INT_KEYS) {
+    if (data[key] === undefined) continue;
+    if (!Number.isInteger(data[key]) || data[key] < 1) usageExit(`${key} must be a positive integer, got ${JSON.stringify(data[key])}`);
+    rules[key] = data[key];
+  }
+  for (const key of LIST_KEYS) {
+    if (data[key] === undefined) continue;
+    const list = Array.isArray(data[key]) ? data[key] : [data[key]];
+    if (!list.every((x) => typeof x === 'string' && x !== '')) usageExit(`${key} must be a list of non-empty strings`);
+    if (list.length > 0) rules[key] = list;
+  }
+  return Object.keys(rules).length > 0 ? rules : null;
+}
+
+const R = loadRules(opts.digest);
+if (!R) {
+  const msg = `no measurable rules in ${opts.digest}`;
+  if (opts.json) console.log(JSON.stringify({ rules: null, findings: [], exit_code: 3, error: msg }));
+  else console.error(`advisor-prose-lint: ${msg}`);
+  process.exit(3);
+}
+
+// --- sentences --------------------------------------------------------
+// Replicated from splitSentences in bin/advisor-claims-check; keep the split rules in step.
+
+const norm = (s) => s.replace(/\s+/g, ' ').trim();
+const ABBREV = new Set(['e.g', 'i.e', 'vs']);
+const countWords = (s) => s.split(/\s+/).filter((w) => /[A-Za-z0-9]/.test(w)).length;
+
+// entries: [{line, text}] in file order. Returns [{sentence, line, endLine}].
+function sentencesOf(entries) {
+  const out = [];
+  let para = null;
+  const push = (s, line, endLine) => {
+    const n = norm(s);
+    if (n && /[A-Za-z0-9]/.test(n)) out.push({ sentence: n, line, endLine });
+  };
+  const flush = () => {
+    if (!para) return;
+    let text = '';
+    const starts = [];
+    for (const l of para) {
+      if (text) text += ' ';
+      starts.push({ off: text.length, line: l.line });
+      text += l.text;
+    }
+    const lineAt = (off) => starts.filter((s) => s.off <= off).pop().line;
+    const lead = (s) => s.length - s.trimStart().length;
+    let begin = 0;
+    const re = /[.!?]+[)"'\]*_`]*(?=\s|$)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const before = text.slice(begin, m.index).split(/\s+/).pop().toLowerCase();
+      if (m[0][0] === '.' && ABBREV.has(before)) continue;
+      push(text.slice(begin, re.lastIndex), lineAt(begin + lead(text.slice(begin))), lineAt(m.index));
+      begin = re.lastIndex;
+    }
+    push(text.slice(begin), lineAt(begin + lead(text.slice(begin))), lineAt(Math.max(0, text.length - 1)));
+    para = null;
+  };
+  for (const { line, text: raw } of entries) {
+    if (raw.trim().startsWith('|')) {
+      flush();
+      continue;
+    }
+    if (!raw.trim()) {
+      flush();
+      continue;
+    }
+    const isItem = /^\s*([-*+]|\d+[.)])\s+/.test(raw);
+    const isHeading = /^#{1,6}\s/.test(raw.trim());
+    const stripped = raw.replace(/^\s*(>\s*)*/, '').replace(/^(#{1,6}\s+|([-*+]|\d+[.)])\s+)/, '');
+    if (isItem || isHeading) flush();
+    (para = para || []).push({ text: stripped.trim(), line });
+    if (isHeading) flush();
+  }
+  flush();
+  return out;
+}
+
+// --- per-line scanners ------------------------------------------------
+// Each returns [{code, comment, has}] per line: `code` is the non-comment text (prose for
+// md), `comment` the comment text, `has` whether the line carries or continues a comment.
+
+const KINDS = {
+  '.sh': 'hash', '.bash': 'hash', '.zsh': 'hash', '.py': 'hash', '.yaml': 'hash', '.yml': 'hash',
+  '.js': 'slash', '.mjs': 'slash', '.cjs': 'slash', '.jsx': 'slash', '.ts': 'slash', '.tsx': 'slash',
+  '.md': 'md', '.markdown': 'md',
+};
+
+function scanCode(lines, lang) {
+  const state = { inBlock: false };
+  return lines.map((line, n) => {
+    if (n === 0 && line.startsWith('#!')) return { code: line, comment: '', has: false };
+    let code = '';
+    let comment = '';
+    let has = state.inBlock;
+    let quote = null;
+    let i = 0;
+    while (i < line.length) {
+      const c = line[i];
+      if (state.inBlock) {
+        const end = line.indexOf('*/', i);
+        if (end < 0) {
+          comment += line.slice(i);
+          i = line.length;
+        } else {
+          comment += ` ${line.slice(i, end)}`;
+          state.inBlock = false;
+          i = end + 2;
+        }
+        continue;
+      }
+      if (quote) {
+        code += c;
+        if (c === '\\') {
+          code += line[i + 1] || '';
+          i += 2;
+          continue;
+        }
+        if (c === quote) quote = null;
+        i++;
+        continue;
+      }
+      if (c === '"' || c === "'" || (c === '`' && lang === 'slash')) {
+        quote = c;
+        code += c;
+        i++;
+        continue;
+      }
+      if (lang === 'hash' && c === '#' && (i === 0 || /\s/.test(line[i - 1]))) {
+        has = true;
+        comment += line.slice(i).replace(/^#+/, '');
+        break;
+      }
+      if (lang === 'slash' && c === '/' && line[i + 1] === '/' && line[i - 1] !== ':') {
+        has = true;
+        comment += line.slice(i).replace(/^\/+/, '');
+        break;
+      }
+      if (lang === 'slash' && c === '/' && line[i + 1] === '*') {
+        has = true;
+        state.inBlock = true;
+        i += 2;
+        continue;
+      }
+      code += c;
+      i++;
+    }
+    if (lang === 'slash') comment = comment.trim().replace(/^\*+/, '');
+    return { code, comment: comment.trim(), has };
+  });
+}
+
+function scanMarkdown(lines) {
+  let inFence = false;
+  let inComment = false;
+  return lines.map((raw) => {
+    if (!inComment && /^\s*(```|~~~)/.test(raw)) {
+      inFence = !inFence;
+      return { code: '', comment: '', has: false };
+    }
+    if (inFence) return { code: '', comment: '', has: false };
+    let rest = raw;
+    let code = '';
+    let comment = '';
+    let has = inComment;
+    while (rest) {
+      if (inComment) {
+        const end = rest.indexOf('-->');
+        comment += end < 0 ? rest : `${rest.slice(0, end)} `;
+        inComment = end < 0;
+        rest = end < 0 ? '' : rest.slice(end + 3);
+      } else {
+        const start = rest.indexOf('<!--');
+        code += start < 0 ? rest : rest.slice(0, start);
+        has = has || start >= 0;
+        inComment = start >= 0;
+        rest = start < 0 ? '' : rest.slice(start + 4);
+      }
+    }
+    return { code, comment: comment.trim(), has };
+  });
+}
+
+// --- analysis ---------------------------------------------------------
+
+// Returns findings [{path, line, endLine, rule, message, fileLevel?}] for one file's content.
+function analyze(path, content, kind, isText) {
+  const lines = content.replace(/\n$/, '').split('\n').map((l) => l.replace(/\r$/, ''));
+  const out = [];
+  const add = (line, endLine, rule, message) => out.push({ path, line, endLine, rule, message });
+
+  if (R.max_line_length && !isText) {
+    lines.forEach((l, i) => {
+      const len = [...l].length;
+      if (len > R.max_line_length) add(i + 1, i + 1, 'max_line_length', `line is ${len} chars, limit ${R.max_line_length}`);
+    });
+  }
+
+  const banned = (text, line) => {
+    for (const ch of R.banned_chars || []) {
+      if (text.includes(ch)) add(line, line, 'banned_chars', `banned character "${ch}" (U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')})`);
+    }
+    for (const phrase of R.banned_phrases || []) {
+      if (text.toLowerCase().includes(phrase.toLowerCase())) add(line, line, 'banned_phrases', `banned phrase "${phrase}"`);
+    }
+  };
+  const sentenceLimit = (sentences) => {
+    if (!R.max_sentence_words) return;
+    for (const s of sentences) {
+      const n = countWords(s.sentence);
+      if (n > R.max_sentence_words) add(s.line, s.endLine, 'max_sentence_words', `sentence has ${n} words, limit ${R.max_sentence_words}`);
+    }
+  };
+
+  if (kind !== 'other') {
+    const info = kind === 'md' ? scanMarkdown(lines) : scanCode(lines, kind);
+    if (kind === 'md') {
+      sentenceLimit(sentencesOf(info.map((x, i) => ({ line: i + 1, text: x.code }))));
+      info.forEach((x, i) => banned(x.code, i + 1));
+    }
+    // A block is a run of comment-only lines, or one trailing comment after code.
+    for (let i = 0; i < info.length; ) {
+      if (!info[i].has) {
+        i++;
+        continue;
+      }
+      let j = i;
+      if (!info[i].code.trim()) while (j + 1 < info.length && info[j + 1].has && !info[j + 1].code.trim()) j++;
+      const entries = [];
+      for (let k = i; k <= j; k++) entries.push({ line: k + 1, text: info[k].comment });
+      const sentences = sentencesOf(entries);
+      const words = entries.reduce((sum, e) => sum + countWords(e.text), 0);
+      if (R.max_comment_sentences && sentences.length > R.max_comment_sentences) {
+        add(i + 1, j + 1, 'max_comment_sentences', `comment has ${sentences.length} sentences, limit ${R.max_comment_sentences}`);
+      }
+      if (R.max_comment_words && words > R.max_comment_words) add(i + 1, j + 1, 'max_comment_words', `comment has ${words} words, limit ${R.max_comment_words}`);
+      sentenceLimit(sentences);
+      for (const e of entries) banned(e.text, e.line);
+      i = j + 1;
+    }
+  }
+
+  out.sort((a, b) => a.line - b.line);
+  if (R.file_max_lines && lines.length > R.file_max_lines) {
+    out.unshift({ path, line: 1, endLine: 1, rule: 'file_max_lines', message: `file has ${lines.length} lines, limit ${R.file_max_lines}`, fileLevel: true });
+  }
+  return out;
+}
+
+// --- run --------------------------------------------------------------
+
+function git(...args) {
+  return execFileSync('git', ['-C', opts.repo, ...args], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
+const findings = [];
+let fileCount = 0;
+
+if (textMode) {
+  for (const path of opts.text) {
+    fileCount++;
+    findings.push(...analyze(path, readOrExit(path), 'md', true));
+  }
+} else {
+  if (opts.base.startsWith('-')) usageExit(`bad --base: ${opts.base}`);
+  let diff;
+  try {
+    git('rev-parse', '--verify', `${opts.base}^{commit}`);
+    diff = git('-c', 'core.quotepath=false', 'diff', '-U0', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', `${opts.base}..HEAD`, '--');
+  } catch {
+    usageExit(`cannot diff ${opts.base}..HEAD in ${opts.repo}`);
+  }
+  // path -> Set of added line numbers at HEAD
+  const added = new Map();
+  let current = null;
+  let inHeader = false;
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('diff --git ')) {
+      inHeader = true;
+      current = null;
+    } else if (inHeader && l.startsWith('+++ ')) {
+      let p = l.slice(4).replace(/\t.*$/, '');
+      if (p.startsWith('"')) {
+        try {
+          p = JSON.parse(p);
+        } catch {}
+      }
+      current = p === '/dev/null' ? null : p.replace(/^b\//, '');
+      if (current && !added.has(current)) added.set(current, new Set());
+    } else if (l.startsWith('@@')) {
+      inHeader = false;
+      const m = l.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+      if (m && current) {
+        const count = m[2] === undefined ? 1 : Number(m[2]);
+        for (let n = 0; n < count; n++) added.get(current).add(Number(m[1]) + n);
+      }
+    }
+  }
+  for (const [path, set] of added) {
+    if (set.size === 0) continue;
+    let content;
+    try {
+      content = git('show', `HEAD:${path}`);
+    } catch {
+      continue; // gitlink or unreadable blob
+    }
+    fileCount++;
+    const kind = KINDS[extname(path).toLowerCase()] || 'other';
+    for (const f of analyze(path, content, kind, false)) {
+      let touched = f.fileLevel;
+      for (let n = f.line; !touched && n <= f.endLine; n++) touched = set.has(n);
+      if (touched) findings.push(f);
+    }
+  }
+}
+
+const exitCode = findings.length === 0 ? 0 : 1;
+if (opts.json) {
+  const list = findings.map(({ path, line, rule, message }) => ({ path, line, rule, message }));
+  console.log(JSON.stringify({ mode: textMode ? 'text' : 'diff', base: opts.base || null, files: fileCount, rules: R, findings: list, exit_code: exitCode }));
+} else if (findings.length > 0) {
+  for (const f of findings) console.log(`${f.path}:${f.line} ${f.rule} ${f.message}`);
+} else {
+  console.log(`advisor-prose-lint: ${fileCount} file(s) checked, 0 findings.`);
+}
+process.exit(exitCode);
