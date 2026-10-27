@@ -303,15 +303,7 @@ bin/advisor-schedule \
 
 **Per-worker advisor model:** `bin/summon` disables the advisor tool for Fable workers (`CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`); every other worker inherits the global `advisorModel` (`opus`). There is no `--advisor` CLI flag.
 
-### tmux multiplexing (`ADVISOR_TMUX_MULTIPLEX`)
-
-With `ADVISOR_TMUX_MULTIPLEX=1`, all workers share one tmux session `advisor` (window `<agent>-<sid>`; ensemble/`tui` layouts in README) instead of one session per worker (`advisor-<sid>`). It changes no delegation logic or guardrail.
-
-**Env-gated launch defaults** (set in `~/.zshrc` next to `ADVISOR_TMUX_MULTIPLEX`):
-- `ADVISOR_DEFAULT_TUI=1`: act as `--tui` for every non-ensemble `bin/summon` call; `--ensemble N` always runs headless.
-- `ADVISOR_NO_TIMELINE=1`: suppress the timeline auto-start and browser open in headless mode (same as `--no-timeline`).
-- `--headless` flag: per-call override that forces headless even with `ADVISOR_DEFAULT_TUI=1`. Unattended call sites (`bin/advisor-schedule`, `lib/parallel.js`) pass it automatically.
-- `ADVISOR_ECO=0`: disables the token-economy block (`lib/eco-rules.js`: ECO-CORE, or completeness-preserving ECO-REVIEW for review agents) in every worker's bootstrap prompt.
+Launch env flags (`ADVISOR_TMUX_MULTIPLEX`, `ADVISOR_DEFAULT_TUI`, `ADVISOR_NO_TIMELINE`, `--headless`): see README.md, "Launch environment flags". `ADVISOR_ECO=0` disables the token-economy block (`lib/eco-rules.js`: ECO-CORE, or ECO-REVIEW for review agents) in every worker's bootstrap prompt.
 
 ## The advisor-loop (bounded builder-plus-critic rounds)
 

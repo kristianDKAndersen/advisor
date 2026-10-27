@@ -335,6 +335,19 @@ tmux attach -t advisor \; select-window -t tui
 
 **Key distinction:** `--ensemble` = N copies of one brief tiled together in a dedicated window; `--tui` = independent tasks from separate `bin/summon` calls tiled together in the shared `tui` window. Solo workers (neither flag) get their own named window — switch between them with window navigation commands.
 
+### Launch environment flags
+
+Moved from claude.md on 2026-10-27 to keep the doctrine under its size budget; `ADVISOR_ECO=0` stays in claude.md.
+
+**tmux multiplexing (`ADVISOR_TMUX_MULTIPLEX`)**
+
+With `ADVISOR_TMUX_MULTIPLEX=1`, all workers share one tmux session `advisor` (window `<agent>-<sid>`; ensemble/`tui` layouts in README) instead of one session per worker (`advisor-<sid>`). It changes no delegation logic or guardrail.
+
+**Env-gated launch defaults** (set in `~/.zshrc` next to `ADVISOR_TMUX_MULTIPLEX`):
+- `ADVISOR_DEFAULT_TUI=1`: act as `--tui` for every non-ensemble `bin/summon` call; `--ensemble N` always runs headless.
+- `ADVISOR_NO_TIMELINE=1`: suppress the timeline auto-start and browser open in headless mode (same as `--no-timeline`).
+- `--headless` flag: per-call override that forces headless even with `ADVISOR_DEFAULT_TUI=1`. Unattended call sites (`bin/advisor-schedule`, `lib/parallel.js`) pass it automatically.
+
 ### Attach and navigate
 
 ```bash
