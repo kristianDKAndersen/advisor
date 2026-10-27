@@ -65,12 +65,13 @@ function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL, bas
   write(
     shim,
     'gh',
-    `#!/bin/sh\n. "${knobs}"\nif [ "$1" = auth ]; then\n  echo "gh $*" >> "${reads}"\n  [ "$*" = "auth status --hostname \${SHIM_AUTH_HOST:-github.com}" ]; exit $?\nfi\n` +
+    `#!/bin/sh\n. "${knobs}"\nif [ "$1" = auth ]; then\n  echo "gh $*" >> "${reads}"\n  [ -n "$SHIM_AUTH_STATUS_FAIL" ] && exit 1\n  [ "$*" = "auth status --hostname \${SHIM_AUTH_HOST:-github.com}" ]; exit $?\nfi\n` +
       `if [ "$1 $2" = "pr view" ]; then\n  echo "gh $* | GH_HOST=$GH_HOST" >> "${reads}"\n  head=\${SHIM_PR_HEAD:-$(git rev-parse HEAD)}\n` +
       `  if [ -n "$SHIM_PR_HEADS" ]; then\n    n=$(grep -c '^gh pr view' "${reads}")\n    set -- $SHIM_PR_HEADS\n    while [ "$n" -gt 1 ] && [ $# -gt 1 ]; do shift; n=$((n - 1)); done\n    head=$1\n  fi\n` +
       `  state=\${SHIM_PR_STATE:-OPEN}\n  if [ -n "$SHIM_PR_STATES" ]; then\n    n=$(grep -c '^gh pr view' "${reads}")\n    set -- $SHIM_PR_STATES\n    while [ "$n" -gt 1 ] && [ $# -gt 1 ]; do shift; n=$((n - 1)); done\n    state=$1\n  fi\n` +
       `  printf '{"headRefOid":"%s","headRefName":"%s","headRepository":{"name":"r"},"headRepositoryOwner":{"login":"%s"},"baseRefName":"%s","baseRefOid":"%s","state":"%s","author":{"login":"%s"}}\\n' "$head" "\${SHIM_PR_BRANCH:-feat}" "\${SHIM_PR_OWNER:-o}" "\${SHIM_PR_BASE_NAME:-main}" "\${SHIM_PR_BASE_OID:-$(git rev-parse main)}" "$state" "\${SHIM_PR_AUTHOR:-author}"\n  exit 0\nfi\n` +
       `if [ "$1" = api ] && [ "$2" != -X ]; then\n  echo "gh $* | GH_HOST=$GH_HOST | GH_REPO=$GH_REPO" >> "${reads}"\n` +
+      `  if [ "$2" = user ] && [ -z "$GH_REPO" ]; then\n    case "$* " in *"--hostname \${SHIM_AUTH_HOST:-github.com} "*) ;; *) exit 1;; esac\n    [ -n "$SHIM_NO_LOGIN" ] || echo "\${SHIM_LOGIN:-me}"\n    exit 0\n  fi\n` +
       `  case "$*" in\n    *.default_branch*) echo "\${SHIM_DEFAULT_BRANCH:-main}"; exit 0;;\n` +
       `    *.commit.sha*) [ -n "$SHIM_API_OID" ] && { echo "$SHIM_API_OID"; exit 0; }; exec git --git-dir="${bare}" rev-parse --verify --quiet "refs/heads/\${2##*/branches/}";;\n  esac\n` +
       `  [ -n "$SHIM_PERM_FAIL" ] && exit 1\n` +
@@ -80,7 +81,7 @@ function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL, bas
   write(
     shim,
     'git',
-    `#!/bin/sh\n. "${knobs}"\nif [ "$1" = push ]; then\n  echo "git $* | cwd=$(pwd)" >> "${log}"\n  [ -n "$SHIM_PUSH_FAIL" ] && { echo "push rejected" >&2; exit 1; }\n  eval last=\\\${$#}\n  exec "${REAL_GIT}" push -q "${bare}" "$last"\nfi\n` +
+    `#!/bin/sh\n. "${knobs}"\npre=\nif [ "$1 $2" = "-c core.hooksPath=/dev/null" ]; then pre="$1 $2"; shift 2; fi\nif [ "$1" = push ]; then\n  echo "git $* | cwd=$(pwd)" >> "${log}"\n  [ -n "$SHIM_PUSH_FAIL" ] && { echo "push rejected" >&2; exit 1; }\n  eval last=\\\${$#}\n  exec "${REAL_GIT}" $pre push -q "${bare}" "$last"\nfi\n` +
       `if [ "$1" = ls-remote ]; then\n  echo "git $*" >> "${reads}"\n  shift 2\n` +
       `  if [ -n "$SHIM_LS_OID" ]; then for r in "$@"; do printf '%s\\t%s\\n' "$SHIM_LS_OID" "$r"; done; exit 0; fi\n` +
       `  exec "${REAL_GIT}" ls-remote "${bare}" "$@"\nfi\nexec "${REAL_GIT}" "$@"\n`,
@@ -89,6 +90,8 @@ function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL, bas
   chmodSync(join(shim, 'git'), 0o755);
   write(shim, 'ssh', '#!/bin/sh\neval last=\\${$#}\necho "hostname $last"\n');
   chmodSync(join(shim, 'ssh'), 0o755);
+  // The gate takes a bin PATH other than its fixed list only when require()d: SHIM_BIN_PATH, else PATH.
+  write(dir, 'load.js', `globalThis.ADVISOR_PUBLISH_PATH = process.env.SHIM_BIN_PATH || process.env.PATH;\nrequire(${JSON.stringify(SCRIPT)});\n`);
   return { dir, repo, bare, base, head, log, reads, runs: join(dir, 'runs') };
 }
 
@@ -103,7 +106,7 @@ function review(fx, { scope = 'full-pr', base = fx.base, head = fx.head, verdict
 function run(fx, args, { cwd = fx.dir, env = {} } = {}) {
   // Rewritten on every call, so a knob never outlives the run it was set for.
   writeFileSync(join(fx.dir, 'shim.env'), Object.entries(env).filter(([k]) => k.startsWith('SHIM_')).map(([k, v]) => `${k}='${v}'\n`).join(''));
-  const r = spawnSync('bun', [SCRIPT, ...args], {
+  const r = spawnSync('bun', [join(fx.dir, 'load.js'), ...args], {
     cwd,
     encoding: 'utf8',
     env: {
@@ -660,7 +663,7 @@ test('CB7e github-personal alias resolves to github.com and is pinned', () => {
   expect(res.stdout).toContain('target o/r on github.com');
   expect(res.stdout).toContain('GH_HOST=github.com GH_REPO=o/r gh pr comment 7 -R o/r');
   const reads = readFileSync(fx.reads, 'utf8');
-  expect(reads).toContain('gh auth status --hostname github.com');
+  expect(reads).toContain('gh api user --hostname github.com --jq .login');
   expect(reads).not.toContain('github-personal');
   expect(res.stdout).not.toMatch(/GH_HOST=github-personal/);
 });
@@ -674,10 +677,10 @@ test('CB7e ssh -G failure exits 2 naming the alias', () => {
   expect(res.out).toContain('ssh -G');
 });
 
-test('CB7e push-only runs gh auth status for the resolved host', () => {
+test('CB7e push-only runs gh api user for the resolved host', () => {
   const fx = makeFixture();
   expect(run(fx, [...base(fx), '--push', 'origin', 'feat']).code).toBe(0);
-  expect(readFileSync(fx.reads, 'utf8')).toContain('gh auth status --hostname github.com');
+  expect(readFileSync(fx.reads, 'utf8')).toContain('gh api user --hostname github.com --jq .login');
   const other = run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { SHIM_AUTH_HOST: 'ghe.example.com' } });
   expect(other.code).toBe(2);
   expect(other.out).toContain('advisor-publish: GitHub hosts only (policy); github.com is not one');
@@ -1003,3 +1006,56 @@ test('R3-DEMOS the N5 remotes fail closed: an underscore alias and a . or .. own
     return [r.code, r.out.includes('cannot resolve')];
   });
   expect(res).toEqual([[2, true], [2, true], [2, true]]);}, 30000);
+
+test('CB7i-B1 inactive invalid account does not block', () => {
+  const fx = makeFixture();
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { SHIM_AUTH_STATUS_FAIL: '1' } });
+  expect({ code: res.code, read: readsLog(fx).includes('gh api user --hostname github.com --jq .login') }).toEqual({ code: 0, read: true });
+});
+
+test('CB7i-B1 no active login exits 2', () => {
+  const fx = makeFixture();
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { SHIM_NO_LOGIN: '1' } });
+  expect({ code: res.code, msg: res.out.includes('no active gh account on github.com') }).toEqual({ code: 2, msg: true });
+});
+
+test('CB7i-W4 a repo pre-push hook does not run during the gate push', () => {
+  const fx = makeFixture();
+  const marker = join(fx.dir, 'hook-ran');
+  write(fx.repo, '.git/hooks/pre-push', `#!/bin/sh\ntouch "${marker}"\n`);
+  chmodSync(join(fx.repo, '.git/hooks/pre-push'), 0o755);
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat', '--execute']);
+  expect({ code: res.code, hook: existsSync(marker), pushed: git(fx.bare, 'rev-parse', 'feat') }).toEqual({ code: 0, hook: false, pushed: fx.head });
+}, 30000);
+
+test('CB7i-W1 caller HOME and PATH do not redirect gh/git', () => {
+  const fx = makeFixture();
+  const evil = join(fx.dir, 'evil');
+  const marker = join(fx.dir, 'evil.log');
+  for (const n of ['git', 'gh', 'ssh']) {
+    write(evil, n, `#!/bin/sh\necho ${n} >> "${marker}"\nexit 1\n`);
+    chmodSync(join(evil, n), 0o755);
+  }
+  const wrap = join(fx.dir, 'wrap');
+  const homes = join(fx.dir, 'home.log');
+  write(wrap, 'gh', `#!/bin/sh\necho "$HOME" >> "${homes}"\nexec "${join(fx.dir, 'shim', 'gh')}" "$@"\n`);
+  chmodSync(join(wrap, 'gh'), 0o755);
+  const fakeHome = join(fx.dir, 'fakehome');
+  const env = { HOME: fakeHome, PATH: `${evil}:${process.env.PATH}` };
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { ...env, SHIM_BIN_PATH: `${wrap}:${join(fx.dir, 'shim')}:${process.env.PATH}` } });
+  // Run as a command (no loader), neither the caller PATH nor an ADVISOR_PUBLISH_PATH env var supplies
+  // git or gh: the real gh refuses the .invalid host, so exit 2 proves it ran and the evil shims did not.
+  const fx2 = makeFixture({ origin: 'https://ghe.invalid/o/r.git' });
+  const direct = spawnSync('bun', [SCRIPT, ...base(fx2), '--push', 'origin', 'feat'], {
+    cwd: fx2.dir,
+    encoding: 'utf8',
+    env: { ...GIT_ENV, ADV: ROOT, ADVISOR_RUNS_ROOT: fx2.runs, ADVISOR_VAULT: join(fx2.dir, 'vault'), ...env, ADVISOR_PUBLISH_PATH: evil },
+  });
+  expect({
+    code: res.code,
+    homes: [...new Set(readFileSync(homes, 'utf8').split('\n').filter(Boolean))],
+    direct: direct.status,
+    ghRefused: `${direct.stdout}${direct.stderr}`.includes('no active gh account on ghe.invalid'),
+    evil: existsSync(marker) ? readFileSync(marker, 'utf8') : '',
+  }).toEqual({ code: 0, homes: [spawnSync('/bin/sh', ['-c', 'eval echo ~$(/usr/bin/id -un)'], { encoding: 'utf8', env: {} }).stdout.trim()], direct: 2, ghRefused: true, evil: '' });
+}, 30000);

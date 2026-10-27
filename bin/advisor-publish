@@ -33,7 +33,8 @@
 //   8. the push remote and the PR remote (--pr-remote, else the push remote, else origin)
 //      each have exactly one fetch URL and one push URL, both <host>/<owner>/<repo> of the same
 //      repo; GitHub hosts only (policy): every action, a push alone included, needs the remote's
-//      host to pass `gh auth status`; an scp-style, ssh://, git+ssh:// or ssh+git:// host is first
+//      host to have an active gh account (read-only `gh api user --hostname <host> --jq .login`
+//      prints a login; an inactive account's state is never read); an scp-style, ssh://, git+ssh:// or ssh+git:// host is first
 //      resolved with `ssh -G` (its `hostname` line), so an SSH alias never reaches gh; such a
 //      remote is refused while git config core.sshCommand is set (git would connect elsewhere) exit 2;
 //      PR <n> is OPEN and its head is HEAD (no --push) or the pushed branch of the push repo
@@ -58,10 +59,13 @@
 // Re-review of 710041b: after the push the GitHub API must show the branch at H, then up to 5
 // read-only PR reads (t = 0, 1, 3, 6, 10 s) wait while the head is the pre-push one; any other
 // head, base or state stops (exit 8 PR_HEAD). gh posts copies of the text files made before check 5.
-// Children (git, gh, ssh, bun) run by absolute path, resolved once at start from the absolute PATH
-// entries, with an allowlisted environment: HOME, PATH, USER, LANG, LC_*, TMPDIR, SSH_AUTH_SOCK,
-// GIT_AUTHOR_*, GIT_COMMITTER_*, plus what the gate sets (GH_HOST, GH_REPO, GIT_NO_REPLACE_OBJECTS=1,
-// and ADVISOR_VAULT for bin/advisor-conventions).
+// Children run by absolute path, resolved once at start: git, gh and ssh from /opt/homebrew/bin,
+// /usr/local/bin, /usr/bin, /bin (that list is their PATH; the caller PATH is ignored), bun from the
+// absolute caller PATH entries. Environment: HOME is the passwd home of `id -un` (never the caller's), plus
+// USER, LANG, LC_*, TMPDIR, SSH_AUTH_SOCK, GIT_AUTHOR_*, GIT_COMMITTER_* and what the gate sets
+// (GH_HOST, GH_REPO, GIT_NO_REPLACE_OBJECTS=1, ADVISOR_VAULT for bin/advisor-conventions).
+// The gate's own push runs as git -c core.hooksPath=/dev/null push, so no repo hook runs inside it.
+// Test seam: globalThis.ADVISOR_PUBLISH_PATH replaces the list only when this file is require()d.
 // Policy paths: {,docs/,.github/}CONTRIBUTING*, {,docs/,.github/}CODEOWNERS,
 // {,docs/,.github/}PULL_REQUEST_TEMPLATE{*,/**} and **/guardrails/**, plus --policy-paths, plus
 // policy_paths from the bin/advisor-conventions digest (built into a temp --out dir; a
@@ -93,8 +97,8 @@ const USAGE = `Usage: advisor-publish --repo <path> --target <ref> --review <rev
 Publish gate: checks the review binding, verdict, claims, advisor artifacts and policy
 paths for the PR (merge-base(HEAD, target)..HEAD), then prints (dry run) or runs
 (--execute) the push and gh commands. At least one action is required.
-GitHub hosts only (policy): the remote's host must pass gh auth status for every action, a
-push alone included; an SSH host alias is resolved with ssh -G first.
+GitHub hosts only (policy): the remote's host must have an active gh account (gh api user
+prints a login) for every action, a push alone included; an SSH host alias is resolved with ssh -G first.
 gh write check: --body needs the gh account active on the PR repo's host to be the PR's author
 or to have push rights there (gh api repos/<o>/<r> --jq .permissions.push prints true), in the
 dry run too; otherwise exit 2 with: gh auth switch --hostname <host>. --comment and --reply need
@@ -195,11 +199,18 @@ function finish(code, rule, lines, extra = {}) {
 // An allowlist, not a denylist: GIT_* (DIR, CONFIG*, SSH*, REPLACE_REF_BASE, OBJECT_DIRECTORY...) and
 // GH_* (TOKEN, CONFIG_DIR, HOST) each redirect git or gh. Binaries resolve once from the absolute PATH
 // entries: spawn resolves a relative entry against the child's cwd, the repo under audit.
-const PATH = (process.env.PATH || '').split(':').filter((d) => d.startsWith('/')).join(':');
-const BIN = Object.fromEntries(['git', 'gh', 'ssh', 'bun'].map((n) => [n, Bun.which(n, { PATH })]));
-const childEnv = { PATH, GIT_NO_REPLACE_OBJECTS: '1' };
+// git, gh and ssh come from a fixed list, never the caller PATH; only a require()ing test may swap it.
+const absDirs = (p) => (p || '').split(':').filter((d) => d.startsWith('/')).join(':');
+const PATH = absDirs((require.main !== module && globalThis.ADVISOR_PUBLISH_PATH) || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin');
+const BIN = Object.fromEntries(['git', 'gh', 'ssh'].map((n) => [n, Bun.which(n, { PATH })]));
+BIN.bun = Bun.which('bun', { PATH: absDirs(process.env.PATH) });
+// Bun's os.userInfo().homedir echoes $HOME, so ~<user> in a clean sh reads the passwd entry instead.
+const me = spawnSync('/usr/bin/id', ['-un'], { encoding: 'utf8', env: {} }).stdout?.trim() || '';
+const HOME = /^[\w.-]+$/.test(me) ? spawnSync('/bin/sh', ['-c', `echo ~${me}`], { encoding: 'utf8', env: {} }).stdout?.trim() : '';
+if (!HOME?.startsWith('/')) usageExit(`cannot read the home directory of user '${me}' from the passwd database`);
+const childEnv = { PATH, HOME, GIT_NO_REPLACE_OBJECTS: '1' };
 for (const [k, v] of Object.entries(process.env)) {
-  if (/^(?:HOME|USER|LANG|LC_\w+|TMPDIR|SSH_AUTH_SOCK|GIT_(?:AUTHOR|COMMITTER)_\w+)$/.test(k)) childEnv[k] = v;
+  if (/^(?:USER|LANG|LC_\w+|TMPDIR|SSH_AUTH_SOCK|GIT_(?:AUTHOR|COMMITTER)_\w+)$/.test(k)) childEnv[k] = v;
 }
 const vaultEnv = process.env.ADVISOR_VAULT ? { ADVISOR_VAULT: process.env.ADVISOR_VAULT } : {};
 function run(cmd, args, { input, allowFail = false, env, cwd = top } = {}) {
@@ -423,7 +434,7 @@ function parseUrl(name, url) {
   return { host, slug: segs.join('/'), shown };
 }
 // git push sends to every push URL and ls-remote <name> reads the fetch URL, so each remote has
-// exactly one of each, naming the same repo. GitHub hosts only: every remote's host passes gh auth.
+// exactly one of each, naming the same repo. GitHub hosts only: every remote's host has an active gh login.
 function resolveRemote(name) {
   const urls = (push) => {
     const r = run('git', ['remote', 'get-url', ...(push ? ['--push'] : []), '--all', name], { allowFail: true });
@@ -438,8 +449,10 @@ function resolveRemote(name) {
   if (fetchRepo.host !== pushRepo.host || fetchRepo.slug.toLowerCase() !== pushRepo.slug.toLowerCase()) {
     usageExit(`remote ${name} fetches ${fetchRepo.host}/${fetchRepo.slug} but pushes to ${pushRepo.host}/${pushRepo.slug}; use one remote per repo (git remote set-url --push ${name} <fetch url>)`);
   }
-  if (run('gh', ['auth', 'status', '--hostname', pushRepo.host], { allowFail: true }).status !== 0) {
-    usageExit(`GitHub hosts only (policy); ${pushRepo.host} is not one (remote ${name}; if it is a GitHub host, run gh auth login --hostname ${pushRepo.host})`);
+  // Only the active account counts: gh auth status also fails on an inactive account's stale token.
+  const who = run('gh', ['api', 'user', '--hostname', pushRepo.host, '--jq', '.login'], { allowFail: true });
+  if (who.status !== 0 || !(who.stdout || '').trim()) {
+    usageExit(`GitHub hosts only (policy); ${pushRepo.host} is not one, or has no active gh account: no active gh account on ${pushRepo.host} answers gh api user (remote ${name}; if it is a GitHub host, run gh auth switch --hostname ${pushRepo.host} or gh auth login --hostname ${pushRepo.host})`);
   }
   return { name, ...pushRepo };
 }
@@ -578,7 +591,8 @@ function awaitPrHead() {
 }
 
 for (const c of commands) {
-  const r = spawnSync(BIN[c.cmd], c.args, { cwd: top, encoding: 'utf8', env: { ...childEnv, ...c.env } });
+  const args = c.cmd === 'git' ? ['-c', 'core.hooksPath=/dev/null', ...c.args] : c.args;
+  const r = spawnSync(BIN[c.cmd], args, { cwd: top, encoding: 'utf8', env: { ...childEnv, ...c.env } });
   process.stderr.write(`${r.stdout || ''}${r.stderr || ''}`);
   if (r.status !== 0) failExecute(`${show(c)} exited ${r.status ?? r.signal}; later commands not run`);
   executed.push(show(c));
