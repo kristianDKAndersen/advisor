@@ -280,6 +280,60 @@ describe('classifySessionDir', () => {
     expect(typeof v.evidence).toBe('string');
     expect(v.evidence.length).toBeGreaterThan(0);
   });
+
+  test('synthetic: worker-result-check no_verdict body is NOT clean-result and matches the wrapper synthetic path', () => {
+    const cases = [
+      { label: 'no other evidence', tmuxLog: null },
+      { label: 'tmux spawnHeadless timeout', tmuxLog: 'spawnHeadless timed out after 300000ms (sid=abc, pane=%1, reason=timeout)\n' },
+    ];
+    for (const c of cases) {
+      const hookDir = makeSessionDir();
+      const wrapperDir = makeSessionDir();
+      if (c.tmuxLog) {
+        writeTmuxLog(hookDir, c.tmuxLog);
+        writeTmuxLog(wrapperDir, c.tmuxLog);
+      }
+      writeOutbox(hookDir, [
+        { seq: 1, type: 'result', from: 'worker-result-check', body: JSON.stringify({ summary: 'worker exited without sending a result envelope', verdict: 'no_verdict' }) },
+      ]);
+      writeOutbox(wrapperDir, [
+        { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=unexpected', verdict: 'blocked', paths: [] }) },
+      ]);
+      const hook = classifySessionDir(hookDir);
+      const wrapper = classifySessionDir(wrapperDir);
+      expect(hook.category).not.toBe('clean-result');
+      expect(hook.category).toBe(wrapper.category);
+      expect(hook.transient).toBe(wrapper.transient);
+    }
+  });
+
+  test('synthetic: worker-result-check no_verdict body with salvaged paths classifies identically to the plain body', () => {
+    const summary = 'worker exited without sending a result envelope';
+    const plainDir = makeSessionDir();
+    const salvagedDir = makeSessionDir();
+    writeOutbox(plainDir, [
+      { seq: 1, type: 'result', from: 'worker-result-check', body: JSON.stringify({ summary, verdict: 'no_verdict' }) },
+    ]);
+    writeOutbox(salvagedDir, [
+      { seq: 1, type: 'result', from: 'worker-result-check', body: JSON.stringify({ summary, verdict: 'no_verdict', paths: ['/x/outputDir/changes.md'], salvaged: true }) },
+    ]);
+    const plain = classifySessionDir(plainDir);
+    const salvaged = classifySessionDir(salvagedDir);
+    expect(plain.category).not.toBe('clean-result');
+    expect(salvaged.category).toBe(plain.category);
+    expect(salvaged.transient).toBe(plain.transient);
+  });
+
+  test('genuine: coder result with verdict=no_verdict still takes the genuine branch', () => {
+    const dir = makeSessionDir();
+    writeOutbox(dir, [
+      { seq: 1, type: 'result', from: 'coder', body: JSON.stringify({ summary: 'Applied fixes', verdict: 'no_verdict', paths: [] }) },
+    ]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('clean-result');
+    expect(v.transient).toBe(null);
+    expect(v.evidence).toMatch(/genuine result verdict=no_verdict/);
+  });
 });
 
 describe('classifyPaneDeath adapter (lib/loop-termination.js options.classifyPaneDeath seam)', () => {
