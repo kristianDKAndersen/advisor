@@ -1,0 +1,209 @@
+#!/usr/bin/env bun
+// bin/advisor-matrix-lint - validate the guard matrix in a changes.md or plan.md.
+//
+// Usage:
+//   advisor-matrix-lint --file <changes.md|plan.md> [--repo <path>] [--plan] [--required] [--json]
+//
+// Parses the first table under a `### Guard matrix` heading (spawns/coder/CLAUDE.md
+// Phase 1 step 7, spawns/planner/CLAUDE.md): column 1 names the entry point or field,
+// every other column is a guard x alias, each cell is a test ID, `N/A: <reason>` or
+// `OUT OF SCOPE: <brief boundary>`. A heading with no table below it (for example
+// `### Guard matrix: N/A (...)`) means no matrix.
+//
+// Exit codes: 0 pass, 2 usage, 3 no matrix (--required only), 4 empty cell or a
+// single row without an `Entry points: 1 (<reason>)` line, 5 test ID not found by
+// git grep -F in test files (skipped with --plan), 6 `N/A` (or `OUT OF SCOPE`)
+// without a reason (N/A needs at least 3 words). The exit code is the lowest failing code.
+// Read-only; findings print as `path:line RULE message`.
+
+const { readFileSync } = require('node:fs');
+const { execFileSync } = require('node:child_process');
+
+const USAGE = `Usage: advisor-matrix-lint --file <changes.md|plan.md> [--repo <path>] [--plan] [--required] [--json]
+
+Validates the first table under a "### Guard matrix" heading. Read-only.
+
+Flags:
+  --file <path>   changes.md or plan.md to lint
+  --repo <path>   Git repository searched for test IDs (default: .)
+  --plan          Cells are free-text scenarios: skip the test ID lookup
+  --required      A missing matrix is an error (exit 3) instead of a pass
+  --json          Print one JSON object instead of one finding per line
+
+Cells: a test ID, "N/A: <reason of 3+ words>", or "OUT OF SCOPE: <boundary>"
+(valid, needs no test ID, reported separately as out_of_scope).
+
+Exit codes: 0 pass, 2 usage, 3 no matrix (--required), 4 empty cell or a single
+row without an "Entry points: 1 (<reason>)" line, 5 unknown test ID, 6 N/A or
+OUT OF SCOPE without a reason.
+`;
+
+function usageExit(msg) {
+  if (msg) console.error(`advisor-matrix-lint: ${msg}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const opts = { repo: '.', plan: false, required: false, json: false };
+const argv = process.argv.slice(2);
+if (argv.length === 0 || argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(2);
+}
+while (argv.length > 0) {
+  const arg = argv.shift();
+  switch (arg) {
+    case '--file':
+    case '--repo': {
+      const v = argv.shift();
+      if (v === undefined) usageExit(`${arg} needs a value`);
+      opts[arg.slice(2)] = v;
+      break;
+    }
+    case '--plan': opts.plan = true; break;
+    case '--required': opts.required = true; break;
+    case '--json': opts.json = true; break;
+    default: usageExit(`unknown flag: ${arg}`);
+  }
+}
+if (!opts.file) usageExit('--file is required');
+
+let content;
+try {
+  content = readFileSync(opts.file, 'utf8');
+} catch (e) {
+  usageExit(`cannot read ${opts.file}: ${e.message}`);
+}
+const lines = content.split('\n');
+
+// --- locate the matrix ------------------------------------------------
+
+const splitRow = (line) =>
+  line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, '|').trim());
+const isTableLine = (l) => l.trim().startsWith('|');
+const isSeparator = (cells) => cells.every((c) => /^:?-+:?$/.test(c));
+
+// Returns {line, header, rows, section} for the first table under a Guard matrix heading, or null.
+function findMatrix() {
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) inFence = !inFence;
+    const h = !inFence && lines[i].match(/^(#{2,6})\s+guard matrix\b/i);
+    if (!h) continue;
+    // the section runs to the next heading of the same or a higher level
+    let end = lines.length;
+    let fence = false;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^\s*(```|~~~)/.test(lines[j])) fence = !fence;
+      const n = !fence && lines[j].match(/^(#{1,6})\s/);
+      if (n && n[1].length <= h[1].length) {
+        end = j;
+        break;
+      }
+    }
+    fence = false;
+    for (let j = i + 1; j < end; j++) {
+      if (/^\s*(```|~~~)/.test(lines[j])) fence = !fence;
+      if (fence || !isTableLine(lines[j])) continue;
+      const tableLines = [];
+      let k = j;
+      while (k < end && isTableLine(lines[k])) tableLines.push({ line: k + 1, cells: splitRow(lines[k++]) });
+      if (tableLines.length < 2 || !isSeparator(tableLines[1].cells)) continue;
+      return {
+        line: tableLines[0].line,
+        header: tableLines[0].cells,
+        rows: tableLines.slice(2),
+        section: lines.slice(i + 1, end),
+      };
+    }
+  }
+  return null;
+}
+
+// --- checks -----------------------------------------------------------
+
+const findings = [];
+const outOfScope = [];
+const find = (line, rule, message) => findings.push({ path: opts.file, line, rule, message });
+
+const stripTicks = (s) => s.replace(/`/g, '').trim();
+const TEST_PATHSPECS = [':(glob)**/test/**', ':(glob)**/tests/**', ':(glob)**/*.test.*', ':(glob)**/*_test.*', ':(glob)**/test-*.sh'];
+
+const idCache = new Map();
+// --untracked: a coder's new test files are not committed yet; ignored files stay excluded.
+function testExists(id) {
+  if (!idCache.has(id)) {
+    let found = false;
+    try {
+      found = execFileSync('git', ['-C', opts.repo, 'grep', '-l', '-F', '--untracked', '-e', id, '--', ...TEST_PATHSPECS], {
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim() !== '';
+    } catch (e) {
+      if (e.status !== 1) usageExit(`git grep failed in ${opts.repo} (not a git repository?)`);
+    }
+    idCache.set(id, found);
+  }
+  return idCache.get(id);
+}
+
+function checkCell(rowLabel, colLabel, raw, line) {
+  const where = `row "${rowLabel}" column "${colLabel}"`;
+  const cell = stripTicks(raw);
+  if (/^[-–—_.?,;]*$/.test(cell)) return find(line, 'EMPTY_CELL', `${where} is empty`);
+  const oos = cell.match(/^out of scope\b[\s:,-]*(.*)$/i);
+  if (oos) {
+    if (!oos[1]) return find(line, 'NA_NO_REASON', `${where}: OUT OF SCOPE needs the brief boundary`);
+    return void outOfScope.push({ line, row: rowLabel, column: colLabel, boundary: oos[1] });
+  }
+  const na = cell.match(/^n\/a\b[\s:,-]*(.*)$/i);
+  if (na) {
+    const words = na[1].split(/\s+/).filter(Boolean).length;
+    if (words < 3) find(line, 'NA_NO_REASON', `${where}: N/A needs a reason of at least 3 words, got ${words}`);
+    return;
+  }
+  if (opts.plan) return;
+  // whole cell first (test names may contain commas), then each list item
+  const parts = cell.split(/[;,]/).map((p) => p.trim()).filter(Boolean);
+  if (testExists(cell) || parts.every(testExists)) return;
+  const missing = parts.length > 1 && !testExists(cell) ? parts.filter((p) => !testExists(p)) : [cell];
+  find(line, 'UNKNOWN_TEST_ID', `${where}: test ID "${missing.join('", "')}" not found by git grep -F in test files`);
+}
+
+const matrix = findMatrix();
+if (matrix) {
+  if (matrix.rows.length === 0) find(matrix.line, 'EMPTY_CELL', 'matrix has a header but no rows');
+  if (matrix.rows.length === 1 && !matrix.section.some((l) => /^\s*(?:[-*]\s+)?(?:\*\*)?Entry points:(?:\*\*)?\s*1\s*\(\s*\S.*\)/.test(l))) {
+    find(matrix.rows[0].line, 'SINGLE_ROW_UNJUSTIFIED', 'single-row matrix needs an "Entry points: 1 (<reason>)" line');
+  }
+  for (const row of matrix.rows) {
+    const label = stripTicks(row.cells[0] || '');
+    if (!label) find(row.line, 'EMPTY_CELL', 'row has an empty entry point / field name');
+    const width = Math.max(matrix.header.length, row.cells.length);
+    for (let c = 1; c < width; c++) checkCell(label || '(unnamed)', stripTicks(matrix.header[c] || '') || `#${c + 1}`, row.cells[c] || '', row.line);
+  }
+}
+
+const CODES = { NO_MATRIX: 3, EMPTY_CELL: 4, SINGLE_ROW_UNJUSTIFIED: 4, UNKNOWN_TEST_ID: 5, NA_NO_REASON: 6 };
+if (!matrix && opts.required) find(1, 'NO_MATRIX', 'no table under a "### Guard matrix" heading');
+const exitCode = findings.length === 0 ? 0 : Math.min(...findings.map((f) => CODES[f.rule]));
+
+if (opts.json) {
+  console.log(JSON.stringify({
+    file: opts.file,
+    matrix: matrix ? { line: matrix.line, columns: matrix.header.length, rows: matrix.rows.length } : null,
+    findings,
+    out_of_scope: outOfScope,
+    exit_code: exitCode,
+  }));
+} else {
+  for (const f of findings) console.log(`${f.path}:${f.line} ${f.rule} ${f.message}`);
+  for (const o of outOfScope) console.log(`${opts.file}:${o.line} info out_of_scope row "${o.row}" column "${o.column}": ${o.boundary}`);
+  if (findings.length === 0) {
+    console.log(matrix
+      ? `advisor-matrix-lint: ${matrix.rows.length} row(s), ${outOfScope.length} out of scope, 0 findings.`
+      : 'advisor-matrix-lint: no guard matrix (not required), 0 findings.');
+  }
+}
+process.exit(exitCode);
