@@ -1,7 +1,7 @@
 ---
 name: brief
 description: Compose a validated bin/summon command for a worker agent with all 5 required fields: objective, output, tools, scope, and parallelism. Use when the Advisor needs to launch a new worker via bin/summon and wants to ensure the brief is complete before invocation.
-last_edited: 2026-10-06
+last_edited: 2026-10-27
 ---
 
 # Brief
@@ -50,6 +50,10 @@ ambiguous, default to `researcher`.
 Optionally append `--tier <fact|comparison|deep_research|fixated>` (passed through
 by `bin/brief`); it sets the worker's tool budget and skill injection. Omit it to
 leave any tier a prior summon set for the same `--sid` untouched.
+
+## Repo rules (repos other than the advisor repo)
+
+For a `coder`, `code-reviewer`, `planner` or `doc-agent` worker on another repo, `bin/summon` appends the path of that repo's `bin/advisor-conventions` digest to the task body, so do not paraphrase repo rules in `--task`. Any text the brief dictates verbatim (a sentence, comment, CHANGELOG line or reply) must pass `bin/advisor-prose-lint --digest <digest> --text <file>` before you emit the command.
 
 ## Usage example
 
