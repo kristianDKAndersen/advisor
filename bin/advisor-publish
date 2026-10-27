@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 // bin/advisor-publish - the publish gate: push / PR body / PR comment / review replies only
 // after the review, claims, artifact and policy checks pass for the PR at HEAD.
+// Limit: it stops a careless or prompt-injected agent's ordinary publish path. It is not a sandbox:
+// an agent with a shell can still reach GitHub another way (curl, a renamed git binary).
 //
 // Usage:
 //   advisor-publish --repo <path> --target <ref> --review <review.md>
@@ -13,14 +15,17 @@
 //   1. at least one action (--push, --body, --comment, --reply); --claims, if given, exists  exit 2
 //   2. --repo is this script's own repo (the git toplevel of its directory; $ADV is never
 //      read): not applicable, --json status not-applicable                         exit 0
-//   3. review frontmatter audit_scope full-pr; audit_base_sha and audit_head_sha are full SHAs
+//   3. no replace ref under refs/replace/, no info/grafts file and not a shallow repository, since
+//      each changes what diff and merge-base read but not what push sends; review frontmatter
+//      audit_scope full-pr; audit_base_sha and audit_head_sha are full SHAs
 //      of the repo's object format that `git rev-parse --verify <sha>^{commit}` returns
 //      unchanged and that no ref is named after; they equal the merge-base and HEAD, or the PR
 //      diff has an equal `git patch-id --verbatim` (diff pinned to -U3, no renames, full index,
 //      submodules shown); the merge-base is not HEAD                               exit 3 STALE_AUDIT
 //   4. verdict APPROVE / APPROVE WITH WARNINGS, open_blockers 0, exactly one Blockers heading
-//      (## to ####, any case) and no `[B<n>]` token outside code fences (CommonMark pairing:
-//      same character, at least as long; an unclosed fence fails)                 exit 4
+//      (## to ####, any case) and no `[B<n>]` token in its section (to the next heading of the
+//      same or a higher level) outside code fences (CommonMark pairing: same character, at least
+//      as long; an unclosed fence fails)                                           exit 4
 //   5. every text file passes bin/advisor-claims-check against --claims            exit 5
 //   6. no .advisor-output/, .advisor-preserved/, graphify-out/, captures/ path,
 //      GRAPH_REPORT.md or added `eco:` line in the PR diff                         exit 6
@@ -28,29 +33,38 @@
 //   8. the push remote and the PR remote (--pr-remote, else the push remote, else origin)
 //      each have exactly one fetch URL and one push URL, both <host>/<owner>/<repo> of the same
 //      repo; GitHub hosts only (policy): every action, a push alone included, needs the remote's
-//      host to pass `gh auth status`; an scp-style or ssh:// host is first resolved with
-//      `ssh -G` (its `hostname` line), so an SSH alias never reaches gh                exit 2;
-//      a gh action (PR body, comment, reply) also needs the gh account active on that host to
-//      have push rights: read-only `gh api repos/<o>/<r> --jq .permissions.push` must print
-//      exactly true, in the dry run too and before any action; anything else, an API
-//      failure included, names the account (`gh api user`) and a gh auth switch hint exit 2;
-//      push only skips it (the SSH key decides)
-//      PR <n>'s head is HEAD (no --push) or the pushed branch of the push repo     exit 3 PR_HEAD;
+//      host to pass `gh auth status`; an scp-style, ssh://, git+ssh:// or ssh+git:// host is first
+//      resolved with `ssh -G` (its `hostname` line), so an SSH alias never reaches gh; such a
+//      remote is refused while git config core.sshCommand is set (git would connect elsewhere) exit 2;
+//      PR <n> is OPEN and its head is HEAD (no --push) or the pushed branch of the push repo
+//                                                                                  exit 3 PR_HEAD;
+//      a comment or reply needs only read access, which the PR read proves; a PR body edit needs
+//      the gh account active on that host (`gh api user`) to be the PR's author or to have push
+//      rights on the PR repo: read-only `gh api repos/<o>/<r> --jq .permissions.push` must print
+//      exactly true, in the dry run too and before any action; anything else, an API failure
+//      included, names the account and a gh auth switch hint; a token without pull-request write
+//      still passes and fails only at --execute                                   exit 2;
+//      push only needs no write check (the SSH key decides)
 //      with a PR, merge-base(HEAD, its baseRefOid) is the merge-base of check 3; push only,
-//      --target is the commit `git ls-remote` reports for the remote's HEAD or the pushed branch
-//      (a local target older than the remote tip fails safe: git fetch, then rerun)  exit 3 PR_BASE;
+//      --target is the tip of the remote's default branch as the GitHub API reports it
+//      (gh api repos/<o>/<r> --jq .default_branch, then .../branches/<b> --jq .commit.sha), never
+//      an answer of the git transport, so a full-pr review covers the whole PR; a local target
+//      older than that tip fails safe: git fetch, then rerun                       exit 3 PR_BASE;
 //      dry run prints the targets and commands; --execute runs them                exit 8 on failure
 //
 // Spec amendments (review of a15d9cf): patch-id is --verbatim, so a whitespace-only change
 // after the audit invalidates it; the push refspec is <H>:refs/heads/<branch>; --pr is bound
 // to the audited head; --execute re-reads the PR head after the push before any gh write.
-// Re-review of 710041b: after the push `git ls-remote` must show H, then up to 5 read-only PR
-// reads (t = 0, 1, 3, 6, 10 s) wait while the head is the pre-push one; any other head, base or
-// state stops (exit 8 PR_HEAD). Children run without GIT_DIR, GIT_WORK_TREE, GIT_DIFF_OPTS,
-// GIT_EXTERNAL_DIFF or GIT_CONFIG*, since each can redirect git or shrink the audited diff.
+// Re-review of 710041b: after the push the GitHub API must show the branch at H, then up to 5
+// read-only PR reads (t = 0, 1, 3, 6, 10 s) wait while the head is the pre-push one; any other
+// head, base or state stops (exit 8 PR_HEAD). gh posts copies of the text files made before check 5.
+// Children (git, gh, ssh, bun) run by absolute path, resolved once at start from the absolute PATH
+// entries, with an allowlisted environment: HOME, PATH, USER, LANG, LC_*, TMPDIR, SSH_AUTH_SOCK,
+// GIT_AUTHOR_*, GIT_COMMITTER_*, plus what the gate sets (GH_HOST, GH_REPO, GIT_NO_REPLACE_OBJECTS=1,
+// and ADVISOR_VAULT for bin/advisor-conventions).
 // Policy paths: {,docs/,.github/}CONTRIBUTING*, {,docs/,.github/}CODEOWNERS,
-// {,docs/,.github/}PULL_REQUEST_TEMPLATE{*,/**} and **/guardrails/**, plus --policy-paths, else
-// plus policy_paths from the bin/advisor-conventions digest (built into a temp --out dir; a
+// {,docs/,.github/}PULL_REQUEST_TEMPLATE{*,/**} and **/guardrails/**, plus --policy-paths, plus
+// policy_paths from the bin/advisor-conventions digest (built into a temp --out dir; a
 // conventions failure exits 7), all matched case-insensitively.
 // Every command runs with cwd <repo>. Spec clarification: `gh api` has no -R flag, so gh pr
 // commands get -R <owner>/<repo>, every gh pr and gh api command gets GH_HOST=<host> and GH_REPO=<owner>/<repo>,
@@ -63,7 +77,7 @@
 // 3 stale or missing audit or PR head mismatch, 4 verdict or Blockers, 5 claims, 6 advisor artifacts,
 // 7 policy path without decision or conventions failure, 8 publish command or log write failed.
 
-const { readFileSync, existsSync, realpathSync, mkdtempSync, rmSync, mkdirSync, appendFileSync } = require('node:fs');
+const { readFileSync, existsSync, realpathSync, mkdtempSync, rmSync, mkdirSync, appendFileSync, copyFileSync } = require('node:fs');
 const { join, resolve, posix } = require('node:path');
 const { tmpdir } = require('node:os');
 const { createHash } = require('node:crypto');
@@ -81,9 +95,10 @@ paths for the PR (merge-base(HEAD, target)..HEAD), then prints (dry run) or runs
 (--execute) the push and gh commands. At least one action is required.
 GitHub hosts only (policy): the remote's host must pass gh auth status for every action, a
 push alone included; an SSH host alias is resolved with ssh -G first.
-gh write check: for --body, --comment and --reply the gh account active on the PR repo's host
-must have push rights (gh api repos/<o>/<r> --jq .permissions.push prints true), in the dry run
-too; otherwise exit 2 with: gh auth switch --hostname <host>. Push alone skips this check.
+gh write check: --body needs the gh account active on the PR repo's host to be the PR's author
+or to have push rights there (gh api repos/<o>/<r> --jq .permissions.push prints true), in the
+dry run too; otherwise exit 2 with: gh auth switch --hostname <host>. --comment and --reply need
+only the PR read. Push alone binds --target to the default branch tip through gh api.
 
 Exit codes: 0 pass, 2 usage or unresolvable remote, 3 stale or missing audit or PR head
 mismatch, 4 verdict or Blockers, 5 claims, 6 advisor artifacts, 7 policy path without
@@ -177,10 +192,19 @@ function finish(code, rule, lines, extra = {}) {
   process.exit(code);
 }
 
-// GIT_DIFF_OPTS beats an explicit -U3, GIT_CONFIG* injects config, GIT_DIR/GIT_WORK_TREE point git elsewhere.
-const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_(?:DIR|WORK_TREE|DIFF_OPTS|EXTERNAL_DIFF|CONFIG.*)$/.test(k)));
+// An allowlist, not a denylist: GIT_* (DIR, CONFIG*, SSH*, REPLACE_REF_BASE, OBJECT_DIRECTORY...) and
+// GH_* (TOKEN, CONFIG_DIR, HOST) each redirect git or gh. Binaries resolve once from the absolute PATH
+// entries: spawn resolves a relative entry against the child's cwd, the repo under audit.
+const PATH = (process.env.PATH || '').split(':').filter((d) => d.startsWith('/')).join(':');
+const BIN = Object.fromEntries(['git', 'gh', 'ssh', 'bun'].map((n) => [n, Bun.which(n, { PATH })]));
+const childEnv = { PATH, GIT_NO_REPLACE_OBJECTS: '1' };
+for (const [k, v] of Object.entries(process.env)) {
+  if (/^(?:HOME|USER|LANG|LC_\w+|TMPDIR|SSH_AUTH_SOCK|GIT_(?:AUTHOR|COMMITTER)_\w+)$/.test(k)) childEnv[k] = v;
+}
+const vaultEnv = process.env.ADVISOR_VAULT ? { ADVISOR_VAULT: process.env.ADVISOR_VAULT } : {};
 function run(cmd, args, { input, allowFail = false, env, cwd = top } = {}) {
-  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', input, env: { ...childEnv, ...env }, maxBuffer: 256 * 1024 * 1024 });
+  if (!BIN[cmd]) usageExit(`${cmd} not found on PATH ${PATH}`);
+  const r = spawnSync(BIN[cmd], args, { cwd, encoding: 'utf8', input, env: { ...childEnv, ...(cmd === 'bun' ? vaultEnv : {}), ...env }, maxBuffer: 256 * 1024 * 1024 });
   if (r.status !== 0 && !allowFail) usageExit(`${cmd} ${args.join(' ')} failed: ${(r.stderr || '').trim()}`);
   return r;
 }
@@ -218,6 +242,17 @@ function patchId(a, b) {
   return run('git', ['patch-id', '--verbatim'], { input: diff.stdout }).stdout.trim().split(/\s+/)[0] || '';
 }
 
+// Replace refs and grafts change what diff and merge-base read, never what push sends (pack
+// transfer ignores them); a shallow repo's cut parents can move merge-base too.
+const replaceRefs = git('for-each-ref', '--format=%(refname)', 'refs/replace/').split('\n').filter(Boolean);
+if (replaceRefs.length > 0) {
+  finish(3, 'STALE_AUDIT', [
+    `${replaceRefs.length} replace ref(s) such as ${replaceRefs[0]}: git diff would read the replacements while git push sends the originals; list them with git replace -l, remove each with git replace -d <sha>, then rerun`,
+  ]);
+}
+const [shallow, graftFile] = git('rev-parse', '--is-shallow-repository', '--git-path', 'info/grafts').split('\n');
+if (existsSync(resolve(top, graftFile))) finish(3, 'STALE_AUDIT', [`${resolve(top, graftFile)} exists: grafts rewrite parents, so merge-base would not be what git push sends; move it aside, then rerun`]);
+if (shallow === 'true') finish(3, 'STALE_AUDIT', ['the repository is shallow: its cut parents can move merge-base; run git fetch --unshallow, then rerun']);
 if (!existsSync(opts.review)) finish(3, 'STALE_AUDIT', [`review not found: ${opts.review}`]);
 const reviewText = readFileSync(opts.review, 'utf8');
 const fm = frontmatter(reviewText);
@@ -251,7 +286,8 @@ if (fm.audit_head_sha !== H || fm.audit_base_sha !== B) {
 if (fm.verdict !== 'APPROVE' && fm.verdict !== 'APPROVE WITH WARNINGS') finish(4, 'VERDICT', [`verdict is ${fm.verdict || 'missing'}`]);
 if (fm.open_blockers !== '0') finish(4, 'BLOCKERS', [`open_blockers is ${fm.open_blockers || 'missing'}, need 0`]);
 // CommonMark fences: up to 3 spaces of indent; a fence closes only on the same character, at least
-// as long, with no info string. Any [B<n>] token outside them counts, whatever the list marker.
+// as long, with no info string. Any [B<n>] token outside them in the Blockers section counts,
+// whatever the list marker.
 let fence = null;
 const outsideFences = [];
 for (const l of reviewText.split(/\r?\n/)) {
@@ -262,16 +298,27 @@ for (const l of reviewText.split(/\r?\n/)) {
   else outsideFences.push(l);
 }
 if (fence) finish(4, 'BLOCKERS', [`unclosed ${fence} code fence: close it so the Blockers recount sees what renders`]);
+const blockersAt = outsideFences.findIndex((l) => /^#{2,4}\s+blockers\b/i.test(l));
 const blockerHeadings = outsideFences.filter((l) => /^#{2,4}\s+blockers\b/i.test(l)).length;
 if (blockerHeadings !== 1) finish(4, 'BLOCKERS', [`need exactly one Blockers heading (## to ####), found ${blockerHeadings}`]);
-const blockerCount = outsideFences.join('\n').match(/\[B\d+\]/g)?.length ?? 0;
-if (blockerCount !== 0) finish(4, 'BLOCKERS', [`open_blockers is 0 but the review has ${blockerCount} [B<n>] tokens outside code fences`]);
+// Only the Blockers section counts, up to the next heading of the same or a higher level, so a
+// closure table that names a prior round's Blocker is not a Blocker of this review.
+const level = outsideFences[blockersAt].match(/^#+/)[0].length;
+const sectionEnd = outsideFences.findIndex((l, i) => i > blockersAt && /^#{1,6}\s/.test(l) && l.match(/^#+/)[0].length <= level);
+const blockerCount = outsideFences.slice(blockersAt + 1, sectionEnd < 0 ? undefined : sectionEnd).join('\n').match(/\[B\d+\]/g)?.length ?? 0;
+if (blockerCount !== 0) finish(4, 'BLOCKERS', [`open_blockers is 0 but the Blockers section has ${blockerCount} [B<n>] tokens outside code fences`]);
 
-// Check 5: claims.
+// Check 5: claims, on copies: gh later posts these copies, so a file rewritten after the check is never sent.
+const scratchDir = () => scratch || (scratch = mkdtempSync(join(tmpdir(), 'advisor-publish-')));
+const checked = new Map();
 if (texts.length > 0) {
   if (!opts.claims) finish(5, 'CLAIMS', ['--body, --comment and --reply need --claims']);
-  for (const f of texts) {
-    const r = run('bun', [join(__dirname, 'advisor-claims-check'), '--repo', top, '--claims', opts.claims, '--text', f], { allowFail: true });
+  mkdirSync(join(scratchDir(), 'texts'));
+  for (const [i, f] of texts.entries()) {
+    const copy = join(scratch, 'texts', `${i}.md`);
+    copyFileSync(f, copy);
+    checked.set(f, copy);
+    const r = run('bun', [join(__dirname, 'advisor-claims-check'), '--repo', top, '--claims', opts.claims, '--text', copy], { allowFail: true });
     if (r.status !== 0) finish(5, 'CLAIMS', [`advisor-claims-check exit ${r.status} on ${f}`, ...`${r.stdout}${r.stderr}`.trim().split('\n')]);
   }
 }
@@ -305,8 +352,7 @@ if (artifacts.length > 0) finish(6, 'ADVISOR_ARTIFACT', artifacts);
 
 // Check 7: policy paths need a quoted user decision.
 function digestPolicyPaths() {
-  scratch = mkdtempSync(join(tmpdir(), 'advisor-publish-'));
-  const r = run('bun', [join(__dirname, 'advisor-conventions'), '--repo', top, '--out', scratch, '--quiet'], { allowFail: true });
+  const r = run('bun', [join(__dirname, 'advisor-conventions'), '--repo', top, '--out', scratchDir(), '--quiet'], { allowFail: true });
   if (r.status !== 0 && r.status !== 4) {
     finish(7, 'POLICY_PATH', [`advisor-conventions exit ${r.status ?? r.signal}; cannot read the repo's policy_paths`, ...`${r.stderr || ''}`.trim().split('\n')]);
   }
@@ -325,8 +371,8 @@ function digestPolicyPaths() {
   const paths = items.map((s) => s.trim().replace(/^(["'])(.*)\1$/, '$2')).filter(Boolean);
   return paths.length > 0 ? paths : null;
 }
-// The defaults are a floor: --policy-paths, else the digest's policy_paths, add to them.
-const policy = [...DEFAULT_POLICY, ...(opts.policyPaths || digestPolicyPaths() || [])];
+// The defaults, --policy-paths and the digest's policy_paths all apply: a flag never drops a repo rule.
+const policy = [...DEFAULT_POLICY, ...(opts.policyPaths || []), ...(digestPolicyPaths() || [])];
 const decisionLines = opts.decisions && existsSync(opts.decisions) ? readFileSync(opts.decisions, 'utf8').split(/\r?\n/) : [];
 const undecided = [];
 for (const { path } of changes) {
@@ -346,7 +392,7 @@ function parseUrl(name, url) {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
     try {
       const u = new URL(url);
-      viaSsh = u.protocol === 'ssh:';
+      viaSsh = ['ssh:', 'git+ssh:', 'ssh+git:'].includes(u.protocol);
       host = u.hostname.toLowerCase();
       path = decodeURIComponent(u.pathname);
       u.username = '';
@@ -354,14 +400,19 @@ function parseUrl(name, url) {
       shown = u.href;
     } catch {}
   } else {
-    const scp = url.match(/^(?:[^@/\s]+@)?([^/:\s]+):(.+)$/);
+    // git splits an scp-style URL at its first ':', so the user part holds no ':'.
+    const scp = url.match(/^(?:[^@/:\s]+@)?([^/:\s]+):(.+)$/);
     if (scp) [host, path] = [scp[1].toLowerCase(), scp[2]];
   }
   const segs = path.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '').split('/');
-  if (!/^[a-z0-9][a-z0-9.-]*$/.test(host) || segs.length !== 2 || !segs.every((s) => /^[\w.-]+$/.test(s))) {
+  if (!/^[a-z0-9][a-z0-9.-]*$/.test(host) || segs.length !== 2 || !segs.every((s) => /^[\w.-]+$/.test(s) && !/^\.+$/.test(s))) {
     usageExit(`cannot resolve <host>/<owner>/<repo> from remote ${name} URL '${shown}'; fix it with git remote set-url ${name} <url>`);
   }
   if (viaSsh) {
+    // git connects through core.sshCommand when it is set, so ssh -G would vouch for another host.
+    if (run('git', ['config', '--get-all', 'core.sshCommand'], { allowFail: true }).stdout.trim()) {
+      usageExit(`remote ${name} is SSH and git config core.sshCommand is set, so git would not connect to the host ssh -G resolves; pick the key with an ~/.ssh/config Host alias and unset it (find it with git config --show-origin --get-all core.sshCommand)`);
+    }
     const alias = host;
     const g = run('ssh', ['-G', alias], { allowFail: true });
     host = ((g.stdout || '').match(/^hostname[ \t]+(\S+)$/im) || [])[1]?.toLowerCase() || '';
@@ -397,20 +448,15 @@ const pushRemote = opts.push ? resolveRemote(opts.push.remote) : null;
 const prRemote = texts.length === 0 ? null : pushRemote && pushRemote.name === prRemoteName ? pushRemote : resolveRemote(prRemoteName);
 const ghEnv = prRemote && { GH_HOST: prRemote.host, GH_REPO: prRemote.slug };
 
-// gh uses one active account per host, so a gh write needs that account to hold push rights on the
-// PR repo; anything but exactly `true` (an API failure included) fails closed. Push only skips it.
-if (prRemote) {
-  const can = run('gh', ['api', `repos/${prRemote.slug}`, '--hostname', prRemote.host, '--jq', '.permissions.push'], { allowFail: true, env: ghEnv });
-  if (can.status !== 0 || (can.stdout || '').trim() !== 'true') {
-    const who = run('gh', ['api', 'user', '--hostname', prRemote.host, '--jq', '.login'], { allowFail: true, env: ghEnv });
-    const login = who.status === 0 && (who.stdout || '').trim() ? who.stdout.trim() : 'unknown';
-    usageExit(`gh account ${login} cannot write to ${prRemote.slug} on ${prRemote.host}; switch with: gh auth switch --hostname ${prRemote.host}`);
-  }
-}
+// Read-only GitHub API reads, pinned to the remote's host and repo, bind refs: the git transport
+// (core.sshCommand, GIT_SSH*, remote.<name>.uploadpack) can answer ls-remote with anything.
+const ghApi = (remote, path, jq) =>
+  run('gh', ['api', `repos/${remote.slug}${path}`, '--hostname', remote.host, '--jq', jq], { allowFail: true, env: { GH_HOST: remote.host, GH_REPO: remote.slug } });
+const branchPath = (b) => `/branches/${b.split('/').map(encodeURIComponent).join('/')}`;
 
 // PR <n> must be the PR under audit: its head is H (or, before a push, the pushed branch) and its
 // base gives the merge-base check 3 bound the audit to.
-const prFields = 'headRefOid,headRefName,headRepository,headRepositoryOwner,baseRefName,baseRefOid';
+const prFields = 'headRefOid,headRefName,headRepository,headRepositoryOwner,baseRefName,baseRefOid,state,author';
 function readPr(fields) {
   const r = run('gh', ['pr', 'view', opts.pr, '-R', prRemote.slug, '--json', fields], { allowFail: true, env: ghEnv });
   try {
@@ -425,6 +471,7 @@ let prePr = null;
 if (prRemote) {
   const { pr, why } = readPr(prFields);
   if (why) finish(3, 'PR_HEAD', [why]);
+  if (pr.state !== 'OPEN') finish(3, 'PR_HEAD', [`PR #${opts.pr} is ${pr.state || 'in no known state'}, not OPEN`]);
   if (!opts.push && pr.headRefOid !== H) finish(3, 'PR_HEAD', [`PR #${opts.pr} head is ${pr.headRefOid}, not the audited HEAD ${H}`]);
   if (opts.push && !(pr.headRefName === opts.push.branch && headRepo(pr).toLowerCase() === pushRemote.slug.toLowerCase() && pushRemote.host === prRemote.host)) {
     finish(3, 'PR_HEAD', [`PR #${opts.pr} head is ${headRepo(pr)}:${pr.headRefName}, not the pushed ${pushRemote.host}/${pushRemote.slug}:${opts.push.branch}`]);
@@ -436,17 +483,36 @@ if (prRemote) {
   if (prBase !== B) {
     finish(3, 'PR_BASE', [`PR #${opts.pr} merges into ${pr.baseRefName} (merge-base ${prBase}), but --target ${opts.target} gives ${B}; rerun with --target ${prRemote.name}/${pr.baseRefName} after git fetch ${prRemote.name}, and a review of that range`]);
   }
+  // A comment or reply needs only read access, which this PR read proved; a body edit needs the
+  // active gh account (one per host) to be the PR's author or to hold push rights on the PR repo.
+  // Anything but exactly `true` (an API failure included) fails closed.
+  if (opts.body) {
+    const who = run('gh', ['api', 'user', '--hostname', prRemote.host, '--jq', '.login'], { allowFail: true, env: ghEnv });
+    const me = who.status === 0 ? (who.stdout || '').trim() : '';
+    if (!me || me !== pr.author?.login) {
+      const can = run('gh', ['api', `repos/${prRemote.slug}`, '--hostname', prRemote.host, '--jq', '.permissions.push'], { allowFail: true, env: ghEnv });
+      if (can.status !== 0 || (can.stdout || '').trim() !== 'true') {
+        usageExit(`gh account ${me || 'unknown'} cannot write to ${prRemote.slug} on ${prRemote.host}; switch with: gh auth switch --hostname ${prRemote.host}`);
+      }
+    }
+  }
   prePr = pr;
 } else if (opts.push) {
-  // Push only: --target must be what the remote itself reports for its default branch or the
-  // pushed branch; local refs/remotes/* are one `git update-ref` from any commit.
-  const ls = run('git', ['ls-remote', opts.push.remote, 'HEAD', `refs/heads/${opts.push.branch}`], { allowFail: true });
-  if (ls.status !== 0) usageExit(`git ls-remote ${opts.push.remote} failed: ${(ls.stderr || '').trim()}; check access with git ls-remote ${opts.push.remote} HEAD`);
-  const tips = ls.stdout.split('\n').map((l) => l.split('\t')).filter(([, ref]) => ref === 'HEAD' || ref === `refs/heads/${opts.push.branch}`).map(([oid]) => oid);
+  // Push only: --target must be the default branch tip the GitHub API reports, so a full-pr review
+  // covers the whole PR; local refs/remotes/* are one `git update-ref` from any commit. Push only
+  // skips the write check above (the SSH key decides) but needs gh to read the repo.
+  const read = (path, jq) => {
+    const r = ghApi(pushRemote, path, jq);
+    const out = r.status === 0 ? r.stdout.trim() : '';
+    if (!out) usageExit(`gh api repos/${pushRemote.slug}${path} on ${pushRemote.host} failed: ${(r.stderr || '').trim()}; push only reads the default branch tip with the gh account active on that host (gh auth switch --hostname ${pushRemote.host})`);
+    return out;
+  };
+  const branch = read('', '.default_branch');
+  const tip = read(branchPath(branch), '.commit.sha');
   const T = commitOf(opts.target);
-  if (!T || !tips.includes(T)) {
+  if (T !== tip) {
     finish(3, 'PR_BASE', [
-      `--target ${opts.target} is ${T || 'not a commit'}, but ${opts.push.remote} reports ${tips.join(', ') || 'nothing'} for HEAD and refs/heads/${opts.push.branch}; run git fetch ${opts.push.remote}, rerun with --target ${opts.push.remote}/HEAD (or ${opts.push.remote}/${opts.push.branch}) and a review of that range`,
+      `--target ${opts.target} is ${T || 'not a commit'}, but the GitHub API reports ${pushRemote.host}/${pushRemote.slug} default branch ${branch} at ${tip}; run git fetch ${opts.push.remote} ${branch}, rerun with --target ${opts.push.remote}/${branch} and a review of that range`,
     ]);
   }
 }
@@ -456,11 +522,11 @@ if (opts.push) {
   const args = ['push', ...(opts.forceWithLease ? ['--force-with-lease'] : []), opts.push.remote, `${H}:refs/heads/${opts.push.branch}`];
   commands.push({ action: 'push', cmd: 'git', args, env: {} });
 }
-if (opts.body) commands.push({ action: 'pr edit', cmd: 'gh', args: ['pr', 'edit', opts.pr, '-R', prRemote.slug, '--body-file', opts.body], env: ghEnv });
-if (opts.comment) commands.push({ action: 'pr comment', cmd: 'gh', args: ['pr', 'comment', opts.pr, '-R', prRemote.slug, '--body-file', opts.comment], env: ghEnv });
+if (opts.body) commands.push({ action: 'pr edit', cmd: 'gh', args: ['pr', 'edit', opts.pr, '-R', prRemote.slug, '--body-file', checked.get(opts.body)], env: ghEnv });
+if (opts.comment) commands.push({ action: 'pr comment', cmd: 'gh', args: ['pr', 'comment', opts.pr, '-R', prRemote.slug, '--body-file', checked.get(opts.comment)], env: ghEnv });
 for (const r of opts.reply) {
   const api = `repos/${prRemote.slug}/pulls/${opts.pr}/comments/${r.id}/replies`;
-  commands.push({ action: 'reply', cmd: 'gh', args: ['api', '-X', 'POST', api, '-F', `body=@${r.file}`, '--hostname', prRemote.host], env: ghEnv });
+  commands.push({ action: 'reply', cmd: 'gh', args: ['api', '-X', 'POST', api, '-F', `body=@${checked.get(r.file)}`, '--hostname', prRemote.host], env: ghEnv });
 }
 const show = (c) => [...Object.entries(c.env).map(([k, v]) => `${k}=${v}`), c.cmd, ...c.args].join(' ');
 const targets = [...new Set([prRemote, pushRemote].filter(Boolean))];
@@ -502,7 +568,7 @@ function failExecute(msg, rule = 'PUBLISH_FAILED') {
 function awaitPrHead() {
   for (let i = 0; i < 5; i++) {
     if (i > 0) Bun.sleepSync(i * 1000);
-    const { pr } = readPr(`${prFields},state`);
+    const { pr } = readPr(prFields);
     if (!pr) continue;
     const same = ['headRefName', 'baseRefName', 'baseRefOid'].every((k) => pr[k] === prePr[k]) && headRepo(pr) === headRepo(prePr) && pr.state === 'OPEN';
     if (same && pr.headRefOid === H) return null;
@@ -512,15 +578,14 @@ function awaitPrHead() {
 }
 
 for (const c of commands) {
-  const r = spawnSync(c.cmd, c.args, { cwd: top, encoding: 'utf8', env: { ...childEnv, ...c.env } });
+  const r = spawnSync(BIN[c.cmd], c.args, { cwd: top, encoding: 'utf8', env: { ...childEnv, ...c.env } });
   process.stderr.write(`${r.stdout || ''}${r.stderr || ''}`);
   if (r.status !== 0) failExecute(`${show(c)} exited ${r.status ?? r.signal}; later commands not run`);
   executed.push(show(c));
   if (c.action === 'push' && prRemote) {
-    const ref = `refs/heads/${opts.push.branch}`;
-    const ls = run('git', ['ls-remote', opts.push.remote, ref], { allowFail: true });
-    const tip = ls.stdout.split('\n').map((l) => l.split('\t')).find(([, r]) => r === ref)?.[0];
-    if (ls.status !== 0 || tip !== H) failExecute(`${opts.push.remote} ${ref} is ${tip || 'unreadable'} after the push, not ${H}; check with git ls-remote ${opts.push.remote} ${ref}; gh commands not run`);
+    const api = ghApi(pushRemote, branchPath(opts.push.branch), '.commit.sha');
+    const tip = api.status === 0 ? api.stdout.trim() : '';
+    if (tip !== H) failExecute(`the GitHub API reports ${pushRemote.host}/${pushRemote.slug} branch ${opts.push.branch} at ${tip || 'nothing'} after the push, not ${H}; gh commands not run`);
     const why = awaitPrHead();
     if (why) failExecute(`${why}; gh commands not run`, 'PR_HEAD');
   }
