@@ -36,8 +36,10 @@
 // Exit codes: 0 pass, 2 usage (or unreadable ledger/report), 3, 4, 5, 6, 7 as above.
 // Read-only on the target repo; findings print as `path:line RULE message`.
 
-const { readFileSync } = require('node:fs');
+const { readFileSync, realpathSync } = require('node:fs');
+const { dirname, join } = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { splitSentences, splitRow, norm } = require(join(dirname(realpathSync(__filename)), '..', 'lib', 'sentences.js'));
 
 const USAGE = `Usage: advisor-claims-check --repo <path> --claims <claims.md> --text <file> [--text <file>]...
   [--head <ref>] [--revert-report <json>] [--prior <file>]... [--test-id-re <regex>] [--json]
@@ -123,10 +125,6 @@ function readOrExit(path) {
 // --- ledger -----------------------------------------------------------
 
 const EVIDENCE_TYPES = new Set(['file_line', 'test', 'command', 'exhaustive']);
-const norm = (s) => s.replace(/\s+/g, ' ').trim();
-
-// Cells of a markdown table row; `\|` is a literal pipe inside a cell.
-const splitRow = (line) => line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, '|').trim());
 
 function parseLedger(path) {
   const rows = [];
@@ -143,70 +141,7 @@ function parseLedger(path) {
 }
 
 // --- sentences --------------------------------------------------------
-
-const ABBREV = new Set(['e.g', 'i.e', 'vs']);
-
-// Markdown-aware: skips code fences, strips list/quote/heading markers, joins
-// wrapped lines of a paragraph, splits on . ! ? except after e.g. / i.e. / vs.
-function splitSentences(content) {
-  const out = [];
-  let inFence = false;
-  let para = null;
-  const flush = () => {
-    if (!para) return;
-    let text = '';
-    const starts = [];
-    for (const l of para) {
-      if (text) text += ' ';
-      starts.push({ off: text.length, line: l.line });
-      text += l.text;
-    }
-    const lineAt = (off) => starts.filter((s) => s.off <= off).pop().line;
-    let begin = 0;
-    const re = /[.!?]+[)"'\]*_`]*(?=\s|$)/g;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      const before = text.slice(begin, m.index).split(/\s+/).pop().toLowerCase();
-      if (m[0][0] === '.' && ABBREV.has(before)) continue;
-      push(text.slice(begin, re.lastIndex), lineAt(begin + (text.slice(begin).length - text.slice(begin).trimStart().length)));
-      begin = re.lastIndex;
-    }
-    push(text.slice(begin), lineAt(begin + (text.slice(begin).length - text.slice(begin).trimStart().length)));
-    para = null;
-  };
-  const push = (s, line) => {
-    const n = norm(s);
-    if (n && /[A-Za-z0-9]/.test(n)) out.push({ sentence: n, line });
-  };
-  let inTable = false;
-  content.split('\n').forEach((raw, i) => {
-    if (/^\s*(```|~~~)/.test(raw)) {
-      flush();
-      inTable = false;
-      inFence = !inFence;
-      return;
-    }
-    if (inFence) return;
-    if (raw.trim().startsWith('|')) {
-      flush();
-      const wasTable = inTable;
-      inTable = true;
-      if (!wasTable) return; // header row
-      const cells = splitRow(raw);
-      if (!cells.every((c) => /^:?-+:?$/.test(c))) push(cells.join(' | '), i + 1);
-      return;
-    }
-    inTable = false;
-    if (!raw.trim()) return flush();
-    const isItem = /^\s*([-*+]|\d+[.)])\s+/.test(raw);
-    const stripped = raw.replace(/^\s*(>\s*)*/, '').replace(/^(#{1,6}\s+|([-*+]|\d+[.)])\s+)/, '');
-    if (isItem || /^#{1,6}\s/.test(raw.trim())) flush();
-    (para = para || []).push({ text: stripped.trim(), line: i + 1 });
-    if (/^#{1,6}\s/.test(raw.trim())) flush();
-  });
-  flush();
-  return out;
-}
+// splitSentences comes from lib/sentences.js (shared with bin/advisor-prose-lint).
 
 const ABSOLUTE_RE = /\b(every|all|always|never|only|exact|agree|agrees|none)\b/i;
 const OUTCOME_RE = /\b(fixed|guard|guards|guarded|rejects?|refuses?|blocks?|prevents?|tested|verified)\b/i;

@@ -20,15 +20,16 @@
 // only checked for max_line_length and file_max_lines.
 // Text mode (--text, repeatable) lints whole files as markdown prose, skipping max_line_length.
 //
-// Sentence splitting replicates splitSentences in bin/advisor-claims-check (markdown-aware,
-// code fences skipped, no split after e.g./i.e./vs.); deviation: table rows are skipped.
+// Sentence splitting is lib/sentences.js (shared with bin/advisor-claims-check); here table rows
+// are skipped and fences are handled by scanMarkdown.
 //
 // Output: `path:line rule message` per finding, or one JSON object with --json. Read-only.
 // Exit codes: 0 clean, 1 violations, 2 usage, 3 no measurable block in the digest.
 
-const { readFileSync } = require('node:fs');
-const { extname } = require('node:path');
+const { readFileSync, realpathSync } = require('node:fs');
+const { extname, dirname, join } = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { splitEntries } = require(join(dirname(realpathSync(__filename)), '..', 'lib', 'sentences.js'));
 
 const USAGE = `Usage: advisor-prose-lint --digest <conventions-digest.md> (--repo <path> --base <ref> | --text <file>...) [--json]
 
@@ -136,62 +137,12 @@ if (!R) {
 }
 
 // --- sentences --------------------------------------------------------
-// Replicated from splitSentences in bin/advisor-claims-check; keep the split rules in step.
+// Shared splitter: lib/sentences.js.
 
-const norm = (s) => s.replace(/\s+/g, ' ').trim();
-const ABBREV = new Set(['e.g', 'i.e', 'vs']);
 const countWords = (s) => s.split(/\s+/).filter((w) => /[A-Za-z0-9]/.test(w)).length;
 
 // entries: [{line, text}] in file order. Returns [{sentence, line, endLine}].
-function sentencesOf(entries) {
-  const out = [];
-  let para = null;
-  const push = (s, line, endLine) => {
-    const n = norm(s);
-    if (n && /[A-Za-z0-9]/.test(n)) out.push({ sentence: n, line, endLine });
-  };
-  const flush = () => {
-    if (!para) return;
-    let text = '';
-    const starts = [];
-    for (const l of para) {
-      if (text) text += ' ';
-      starts.push({ off: text.length, line: l.line });
-      text += l.text;
-    }
-    const lineAt = (off) => starts.filter((s) => s.off <= off).pop().line;
-    const lead = (s) => s.length - s.trimStart().length;
-    let begin = 0;
-    const re = /[.!?]+[)"'\]*_`]*(?=\s|$)/g;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      const before = text.slice(begin, m.index).split(/\s+/).pop().toLowerCase();
-      if (m[0][0] === '.' && ABBREV.has(before)) continue;
-      push(text.slice(begin, re.lastIndex), lineAt(begin + lead(text.slice(begin))), lineAt(m.index));
-      begin = re.lastIndex;
-    }
-    push(text.slice(begin), lineAt(begin + lead(text.slice(begin))), lineAt(Math.max(0, text.length - 1)));
-    para = null;
-  };
-  for (const { line, text: raw } of entries) {
-    if (raw.trim().startsWith('|')) {
-      flush();
-      continue;
-    }
-    if (!raw.trim()) {
-      flush();
-      continue;
-    }
-    const isItem = /^\s*([-*+]|\d+[.)])\s+/.test(raw);
-    const isHeading = /^#{1,6}\s/.test(raw.trim());
-    const stripped = raw.replace(/^\s*(>\s*)*/, '').replace(/^(#{1,6}\s+|([-*+]|\d+[.)])\s+)/, '');
-    if (isItem || isHeading) flush();
-    (para = para || []).push({ text: stripped.trim(), line });
-    if (isHeading) flush();
-  }
-  flush();
-  return out;
-}
+const sentencesOf = (entries) => splitEntries(entries, { fences: false, tableRows: false });
 
 // --- per-line scanners ------------------------------------------------
 // Each returns [{code, comment, has}] per line: `code` is the non-comment text (prose for
