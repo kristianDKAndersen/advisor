@@ -10,34 +10,47 @@
 //     [--execute] [--json]
 //
 // Checks run in order and stop at the first failure:
-//   1. at least one action (--push, --body, --comment, --reply)                   exit 2
-//   2. --repo is the advisor repo ($ADV, else this script's repo): not applicable  exit 0
-//   3. review frontmatter audit_scope full-pr, audit_base_sha and audit_head_sha full
-//      hex SHAs equal to the merge-base and HEAD, or an equal `git patch-id --verbatim`
-//      of the PR diff                                                              exit 3 STALE_AUDIT
-//   4. verdict APPROVE / APPROVE WITH WARNINGS, open_blockers 0, exactly one Blockers
-//      heading (## to ####, any case) and no `**[B<n>]**` list entry outside code fences  exit 4
+//   1. at least one action (--push, --body, --comment, --reply); --claims, if given, exists  exit 2
+//   2. --repo is this script's own repo (the git toplevel of its directory; $ADV is never
+//      read): not applicable, --json status not-applicable                         exit 0
+//   3. review frontmatter audit_scope full-pr; audit_base_sha and audit_head_sha are full SHAs
+//      of the repo's object format that `git rev-parse --verify <sha>^{commit}` returns
+//      unchanged and that no ref is named after; they equal the merge-base and HEAD, or the PR
+//      diff has an equal `git patch-id --verbatim` (diff pinned to -U3, no renames, full index,
+//      submodules shown); the merge-base is not HEAD                               exit 3 STALE_AUDIT
+//   4. verdict APPROVE / APPROVE WITH WARNINGS, open_blockers 0, exactly one Blockers heading
+//      (## to ####, any case) and no `[B<n>]` token outside code fences (CommonMark pairing:
+//      same character, at least as long; an unclosed fence fails)                 exit 4
 //   5. every text file passes bin/advisor-claims-check against --claims            exit 5
 //   6. no .advisor-output/, .advisor-preserved/, graphify-out/, captures/ path,
 //      GRAPH_REPORT.md or added `eco:` line in the PR diff                         exit 6
 //   7. every changed policy path has `<path>: "<decision>"` in --decisions         exit 7
 //   8. the push remote and the PR remote (--pr-remote, else the push remote, else origin)
-//      have a URL path of exactly <owner>/<repo> on a host `gh auth status` accepts   exit 2;
+//      each have exactly one fetch URL and one push URL, both <host>/<owner>/<repo> of the same
+//      repo; only the PR remote's host must pass `gh auth status` (a push alone needs no gh)  exit 2;
 //      PR <n>'s head is HEAD (no --push) or the pushed branch of the push repo     exit 3 PR_HEAD;
+//      with a PR, merge-base(HEAD, its baseRefOid) is the merge-base of check 3; push only,
+//      --target is the commit `git ls-remote` reports for the remote's HEAD or the pushed branch
+//      (a local target older than the remote tip fails safe: git fetch, then rerun)  exit 3 PR_BASE;
 //      dry run prints the targets and commands; --execute runs them                exit 8 on failure
 //
 // Spec amendments (review of a15d9cf): patch-id is --verbatim, so a whitespace-only change
 // after the audit invalidates it; the push refspec is <H>:refs/heads/<branch>; --pr is bound
 // to the audited head; --execute re-reads the PR head after the push before any gh write.
-// Policy paths: --policy-paths, else policy_paths from the bin/advisor-conventions digest
-// (built into a temp --out dir; a conventions failure exits 7), else
-// {,docs/,.github/}CONTRIBUTING*, {,docs/,.github/}CODEOWNERS,
-// {,docs/,.github/}PULL_REQUEST_TEMPLATE{*,/**} and **/guardrails/**, all matched case-insensitively.
+// Re-review of 710041b: after the push `git ls-remote` must show H, then up to 5 read-only PR
+// reads (t = 0, 1, 3, 6, 10 s) wait while the head is the pre-push one; any other head, base or
+// state stops (exit 8 PR_HEAD). Children run without GIT_DIR, GIT_WORK_TREE, GIT_DIFF_OPTS,
+// GIT_EXTERNAL_DIFF or GIT_CONFIG*, since each can redirect git or shrink the audited diff.
+// Policy paths: {,docs/,.github/}CONTRIBUTING*, {,docs/,.github/}CODEOWNERS,
+// {,docs/,.github/}PULL_REQUEST_TEMPLATE{*,/**} and **/guardrails/**, plus --policy-paths, else
+// plus policy_paths from the bin/advisor-conventions digest (built into a temp --out dir; a
+// conventions failure exits 7), all matched case-insensitively.
 // Every command runs with cwd <repo>. Spec clarification: `gh api` has no -R flag, so gh pr
 // commands get -R <owner>/<repo>, every gh pr and gh api command gets GH_HOST=<host> and GH_REPO=<owner>/<repo>,
 // and gh api gets --hostname <host> with repos/<owner>/<repo>/... spelled literally.
 // A successful --execute appends one line to <runs root>/publish-log.jsonl (ADVISOR_RUNS_ROOT); a
 // failure after an action ran appends a status partial line, and a log write failure exits 8.
+// On exit 8, --json adds status (failed: nothing ran, partial, executed-unlogged) and executed.
 //
 // Exit codes: 0 pass (dry run, executed, not applicable), 2 usage or unresolvable remote,
 // 3 stale or missing audit or PR head mismatch, 4 verdict or Blockers, 5 claims, 6 advisor artifacts,
@@ -128,6 +141,7 @@ const texts = [opts.body, opts.comment, ...opts.reply.map((r) => r.file)].filter
 if (!opts.push && texts.length === 0) usageExit('at least one action is required (--push, --body, --comment or --reply)');
 if (texts.length > 0 && !/^\d+$/.test(opts.pr || '')) usageExit('--body, --comment and --reply need --pr <n>');
 for (const f of texts) if (!existsSync(f)) usageExit(`text file not found: ${f}`);
+if (opts.claims && !existsSync(opts.claims)) usageExit(`claims file not found: ${opts.claims}`);
 
 let scratch = null;
 const cleanup = () => {
@@ -151,20 +165,24 @@ function finish(code, rule, lines, extra = {}) {
   process.exit(code);
 }
 
-function run(cmd, args, { input, allowFail = false, env } = {}) {
-  const r = spawnSync(cmd, args, { cwd: top, encoding: 'utf8', input, env: env && { ...process.env, ...env }, maxBuffer: 256 * 1024 * 1024 });
+// GIT_DIFF_OPTS beats an explicit -U3, GIT_CONFIG* injects config, GIT_DIR/GIT_WORK_TREE point git elsewhere.
+const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_(?:DIR|WORK_TREE|DIFF_OPTS|EXTERNAL_DIFF|CONFIG.*)$/.test(k)));
+function run(cmd, args, { input, allowFail = false, env, cwd = top } = {}) {
+  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', input, env: { ...childEnv, ...env }, maxBuffer: 256 * 1024 * 1024 });
   if (r.status !== 0 && !allowFail) usageExit(`${cmd} ${args.join(' ')} failed: ${(r.stderr || '').trim()}`);
   return r;
 }
 const git = (...args) => run('git', ['-c', 'core.quotePath=false', ...args]).stdout.trim();
+const toplevel = (cwd) => {
+  const r = run('git', ['rev-parse', '--show-toplevel'], { cwd, allowFail: true });
+  return r.status === 0 ? realpathSync(r.stdout.trim()) : null;
+};
 
-const topRes = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: resolve(opts.repo), encoding: 'utf8' });
-if (topRes.status !== 0) usageExit(`not a git repository: ${opts.repo}`);
-const top = realpathSync(topRes.stdout.trim());
+const top = toplevel(resolve(opts.repo));
+if (!top) usageExit(`not a git repository: ${opts.repo}`);
 
-// Check 2: not applicable on the advisor repo.
-const advisorRoot = process.env.ADV || resolve(__dirname, '..');
-if (existsSync(advisorRoot) && realpathSync(advisorRoot) === top) finish(0, null, ['not applicable: advisor repo'], { status: 'not-applicable' });
+// Check 2: not applicable on this script's own repo. $ADV is caller-controlled, so it is never read.
+if (toplevel(__dirname) === top) finish(0, null, ['not applicable: advisor repo'], { status: 'not-applicable' });
 
 // Check 3: audit binding.
 function frontmatter(text) {
@@ -178,8 +196,12 @@ function frontmatter(text) {
   return fm;
 }
 
+// Pinned: with zero context patch-id cannot tell where a line was added, and config can hide submodules.
 function patchId(a, b) {
-  const diff = run('git', ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--end-of-options', a, b], { allowFail: true });
+  const diff = run('git', [
+    '-c', 'diff.context=3', 'diff', '-U3', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--full-index',
+    '--ignore-submodules=none', '--submodule=short', '--end-of-options', a, b,
+  ], { allowFail: true });
   if (diff.status !== 0) return null;
   return run('git', ['patch-id', '--verbatim'], { input: diff.stdout }).stdout.trim().split(/\s+/)[0] || '';
 }
@@ -189,12 +211,20 @@ const reviewText = readFileSync(opts.review, 'utf8');
 const fm = frontmatter(reviewText);
 if (!fm) finish(3, 'STALE_AUDIT', [`${opts.review}: no YAML frontmatter`]);
 if (fm.audit_scope !== 'full-pr') finish(3, 'STALE_AUDIT', [`${opts.review}: audit_scope is ${fm.audit_scope || 'missing'}, need full-pr`]);
-// Refs, abbreviations and option strings never reach git: a ref would bind to HEAD at publish time.
+// Only the full SHA of a commit binds: a ref, even a hex-named one, would follow HEAD at publish time.
+const hexsz = git('rev-parse', '--show-object-format') === 'sha256' ? 64 : 40;
 for (const k of ['audit_base_sha', 'audit_head_sha']) {
-  if (!SHA_RE.test(fm[k] || '')) finish(3, 'STALE_AUDIT', [`${opts.review}: ${k} is ${fm[k] || 'missing'}, need a full hex commit SHA`]);
+  const v = fm[k] || '';
+  const ok =
+    SHA_RE.test(v) &&
+    v.length === hexsz &&
+    run('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `${v}^{commit}`], { allowFail: true }).stdout.trim() === v &&
+    git('for-each-ref', '--format=%(refname)', `refs/${v}`, `refs/tags/${v}`, `refs/heads/${v}`, `refs/remotes/${v}`) === '';
+  if (!ok) finish(3, 'STALE_AUDIT', [`${opts.review}: ${k} is ${v || 'missing'}, need the full ${hexsz}-hex SHA of a commit that no ref is named after`]);
 }
 const H = git('rev-parse', 'HEAD');
 const B = git('merge-base', 'HEAD', opts.target);
+if (B === H) finish(3, 'STALE_AUDIT', [`merge-base(HEAD, ${opts.target}) is HEAD ${H}: the PR diff is empty; pass the branch the PR merges into as --target`]);
 const prPatchId = patchId(B, H);
 if (fm.audit_head_sha !== H || fm.audit_base_sha !== B) {
   const auditPatchId = patchId(fm.audit_base_sha, fm.audit_head_sha);
@@ -208,12 +238,22 @@ if (fm.audit_head_sha !== H || fm.audit_base_sha !== B) {
 // Check 4: verdict and Blockers recount.
 if (fm.verdict !== 'APPROVE' && fm.verdict !== 'APPROVE WITH WARNINGS') finish(4, 'VERDICT', [`verdict is ${fm.verdict || 'missing'}`]);
 if (fm.open_blockers !== '0') finish(4, 'BLOCKERS', [`open_blockers is ${fm.open_blockers || 'missing'}, need 0`]);
-let fenced = false;
-const outsideFences = reviewText.split(/\r?\n/).filter((l) => (/^\s*(?:```|~~~)/.test(l) ? ((fenced = !fenced), false) : !fenced));
+// CommonMark fences: up to 3 spaces of indent; a fence closes only on the same character, at least
+// as long, with no info string. Any [B<n>] token outside them counts, whatever the list marker.
+let fence = null;
+const outsideFences = [];
+for (const l of reviewText.split(/\r?\n/)) {
+  const f = l.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  if (fence) {
+    if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !f[2].trim()) fence = null;
+  } else if (f && !(f[1][0] === '`' && f[2].includes('`'))) fence = f[1];
+  else outsideFences.push(l);
+}
+if (fence) finish(4, 'BLOCKERS', [`unclosed ${fence} code fence: close it so the Blockers recount sees what renders`]);
 const blockerHeadings = outsideFences.filter((l) => /^#{2,4}\s+blockers\b/i.test(l)).length;
 if (blockerHeadings !== 1) finish(4, 'BLOCKERS', [`need exactly one Blockers heading (## to ####), found ${blockerHeadings}`]);
-const blockerCount = outsideFences.filter((l) => /^\s*(?:[-*]|\d+\.)\s+\*\*\[B\d+\]/.test(l)).length;
-if (blockerCount !== 0) finish(4, 'BLOCKERS', [`open_blockers is 0 but the review lists ${blockerCount} **[B<n>]** entries`]);
+const blockerCount = outsideFences.join('\n').match(/\[B\d+\]/g)?.length ?? 0;
+if (blockerCount !== 0) finish(4, 'BLOCKERS', [`open_blockers is 0 but the review has ${blockerCount} [B<n>] tokens outside code fences`]);
 
 // Check 5: claims.
 if (texts.length > 0) {
@@ -273,7 +313,8 @@ function digestPolicyPaths() {
   const paths = items.map((s) => s.trim().replace(/^(["'])(.*)\1$/, '$2')).filter(Boolean);
   return paths.length > 0 ? paths : null;
 }
-const policy = opts.policyPaths || digestPolicyPaths() || DEFAULT_POLICY;
+// The defaults are a floor: --policy-paths, else the digest's policy_paths, add to them.
+const policy = [...DEFAULT_POLICY, ...(opts.policyPaths || digestPolicyPaths() || [])];
 const decisionLines = opts.decisions && existsSync(opts.decisions) ? readFileSync(opts.decisions, 'utf8').split(/\r?\n/) : [];
 const undecided = [];
 for (const { path } of changes) {
@@ -284,12 +325,11 @@ for (const { path } of changes) {
 if (undecided.length > 0) finish(7, 'POLICY_PATH', undecided);
 
 // Check 8: resolve host and owner/repo of the push and PR remotes, bind --pr, then print or run.
-function resolveRemote(name) {
-  const r = run('git', ['remote', 'get-url', '--push', name], { allowFail: true });
-  const url = r.stdout.trim();
+// Credentials are cut before parsing, so a URL that fails to parse never prints them.
+function parseUrl(name, url) {
   let host = '';
   let path = '';
-  let shown = url;
+  let shown = url.replace(/^([a-z][a-z0-9+.-]*:\/\/).*@/is, '$1');
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
     try {
       const u = new URL(url);
@@ -304,36 +344,78 @@ function resolveRemote(name) {
     if (scp) [host, path] = [scp[1].toLowerCase(), scp[2]];
   }
   const segs = path.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '').split('/');
-  if (r.status !== 0 || !host || segs.length !== 2 || !segs.every((s) => /^[\w.-]+$/.test(s))) {
-    usageExit(`cannot resolve <host>/<owner>/<repo> from remote ${name} URL '${shown}'`);
+  if (!/^[a-z0-9][a-z0-9.-]*$/.test(host) || segs.length !== 2 || !segs.every((s) => /^[\w.-]+$/.test(s))) {
+    usageExit(`cannot resolve <host>/<owner>/<repo> from remote ${name} URL '${shown}'; fix it with git remote set-url ${name} <url>`);
   }
-  if (run('gh', ['auth', 'status', '--hostname', host], { allowFail: true }).status !== 0) {
-    usageExit(`remote ${name} host ${host} is not a GitHub host gh is authenticated for`);
-  }
-  return { name, host, slug: segs.join('/'), shown };
+  return { host, slug: segs.join('/'), shown };
 }
-const pushRemote = opts.push ? resolveRemote(opts.push.remote) : null;
+// git push sends to every push URL and ls-remote <name> reads the fetch URL, so each remote has
+// exactly one of each, naming the same repo. Only the PR remote needs gh.
+function resolveRemote(name, { gh }) {
+  const urls = (push) => {
+    const r = run('git', ['remote', 'get-url', ...(push ? ['--push'] : []), '--all', name], { allowFail: true });
+    return r.status === 0 ? r.stdout.split('\n').filter((u) => u.trim()) : [];
+  };
+  const [fetchUrls, pushUrls] = [urls(false), urls(true)];
+  if (fetchUrls.length !== 1 || pushUrls.length !== 1) {
+    usageExit(`remote ${name} has ${fetchUrls.length} fetch and ${pushUrls.length} push URLs, need one of each; inspect with git remote get-url --push --all ${name}`);
+  }
+  const fetchRepo = parseUrl(name, fetchUrls[0].trim());
+  const pushRepo = parseUrl(name, pushUrls[0].trim());
+  if (fetchRepo.host !== pushRepo.host || fetchRepo.slug.toLowerCase() !== pushRepo.slug.toLowerCase()) {
+    usageExit(`remote ${name} fetches ${fetchRepo.host}/${fetchRepo.slug} but pushes to ${pushRepo.host}/${pushRepo.slug}; use one remote per repo (git remote set-url --push ${name} <fetch url>)`);
+  }
+  if (gh && run('gh', ['auth', 'status', '--hostname', pushRepo.host], { allowFail: true }).status !== 0) {
+    usageExit(`remote ${name} host ${pushRepo.host} is not a GitHub host gh is authenticated for; run gh auth login --hostname ${pushRepo.host}`);
+  }
+  return { name, ...pushRepo };
+}
 const prRemoteName = opts.prRemote || (opts.push ? opts.push.remote : 'origin');
-const prRemote = texts.length === 0 ? null : pushRemote && pushRemote.name === prRemoteName ? pushRemote : resolveRemote(prRemoteName);
+const pushRemote = opts.push ? resolveRemote(opts.push.remote, { gh: texts.length > 0 && opts.push.remote === prRemoteName }) : null;
+const prRemote = texts.length === 0 ? null : pushRemote && pushRemote.name === prRemoteName ? pushRemote : resolveRemote(prRemoteName, { gh: true });
 const ghEnv = prRemote && { GH_HOST: prRemote.host, GH_REPO: prRemote.slug };
 
-// PR <n> must be the PR under audit: its head is H, or (before a push) the pushed branch.
-function prMismatch(pushed) {
-  const fields = 'headRefOid,headRefName,headRepository,headRepositoryOwner';
+// PR <n> must be the PR under audit: its head is H (or, before a push, the pushed branch) and its
+// base gives the merge-base check 3 bound the audit to.
+const prFields = 'headRefOid,headRefName,headRepository,headRepositoryOwner,baseRefName,baseRefOid';
+function readPr(fields) {
   const r = run('gh', ['pr', 'view', opts.pr, '-R', prRemote.slug, '--json', fields], { allowFail: true, env: ghEnv });
-  let pr = null;
   try {
-    pr = JSON.parse(r.stdout);
+    const pr = JSON.parse(r.stdout);
+    if (r.status === 0 && pr) return { pr };
   } catch {}
-  if (r.status !== 0 || !pr) return `cannot read PR #${opts.pr} on ${prRemote.host}/${prRemote.slug}: ${(r.stderr || '').trim()}`;
-  if (!opts.push || pushed) return pr.headRefOid === H ? null : `PR #${opts.pr} head is ${pr.headRefOid}, not the audited HEAD ${H}`;
-  const headRepo = `${pr.headRepositoryOwner?.login}/${pr.headRepository?.name}`;
-  if (pr.headRefName === opts.push.branch && headRepo.toLowerCase() === pushRemote.slug.toLowerCase() && pushRemote.host === prRemote.host) return null;
-  return `PR #${opts.pr} head is ${headRepo}:${pr.headRefName}, not the pushed ${pushRemote.host}/${pushRemote.slug}:${opts.push.branch}`;
+  return { why: `cannot read PR #${opts.pr} on ${prRemote.host}/${prRemote.slug}: ${(r.stderr || '').trim()}` };
 }
+const headRepo = (pr) => `${pr.headRepositoryOwner?.login}/${pr.headRepository?.name}`;
+const commitOf = (rev) => run('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`], { allowFail: true }).stdout.trim();
+let prePr = null;
 if (prRemote) {
-  const why = prMismatch(false);
+  const { pr, why } = readPr(prFields);
   if (why) finish(3, 'PR_HEAD', [why]);
+  if (!opts.push && pr.headRefOid !== H) finish(3, 'PR_HEAD', [`PR #${opts.pr} head is ${pr.headRefOid}, not the audited HEAD ${H}`]);
+  if (opts.push && !(pr.headRefName === opts.push.branch && headRepo(pr).toLowerCase() === pushRemote.slug.toLowerCase() && pushRemote.host === prRemote.host)) {
+    finish(3, 'PR_HEAD', [`PR #${opts.pr} head is ${headRepo(pr)}:${pr.headRefName}, not the pushed ${pushRemote.host}/${pushRemote.slug}:${opts.push.branch}`]);
+  }
+  if (!SHA_RE.test(pr.baseRefOid || '') || commitOf(pr.baseRefOid) !== pr.baseRefOid) {
+    finish(3, 'PR_BASE', [`PR #${opts.pr} base ${pr.baseRefName} at ${pr.baseRefOid} is not a local commit; run git fetch ${prRemote.name} ${pr.baseRefName} and rerun`]);
+  }
+  const prBase = git('merge-base', H, pr.baseRefOid);
+  if (prBase !== B) {
+    finish(3, 'PR_BASE', [`PR #${opts.pr} merges into ${pr.baseRefName} (merge-base ${prBase}), but --target ${opts.target} gives ${B}; rerun with --target ${prRemote.name}/${pr.baseRefName} after git fetch ${prRemote.name}, and a review of that range`]);
+  }
+  prePr = pr;
+} else if (opts.push) {
+  // Push only: --target must be what the remote itself reports for its default branch or the
+  // pushed branch; local refs/remotes/* are one `git update-ref` from any commit.
+  const ls = run('git', ['ls-remote', opts.push.remote, 'HEAD', `refs/heads/${opts.push.branch}`], { allowFail: true });
+  if (ls.status !== 0) usageExit(`git ls-remote ${opts.push.remote} failed: ${(ls.stderr || '').trim()}; check access with git ls-remote ${opts.push.remote} HEAD`);
+  const tips = ls.stdout.split('\n').map((l) => l.split('\t')).filter(([, ref]) => ref === 'HEAD' || ref === `refs/heads/${opts.push.branch}`).map(([oid]) => oid);
+  const T = commitOf(opts.target);
+  if (!T || !tips.includes(T)) {
+    finish(3, 'PR_BASE', [
+      `--target ${opts.target} is ${T || 'not a commit'}, but ${opts.push.remote} reports ${tips.join(', ') || 'nothing'} for HEAD and refs/heads/${opts.push.branch}; run git fetch ${opts.push.remote}, rerun with --target ${opts.push.remote}/HEAD (or ${opts.push.remote}/${opts.push.branch}) and a review of that range`,
+    ]);
+  }
 }
 
 const commands = [];
@@ -376,23 +458,41 @@ function appendLog(status) {
     return `could not append to ${logPath}: ${e.message}`;
   }
 }
-// After an action ran, the failure is still logged (status partial) so the push leaves a record.
-function failExecute(msg) {
+// After an action ran, the failure is still logged (status partial) so the push leaves a record;
+// --json says what ran, so a caller never retries a comment that was already posted.
+function failExecute(msg, rule = 'PUBLISH_FAILED') {
   const logErr = executed.length > 0 ? appendLog('partial') : null;
-  finish(8, 'PUBLISH_FAILED', [msg, ...(logErr ? [logErr] : [])]);
+  finish(8, rule, [msg, ...(logErr ? [logErr] : [])], { status: executed.length > 0 ? 'partial' : 'failed', executed });
+}
+// GitHub moves headRefOid some time after the ref update: wait (read-only) while the PR still shows
+// the pre-push head, and stop on any other head, head repo, base or state.
+function awaitPrHead() {
+  for (let i = 0; i < 5; i++) {
+    if (i > 0) Bun.sleepSync(i * 1000);
+    const { pr } = readPr(`${prFields},state`);
+    if (!pr) continue;
+    const same = ['headRefName', 'baseRefName', 'baseRefOid'].every((k) => pr[k] === prePr[k]) && headRepo(pr) === headRepo(prePr) && pr.state === 'OPEN';
+    if (same && pr.headRefOid === H) return null;
+    if (!same || pr.headRefOid !== prePr.headRefOid) return `PR #${opts.pr} changed after the push: head ${headRepo(pr)}:${pr.headRefName} at ${pr.headRefOid}, base ${pr.baseRefName}, state ${pr.state}`;
+  }
+  return `push landed at ${H}; PR head not yet ${H} after 5 reads; rerun without --push to post`;
 }
 
 for (const c of commands) {
-  const r = spawnSync(c.cmd, c.args, { cwd: top, encoding: 'utf8', env: { ...process.env, ...c.env } });
+  const r = spawnSync(c.cmd, c.args, { cwd: top, encoding: 'utf8', env: { ...childEnv, ...c.env } });
   process.stderr.write(`${r.stdout || ''}${r.stderr || ''}`);
   if (r.status !== 0) failExecute(`${show(c)} exited ${r.status ?? r.signal}; later commands not run`);
   executed.push(show(c));
   if (c.action === 'push' && prRemote) {
-    const why = prMismatch(true);
-    if (why) failExecute(`${why}; gh commands not run`);
+    const ref = `refs/heads/${opts.push.branch}`;
+    const ls = run('git', ['ls-remote', opts.push.remote, ref], { allowFail: true });
+    const tip = ls.stdout.split('\n').map((l) => l.split('\t')).find(([, r]) => r === ref)?.[0];
+    if (ls.status !== 0 || tip !== H) failExecute(`${opts.push.remote} ${ref} is ${tip || 'unreadable'} after the push, not ${H}; check with git ls-remote ${opts.push.remote} ${ref}; gh commands not run`);
+    const why = awaitPrHead();
+    if (why) failExecute(`${why}; gh commands not run`, 'PR_HEAD');
   }
 }
 
 const logErr = appendLog('executed');
-if (logErr) finish(8, 'PUBLISH_FAILED', [`every action ran but ${logErr}`]);
+if (logErr) finish(8, 'PUBLISH_FAILED', [`every action ran but ${logErr}`], { status: 'executed-unlogged', executed });
 finish(0, null, [...header, ...commands.map((c) => `ran: ${show(c)}`)], { status: 'executed', target: target.slug, host: target.host, cwd: top, commands: commands.map(show) });

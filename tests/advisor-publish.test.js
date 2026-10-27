@@ -36,20 +36,22 @@ function commitAll(repo, msg) {
   return git(repo, 'rev-parse', 'HEAD');
 }
 
-// Throwaway repo: main has README.md, branch feat adds prFiles. origin's URL is
-// github.com/o/r; the PATH shims log every gh write and turn `git push` into a push
-// to the bare temp origin (or a failure with SHIM_PUSH_FAIL=1). Read-only gh calls
-// (auth status, pr view) go to reads.log; pr view reports HEAD unless SHIM_PR_* say otherwise.
-function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL } = {}) {
+// Throwaway repo: main has baseFiles and is pushed to the bare temp origin, branch feat adds
+// prFiles. origin's URL is github.com/o/r; the PATH shims log every gh write and turn `git push`
+// into a push to the bare origin (or a failure with SHIM_PUSH_FAIL=1) and `git ls-remote` into a
+// read of it (or SHIM_LS_OID). Read-only calls go to reads.log; pr view reports HEAD, base main and
+// state OPEN unless SHIM_PR_* say otherwise (SHIM_PR_HEADS: the head for each pr view call in turn).
+function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL, baseFiles = { 'README.md': 'one\ntwo\n' }, objectFormat = 'sha1' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'advisor-publish-'));
   scratch.push(dir);
   const bare = join(dir, 'origin.git');
-  git(dir, 'init', '-q', '--bare', bare);
+  git(dir, 'init', '-q', '--bare', '-b', 'main', `--object-format=${objectFormat}`, bare);
   const repo = join(dir, 'repo');
   mkdirSync(repo);
-  git(repo, 'init', '-q', '-b', 'main');
-  write(repo, 'README.md', 'one\ntwo\n');
+  git(repo, 'init', '-q', '-b', 'main', `--object-format=${objectFormat}`);
+  for (const [p, c] of Object.entries(baseFiles)) write(repo, p, c);
   const base = commitAll(repo, 'base');
+  git(repo, 'push', '-q', bare, 'main');
   git(repo, 'checkout', '-q', '-b', 'feat');
   for (const [p, c] of Object.entries(prFiles)) write(repo, p, c);
   const head = commitAll(repo, 'pr');
@@ -61,14 +63,18 @@ function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL } = 
     shim,
     'gh',
     `#!/bin/sh\nif [ "$1" = auth ]; then\n  echo "gh $*" >> "${reads}"\n  [ "$*" = "auth status --hostname \${SHIM_AUTH_HOST:-github.com}" ]; exit $?\nfi\n` +
-      `if [ "$1 $2" = "pr view" ]; then\n  echo "gh $* | GH_HOST=$GH_HOST" >> "${reads}"\n` +
-      `  printf '{"headRefOid":"%s","headRefName":"%s","headRepository":{"name":"r"},"headRepositoryOwner":{"login":"%s"}}\\n' "\${SHIM_PR_HEAD:-$(git rev-parse HEAD)}" "\${SHIM_PR_BRANCH:-feat}" "\${SHIM_PR_OWNER:-o}"\n  exit 0\nfi\n` +
+      `if [ "$1 $2" = "pr view" ]; then\n  echo "gh $* | GH_HOST=$GH_HOST" >> "${reads}"\n  head=\${SHIM_PR_HEAD:-$(git rev-parse HEAD)}\n` +
+      `  if [ -n "$SHIM_PR_HEADS" ]; then\n    n=$(grep -c '^gh pr view' "${reads}")\n    set -- $SHIM_PR_HEADS\n    while [ "$n" -gt 1 ] && [ $# -gt 1 ]; do shift; n=$((n - 1)); done\n    head=$1\n  fi\n` +
+      `  printf '{"headRefOid":"%s","headRefName":"%s","headRepository":{"name":"r"},"headRepositoryOwner":{"login":"%s"},"baseRefName":"%s","baseRefOid":"%s","state":"%s"}\\n' "$head" "\${SHIM_PR_BRANCH:-feat}" "\${SHIM_PR_OWNER:-o}" "\${SHIM_PR_BASE_NAME:-main}" "\${SHIM_PR_BASE_OID:-$(git rev-parse main)}" "\${SHIM_PR_STATE:-OPEN}"\n  exit 0\nfi\n` +
       `echo "gh $* | GH_REPO=$GH_REPO | GH_HOST=$GH_HOST | cwd=$(pwd)" >> "${log}"\n[ -n "$SHIM_GH_FAIL" ] && exit 1\nexit 0\n`,
   );
   write(
     shim,
     'git',
-    `#!/bin/sh\nif [ "$1" = push ]; then\n  echo "git $* | cwd=$(pwd)" >> "${log}"\n  [ -n "$SHIM_PUSH_FAIL" ] && { echo "push rejected" >&2; exit 1; }\n  eval last=\\\${$#}\n  exec "${REAL_GIT}" push -q "${bare}" "$last"\nfi\nexec "${REAL_GIT}" "$@"\n`,
+    `#!/bin/sh\nif [ "$1" = push ]; then\n  echo "git $* | cwd=$(pwd)" >> "${log}"\n  [ -n "$SHIM_PUSH_FAIL" ] && { echo "push rejected" >&2; exit 1; }\n  eval last=\\\${$#}\n  exec "${REAL_GIT}" push -q "${bare}" "$last"\nfi\n` +
+      `if [ "$1" = ls-remote ]; then\n  echo "git $*" >> "${reads}"\n  shift 2\n` +
+      `  if [ -n "$SHIM_LS_OID" ]; then for r in "$@"; do printf '%s\\t%s\\n' "$SHIM_LS_OID" "$r"; done; exit 0; fi\n` +
+      `  exec "${REAL_GIT}" ls-remote "${bare}" "$@"\nfi\nexec "${REAL_GIT}" "$@"\n`,
   );
   chmodSync(join(shim, 'gh'), 0o755);
   chmodSync(join(shim, 'git'), 0o755);
@@ -142,6 +148,7 @@ test('T3 clean merge of the target with an unchanged PR patch: exit 0 (patch-id 
   git(fx.repo, 'checkout', '-q', 'main');
   write(fx.repo, 'other.txt', 'x\n');
   commitAll(fx.repo, 'main moves');
+  git(fx.repo, 'push', '-q', fx.bare, 'main');
   git(fx.repo, 'checkout', '-q', 'feat');
   git(fx.repo, 'merge', '-q', '--no-edit', 'main');
   expect(run(fx, [...base(fx, rv), '--push', 'origin', 'feat']).code).toBe(0);
@@ -213,7 +220,7 @@ test('T10 CONTRIBUTING.md without a decision exits 7; with a decisions line exit
   expect(res.out).toContain('CONTRIBUTING.md');
   const decisions = write(fx.dir, 'decisions.md', 'CONTRIBUTING.md: "yes, ship the CONTRIBUTING change"\n');
   expect(run(fx, [...base(fx), '--push', 'origin', 'feat', '--decisions', decisions]).code).toBe(0);
-  // The digest's policy_paths (vault note frontmatter) replace the defaults.
+  // The digest's policy_paths (vault note frontmatter) add to the defaults.
   const slug = `repo-${createHash('sha1').update(ORIGIN_URL).digest('hex').slice(0, 8)}`;
   write(join(fx.dir, 'vault'), `repo-rules/${slug}.md`, '---\npolicy_paths: [docs/*.md]\n---\nnote\n');
   const viaDigest = run(fx, [...base(fx), '--push', 'origin', 'feat', '--decisions', decisions]);
@@ -334,9 +341,10 @@ test('B4 the remote host is pinned (GH_HOST, gh api --hostname); a nested path o
   expect(leak.stdout).toContain('GH_HOST=github.com GH_REPO=o/r gh pr comment 7 -R o/r');
   const nested = makeFixture({ origin: 'https://gitlab.com/grp/sub/proj.git' });
   expect(run(nested, [...base(nested), '--push', 'origin', 'feat']).code).toBe(2);
+  // A push alone makes no gh call, so a two-segment GitLab remote dry-runs.
   const gitlab = makeFixture({ origin: 'https://gitlab.com/grp/proj.git' });
   const res = run(gitlab, [...base(gitlab), '--push', 'origin', 'feat']);
-  expect(res.code).toBe(2);
+  expect(res.code).toBe(0);
   expect(res.out).toContain('gitlab.com');
 });
 
@@ -354,7 +362,7 @@ test('W1 --pr must be the PR whose head is the audited HEAD (or the pushed branc
   const res = run(fx, [...args, '--push', 'origin', 'feat', '--execute'], { env: { SHIM_PR_HEAD: ZERO_SHA } });
   expect(res.code).toBe(8);
   expect(shimLog(fx)).not.toContain('gh ');
-});
+}, 30000);
 
 test('W2 the push refspec is the audited SHA; --force-with-lease passes through, never --force', () => {
   const fx = makeFixture();
@@ -476,3 +484,209 @@ test('W13 credentials in the remote URL are never printed', () => {
   expect(res.stdout).toContain('https://github.com/o/r.git');
   expect(run(fx, [...base(fx), '--push', 'origin', 'feat', '--json']).out).not.toContain('SECRET');
 });
+
+const prText = (fx) => ['--pr', '7', '--comment', thanks(fx), '--claims', passingClaims(fx)];
+const prReads = (fx) => (existsSync(fx.reads) ? readFileSync(fx.reads, 'utf8') : '').split('\n').filter((l) => l.startsWith('gh pr view')).length;
+
+test('R2-B1 (round-1 W1 base) the audited range is bound to the PR base or the push remote: narrowed or empty ranges exit 3', () => {
+  const fx = makeFixture();
+  write(fx.repo, 'src/b.js', 'b\n');
+  const h2 = commitAll(fx.repo, 'second');
+  const narrowed = () => ['--repo', fx.repo, '--target', fx.head, '--review', review(fx, { base: fx.head, head: h2 }), '--push', 'origin', 'feat'];
+  const codes = { narrowed: run(fx, narrowed()).code };
+  codes.empty = run(fx, ['--repo', fx.repo, '--target', 'HEAD', '--review', review(fx, { base: h2, head: h2 }), '--push', 'origin', 'feat']).code;
+  // The branch being updated is a valid base once the remote has it.
+  git(fx.repo, 'push', '-q', fx.bare, `${fx.head}:refs/heads/feat`);
+  codes.remoteBranch = run(fx, narrowed()).code;
+  // A feature on develop gated with --target develop while PR #7's base is main.
+  git(fx.repo, 'checkout', '-q', '-b', 'develop', 'main');
+  write(fx.repo, 'src/dev.js', 'd\n');
+  const d1 = commitAll(fx.repo, 'develop');
+  git(fx.repo, 'checkout', '-q', '-b', 'feat2');
+  write(fx.repo, 'src/f.js', 'f\n');
+  const f1 = commitAll(fx.repo, 'feature');
+  const prBase = run(fx, ['--repo', fx.repo, '--target', 'develop', '--review', review(fx, { base: d1, head: f1 }), ...prText(fx)]);
+  codes.prBase = prBase.code;
+  const m = makeFixture();
+  const missing = run(m, [...base(m), ...prText(m)], { env: { SHIM_PR_BASE_OID: '1'.repeat(40) } });
+  codes.prBaseMissing = missing.code;
+  expect({ ...codes, rule: prBase.out.includes('PR_BASE'), fetchHint: missing.out.includes('git fetch origin main'), wrote: shimLog(fx) + shimLog(m) }).toEqual({
+    narrowed: 3, empty: 3, remoteBranch: 0, prBase: 3, prBaseMissing: 3, rule: true, fetchHint: true, wrote: '',
+  });
+});
+
+test('R2-B2 (round-1 B2) a hex-named ref (64 hex in SHA-1, 40 hex in SHA-256) or a ref named after the SHA is not an audited SHA: exit 3', () => {
+  const codes = {};
+  for (const [fmt, len] of [['sha1', 32], ['sha256', 20]]) {
+    const fx = makeFixture({ objectFormat: fmt });
+    const ref = 'ab'.repeat(len);
+    git(fx.repo, 'checkout', '-q', '-b', ref);
+    const rv = review(fx, { head: ref });
+    write(fx.repo, 'src/evil.js', 'evil()\n');
+    commitAll(fx.repo, 'after audit');
+    codes[fmt] = run(fx, [...base(fx, rv), '--push', 'origin', 'feat']).code;
+  }
+  const fx = makeFixture();
+  git(fx.repo, 'branch', fx.head);
+  codes.namedAfterSha = run(fx, [...base(fx), '--push', 'origin', 'feat']).code;
+  expect(codes).toEqual({ sha1: 3, sha256: 3, namedAfterSha: 3 });
+});
+
+test('R2-B3 the patch-id diff is pinned: zero-context config or env and submodule knobs cannot relocate or hide a change: exit 3', () => {
+  const src = 'function del() {\n  work();\n}\nfunction list() {\n  work();\n}\n';
+  const fx = makeFixture({ baseFiles: { 'h.js': src }, prFiles: { 'h.js': src.replace('del() {\n', 'del() {\n  auth();\n') } });
+  const rv = review(fx);
+  write(fx.repo, 'h.js', src.replace('list() {\n', 'list() {\n  auth();\n'));
+  commitAll(fx.repo, 'move auth() from del to list');
+  const args = [...base(fx, rv), '--push', 'origin', 'feat'];
+  const codes = {
+    defaults: run(fx, args).code,
+    diffOpts: run(fx, args, { env: { GIT_DIFF_OPTS: '-u0' } }).code,
+    configEnv: run(fx, args, { env: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'diff.context', GIT_CONFIG_VALUE_0: '0' } }).code,
+  };
+  git(fx.repo, 'config', 'diff.context', '0');
+  codes.repoConfig = run(fx, args).code;
+  // A gitlink bump after the audit, hidden by diff.ignoreSubmodules or reformatted by diff.submodule.
+  const sub = makeFixture();
+  git(sub.repo, 'update-index', '--add', '--cacheinfo', `160000,${sub.base},sub`);
+  git(sub.repo, 'commit', '-q', '-m', 'add sub');
+  const subRv = review(sub, { head: git(sub.repo, 'rev-parse', 'HEAD') });
+  git(sub.repo, 'update-index', '--cacheinfo', `160000,${sub.head},sub`);
+  git(sub.repo, 'commit', '-q', '-m', 'bump sub');
+  const subArgs = [...base(sub, subRv), '--push', 'origin', 'feat'];
+  git(sub.repo, 'config', 'diff.ignoreSubmodules', 'all');
+  codes.ignoreSubmodules = run(sub, subArgs).code;
+  git(sub.repo, 'config', '--unset', 'diff.ignoreSubmodules');
+  git(sub.repo, 'config', 'diff.submodule', 'log');
+  codes.submoduleLog = run(sub, subArgs).code;
+  expect(codes).toEqual({ defaults: 3, diffOpts: 3, configEnv: 3, repoConfig: 3, ignoreSubmodules: 3, submoduleLog: 3 });
+});
+
+test('R2-W1 (round-1 W7) Blockers recount: any [B<n>] token outside CommonMark fences counts; an unclosed fence exits 4', () => {
+  const fx = makeFixture();
+  const bodies = {
+    plus: '### Blockers (must fix)\n+ **[B1]** `a:1` - real\n',
+    paren: '### Blockers (must fix)\n1) **[B1]** `a:1` - real\n',
+    bare: '### Blockers (must fix)\n[B1] `a:1` - real\n',
+    tildeInBacktick: '### Blockers (must fix)\n```\n~~~\n```\n- **[B1]** `a:1` - real\n',
+    nestedFence: '### Blockers (must fix)\nQuoting the README:\n````md\n```js\nx()\n```\n````\n- **[B1]** `a:1` - real\n',
+    indented: '### Blockers (must fix)\nNone.\n\n    ```\n- **[B1]** `a:1` - real\n    ```\n',
+    unclosed: '### Blockers (must fix)\nNone.\n\n```\n- **[B1]** example\n',
+    fencedExample: '### Blockers (must fix)\nNone.\n\n~~~~\n- **[B1]** example\n~~~\n~~~~\n',
+  };
+  const codes = Object.fromEntries(Object.entries(bodies).map(([k, b]) => [k, run(fx, [...base(fx, review(fx, { raw: frontmatterAt(fx) + b })), '--push', 'origin', 'feat']).code]));
+  expect(codes).toEqual({ plus: 4, paren: 4, bare: 4, tildeInBacktick: 4, nestedFence: 4, indented: 4, unclosed: 4, fencedExample: 0 });
+});
+
+test('R2-W2 neither ADV nor GIT_DIR/GIT_WORK_TREE makes the target repo "not applicable": a post-audit commit exits 3', () => {
+  const fx = makeFixture();
+  const rv = review(fx);
+  write(fx.repo, 'src/evil.js', 'evil()\n');
+  commitAll(fx.repo, 'after audit');
+  const args = [...base(fx, rv), '--push', 'origin', 'feat'];
+  const adv = run(fx, args, { env: { ADV: fx.repo } });
+  const gitDir = run(fx, args, { env: { GIT_DIR: git(ROOT, 'rev-parse', '--absolute-git-dir'), GIT_WORK_TREE: ROOT } });
+  expect({ adv: adv.code, gitDir: gitDir.code, notApplicable: `${adv.out}${gitDir.out}`.includes('not applicable') }).toEqual({ adv: 3, gitDir: 3, notApplicable: false });
+});
+
+test('R2-W3 (round-1 W6) --policy-paths and digest policy_paths add to the defaults: CODEOWNERS still exits 7', () => {
+  const fx = makeFixture({ prFiles: { CODEOWNERS: '* @me\n' } });
+  const args = [...base(fx), '--push', 'origin', 'feat'];
+  const codes = { override: run(fx, [...args, '--policy-paths', 'nomatch/**']).code };
+  const slug = `repo-${createHash('sha1').update(ORIGIN_URL).digest('hex').slice(0, 8)}`;
+  write(join(fx.dir, 'vault'), `repo-rules/${slug}.md`, '---\npolicy_paths: [docs/*.md]\n---\nnote\n');
+  codes.digest = run(fx, args).code;
+  expect(codes).toEqual({ override: 7, digest: 7 });
+});
+
+test('R2-W4 (round-1 W8) --json failures carry status and executed; a missing --claims file exits 2', () => {
+  const fx = makeFixture();
+  const args = [...base(fx), '--push', 'origin', 'feat', ...prText(fx), '--execute', '--json'];
+  const shape = (r) => {
+    const o = JSON.parse(r.stdout);
+    return { exit: o.exit, status: o.status, executed: (o.executed || []).length };
+  };
+  const got = {
+    pushFailed: shape(run(fx, args, { env: { SHIM_PUSH_FAIL: '1' } })),
+    partial: shape(run(fx, args, { env: { SHIM_GH_FAIL: '1' } })),
+    unlogged: shape(run(fx, args, { env: { ADVISOR_RUNS_ROOT: join(write(fx.dir, 'runs-file', 'x'), 'runs') } })),
+    missingClaims: run(fx, [...base(fx), '--push', 'origin', 'feat', '--claims', join(fx.dir, 'nope.md'), '--execute']).code,
+  };
+  expect(got).toEqual({
+    pushFailed: { exit: 8, status: 'failed', executed: 0 },
+    partial: { exit: 8, status: 'partial', executed: 1 },
+    unlogged: { exit: 8, status: 'executed-unlogged', executed: 2 },
+    missingClaims: 2,
+  });
+});
+
+test('R2-W5 a push alone needs no gh: a GitLab push dry-runs with exit 0 and gh is never called; a malformed host still exits 2', () => {
+  const gl = makeFixture({ origin: 'https://gitlab.com/grp/proj.git' });
+  const res = run(gl, [...base(gl), '--push', 'origin', 'feat']);
+  const gh = makeFixture();
+  run(gh, [...base(gh), '--push', 'origin', 'feat']);
+  const bad = makeFixture({ origin: 'ssh://-oProxyCommand=x/o/r.git' });
+  expect({
+    gitlab: res.code,
+    gitlabTarget: res.stdout.includes('target grp/proj on gitlab.com'),
+    ghCalls: (existsSync(gh.reads) ? readFileSync(gh.reads, 'utf8') : '').includes('gh '),
+    badHost: run(bad, [...base(bad), '--push', 'origin', 'feat']).code,
+  }).toEqual({ gitlab: 0, gitlabTarget: true, ghCalls: false, badHost: 2 });
+});
+
+test('R2-W6 every push URL is validated: a second URL or push URL, or a fetch URL naming another repo, exits 2', () => {
+  const twoUrls = makeFixture();
+  git(twoUrls.repo, 'remote', 'set-url', '--add', 'origin', 'https://evil.example.com/x/y.git');
+  const twoPush = makeFixture();
+  git(twoPush.repo, 'config', '--add', 'remote.origin.pushurl', ORIGIN_URL);
+  git(twoPush.repo, 'config', '--add', 'remote.origin.pushurl', 'https://evil.example.com/x/y.git');
+  const split = makeFixture();
+  git(split.repo, 'remote', 'set-url', '--push', 'origin', 'https://github.com/other/r.git');
+  const code = (fx) => run(fx, [...base(fx), '--push', 'origin', 'feat']).code;
+  expect({ twoUrls: code(twoUrls), twoPush: code(twoPush), fetchDiffers: code(split) }).toEqual({ twoUrls: 2, twoPush: 2, fetchDiffers: 2 });
+});
+
+test('R2-W7 (round-1 W13) credentials stay hidden when the URL does not parse: exit 2 without the secret', () => {
+  const outs = ['https://u:SECRET@github.com:99999/o/r.git', 'https://u:SECRET@github.com/o%zz/r.git'].map((origin) => {
+    const fx = makeFixture({ origin });
+    const r = run(fx, [...base(fx), '--push', 'origin', 'feat']);
+    return { code: r.code, leaked: r.out.includes('SECRET') };
+  });
+  expect(outs).toEqual([{ code: 2, leaked: false }, { code: 2, leaked: false }]);
+});
+
+test('R2-W8 --execute: the PR head moving from the old head to HEAD after the push lets the gh write run', () => {
+  const fx = makeFixture();
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat', ...prText(fx), '--execute'], { env: { SHIM_PR_HEADS: `${fx.base} ${fx.base} ${fx.head}` } });
+  expect({ code: res.code, wrote: shimLog(fx).includes('gh pr comment 7'), prReads: prReads(fx) }).toEqual({ code: 0, wrote: true, prReads: 3 });
+}, 30000);
+
+test('R2-W9 header claims hold: tree SHAs are not commit SHAs (exit 3)', () => {
+  const fx = makeFixture();
+  const rv = review(fx, { base: git(fx.repo, 'rev-parse', `${fx.base}^{tree}`), head: git(fx.repo, 'rev-parse', `${fx.head}^{tree}`) });
+  expect(run(fx, [...base(fx, rv), '--push', 'origin', 'feat']).code).toBe(3);
+});
+
+test('R2-POLL after the push ls-remote must show HEAD, then up to 5 PR reads wait out the old head; any other head or state stops', () => {
+  const scenario = (env) => {
+    const fx = makeFixture();
+    const res = run(fx, [...base(fx), '--push', 'origin', 'feat', ...prText(fx), '--execute'], { env: env(fx) });
+    const logPath = join(fx.runs, 'publish-log.jsonl');
+    const log = existsSync(logPath) ? readFileSync(logPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l).status) : [];
+    return { code: res.code, wrote: shimLog(fx).includes('gh pr comment'), prReads: prReads(fx), log };
+  };
+  const heads = (fx, n, last) => ({ SHIM_PR_HEADS: [...Array(n).fill(fx.base), last].join(' ') });
+  expect({
+    k2: scenario((fx) => heads(fx, 3, fx.head)),
+    k5: scenario((fx) => heads(fx, 6, fx.base)),
+    otherHead: scenario((fx) => heads(fx, 2, ZERO_SHA)),
+    lsRemote: scenario(() => ({ SHIM_LS_OID: ZERO_SHA })),
+    closed: scenario(() => ({ SHIM_PR_STATE: 'CLOSED' })),
+  }).toEqual({
+    k2: { code: 0, wrote: true, prReads: 4, log: ['executed'] },
+    k5: { code: 8, wrote: false, prReads: 6, log: ['partial'] },
+    otherHead: { code: 8, wrote: false, prReads: 3, log: ['partial'] },
+    lsRemote: { code: 8, wrote: false, prReads: 1, log: ['partial'] },
+    closed: { code: 8, wrote: false, prReads: 2, log: ['partial'] },
+  });
+}, 60000);
