@@ -1,0 +1,379 @@
+#!/usr/bin/env bun
+// bin/advisor-claims-check - verify a claims ledger (claims.md) against texts at HEAD.
+//
+// Usage:
+//   advisor-claims-check --repo <path> --claims <claims.md> --text <file> [--text <file>]...
+//     [--head <ref>] [--revert-report <json>] [--prior <file>]... [--test-id-re <regex>] [--json]
+//
+// Ledger: one markdown table `| id | sentence | evidence_type | evidence | sha |`.
+// evidence_type is file_line, test, command or exhaustive. An exhaustive row lists
+// every instance as `path:line; path:line; ...`. A row id `prior:<n>` re-verifies a
+// sentence from previously posted text (--prior).
+//
+// Checks (all findings are printed; the exit code is the first failing check):
+//   1. every row sha equals HEAD                                  exit 3 STALE_LEDGER
+//   2. every assertive sentence equals one ledger sentence        exit 4
+//   3. a sentence with an absolute needs exhaustive evidence      exit 4
+//   4. file_line / test / exhaustive cites and path refs in texts
+//      resolve at HEAD                                            exit 5 DANGLING_CITE
+//   5. (--revert-report) a "test" row with an outcome verb names a
+//      test that KILLED a hunk                                    exit 6 UNPROVEN_FIX
+//   6. every assertive sentence in --prior needs a prior:<n> row  exit 7 PRIOR_UNCHECKED
+// Check 1 stops the run: a stale ledger proves nothing about the other checks.
+//
+// Spec deviation (M2 hunks carry no test name): in check 5 a test row is PROVEN iff
+// some KILLED hunk's excerpt contains the row's evidence string verbatim
+// (case-sensitive substring). Report hunks are {file,old_start,new_start,added,removed,status,excerpt}.
+//
+// Exit codes: 0 pass, 2 usage (or unreadable ledger/report), 3, 4, 5, 6, 7 as above.
+// Read-only on the target repo; findings print as `path:line RULE message`.
+
+const { readFileSync } = require('node:fs');
+const { execFileSync } = require('node:child_process');
+
+const USAGE = `Usage: advisor-claims-check --repo <path> --claims <claims.md> --text <file> [--text <file>]...
+  [--head <ref>] [--revert-report <json>] [--prior <file>]... [--test-id-re <regex>] [--json]
+
+Verifies a claims ledger (markdown table: id | sentence | evidence_type | evidence | sha)
+against the texts at HEAD. Read-only.
+
+Flags:
+  --repo <path>           Git repository the ledger is checked against
+  --claims <claims.md>    Ledger file
+  --text <file>           Text to cover with ledger rows (repeatable, at least one)
+  --head <ref>            Ref treated as HEAD (default: HEAD)
+  --revert-report <json>  advisor-revert-check JSON report (enables UNPROVEN_FIX)
+  --prior <file>          Previously posted text; needs prior:<n> rows (repeatable)
+  --test-id-re <regex>    Test ID pattern marking a sentence assertive
+                          (default: \\b[A-Z]{1,3}\\d{1,3}\\b)
+  --json                  Print one JSON object instead of one finding per line
+
+Exit codes: 0 pass, 2 usage, 3 stale ledger, 4 uncovered sentence or absolute
+without exhaustive evidence, 5 dangling cite, 6 unproven fix, 7 prior claims
+not re-checked.
+`;
+
+function usageExit(msg) {
+  if (msg) console.error(`advisor-claims-check: ${msg}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const opts = { text: [], prior: [], head: 'HEAD', json: false };
+const argv = process.argv.slice(2);
+if (argv.length === 0 || argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(2);
+}
+while (argv.length > 0) {
+  const arg = argv.shift();
+  const val = () => {
+    const v = argv.shift();
+    if (v === undefined) usageExit(`${arg} needs a value`);
+    return v;
+  };
+  switch (arg) {
+    case '--repo': opts.repo = val(); break;
+    case '--claims': opts.claims = val(); break;
+    case '--text': opts.text.push(val()); break;
+    case '--prior': opts.prior.push(val()); break;
+    case '--head': opts.head = val(); break;
+    case '--revert-report': opts.report = val(); break;
+    case '--test-id-re': opts.testIdRe = val(); break;
+    case '--json': opts.json = true; break;
+    default: usageExit(`unknown flag: ${arg}`);
+  }
+}
+if (!opts.repo || !opts.claims || opts.text.length === 0) usageExit('--repo, --claims and at least one --text are required');
+
+let testIdRe;
+try {
+  testIdRe = new RegExp(opts.testIdRe || '\\b[A-Z]{1,3}\\d{1,3}\\b');
+} catch (e) {
+  usageExit(`bad --test-id-re: ${e.message}`);
+}
+
+function git(...args) {
+  return execFileSync('git', ['-C', opts.repo, ...args], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
+let headSha;
+try {
+  headSha = git('rev-parse', '--verify', `${opts.head}^{commit}`).trim();
+} catch {
+  usageExit(`cannot resolve ${opts.head} in ${opts.repo}`);
+}
+
+function readOrExit(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (e) {
+    return usageExit(`cannot read ${path}: ${e.message}`);
+  }
+}
+
+// --- ledger -----------------------------------------------------------
+
+const EVIDENCE_TYPES = new Set(['file_line', 'test', 'command', 'exhaustive']);
+const norm = (s) => s.replace(/\s+/g, ' ').trim();
+
+function parseLedger(path) {
+  const rows = [];
+  readOrExit(path).split('\n').forEach((line, i) => {
+    if (!line.trim().startsWith('|')) return;
+    const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+    if (cells.every((c) => /^:?-+:?$/.test(c))) return;
+    if (cells[0].toLowerCase() === 'id' && cells[2] && cells[2].toLowerCase() === 'evidence_type') return;
+    if (cells.length !== 5) usageExit(`${path}:${i + 1} ledger row needs 5 columns, got ${cells.length}`);
+    if (!EVIDENCE_TYPES.has(cells[2])) usageExit(`${path}:${i + 1} unknown evidence_type "${cells[2]}"`);
+    rows.push({ line: i + 1, id: cells[0], sentence: norm(cells[1]), type: cells[2], evidence: cells[3], sha: cells[4] });
+  });
+  return rows;
+}
+
+// --- sentences --------------------------------------------------------
+
+const ABBREV = new Set(['e.g', 'i.e', 'vs']);
+
+// Markdown-aware: skips code fences, strips list/quote/heading markers, joins
+// wrapped lines of a paragraph, splits on . ! ? except after e.g. / i.e. / vs.
+function splitSentences(content) {
+  const out = [];
+  let inFence = false;
+  let para = null;
+  const flush = () => {
+    if (!para) return;
+    let text = '';
+    const starts = [];
+    for (const l of para) {
+      if (text) text += ' ';
+      starts.push({ off: text.length, line: l.line });
+      text += l.text;
+    }
+    const lineAt = (off) => starts.filter((s) => s.off <= off).pop().line;
+    let begin = 0;
+    const re = /[.!?]+[)"'\]*_`]*(?=\s|$)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const before = text.slice(begin, m.index).split(/\s+/).pop().toLowerCase();
+      if (m[0][0] === '.' && ABBREV.has(before)) continue;
+      push(text.slice(begin, re.lastIndex), lineAt(begin + (text.slice(begin).length - text.slice(begin).trimStart().length)));
+      begin = re.lastIndex;
+    }
+    push(text.slice(begin), lineAt(begin + (text.slice(begin).length - text.slice(begin).trimStart().length)));
+    para = null;
+  };
+  const push = (s, line) => {
+    const n = norm(s);
+    if (n && /[A-Za-z0-9]/.test(n)) out.push({ sentence: n, line });
+  };
+  content.split('\n').forEach((raw, i) => {
+    if (/^\s*(```|~~~)/.test(raw)) {
+      flush();
+      inFence = !inFence;
+      return;
+    }
+    if (inFence) return;
+    if (!raw.trim()) return flush();
+    const isItem = /^\s*([-*+]|\d+[.)])\s+/.test(raw);
+    const stripped = raw.replace(/^\s*(>\s*)*/, '').replace(/^(#{1,6}\s+|([-*+]|\d+[.)])\s+)/, '');
+    if (isItem || /^#{1,6}\s/.test(raw.trim())) flush();
+    (para = para || []).push({ text: stripped.trim(), line: i + 1 });
+    if (/^#{1,6}\s/.test(raw.trim())) flush();
+  });
+  flush();
+  return out;
+}
+
+const ABSOLUTE_RE = /\b(every|all|always|never|only|exact|agree|agrees|none)\b/i;
+const OUTCOME_RE = /\b(fixed|guard|guards|guarded|rejects?|refuses?|blocks?|prevents?|tested|verified)\b/i;
+const NUMBER_OR_REF_RE = /\d/; // covers numbers and path:line; default test IDs also contain digits
+
+const hasAbsolute = (s) => ABSOLUTE_RE.test(s);
+const hasOutcome = (s) => OUTCOME_RE.test(s);
+const isAssertive = (s) => hasAbsolute(s) || hasOutcome(s) || NUMBER_OR_REF_RE.test(s) || testIdRe.test(s);
+
+// --- cites ------------------------------------------------------------
+
+const blobCache = new Map();
+// Returns {lines:[...]} for a blob, {tree:true} for a directory, or null if absent.
+function blobAt(path) {
+  const key = path.replace(/^\.\//, '');
+  if (!blobCache.has(key)) {
+    let res = null;
+    try {
+      const type = git('cat-file', '-t', `${headSha}:${key}`).trim();
+      if (type === 'tree') res = { tree: true };
+      else if (type === 'blob') {
+        const body = git('cat-file', 'blob', `${headSha}:${key}`);
+        res = { lines: body.replace(/\n$/, '').split('\n') };
+      }
+    } catch {}
+    blobCache.set(key, res);
+  }
+  return blobCache.get(key);
+}
+
+// Returns an error message, or null when the cite resolves at HEAD.
+function resolveFileLine(path, line, span) {
+  const blob = blobAt(path);
+  if (!blob) return `${path} does not exist at ${headSha.slice(0, 7)}`;
+  if (line === null) return null;
+  if (blob.tree) return `${path} is a directory, cannot cite line ${line}`;
+  if (line < 1 || line > blob.lines.length) return `${path}:${line} is past the end of the file (${blob.lines.length} lines)`;
+  if (span !== undefined) {
+    const lo = Math.max(0, line - 1 - 3);
+    const window = blob.lines.slice(lo, line + 3).join('\n');
+    if (!window.includes(span)) return `quoted span "${span}" not within 3 lines of ${path}:${line}`;
+  }
+  return null;
+}
+
+const TEST_PATHSPECS = [':(glob)**/test/**', ':(glob)**/tests/**', ':(glob)**/*.test.*', ':(glob)**/*_test.*', ':(glob)**/test-*.sh'];
+
+function testExists(id) {
+  try {
+    return git('grep', '-l', '-F', '-e', id, headSha, '--', ...TEST_PATHSPECS).trim() !== '';
+  } catch {
+    return false;
+  }
+}
+
+const stripTicks = (s) => s.replace(/^`+|`+$/g, '').trim();
+
+// Resolve one ledger row's evidence; returns a list of error messages.
+function checkEvidence(row) {
+  const ev = stripTicks(row.evidence);
+  if (row.type === 'command') return [];
+  if (row.type === 'test') return testExists(ev) ? [] : [`test "${ev}" not found by git grep -F in tracked test files`];
+  const items = row.type === 'exhaustive' ? ev.split(';').map((x) => x.trim()).filter(Boolean) : [ev];
+  const errs = [];
+  if (items.length === 0) errs.push('exhaustive evidence lists no instances');
+  for (const item of items) {
+    const m = item.replace(/`/g, '').match(/^([^\s"]+?):(\d+)(?:\s+"([^"]+)")?\s*$/);
+    if (!m) {
+      errs.push(`evidence "${item}" is not path:line`);
+      continue;
+    }
+    const err = resolveFileLine(m[1], Number(m[2]), m[3]);
+    if (err) errs.push(err);
+  }
+  return errs;
+}
+
+// path refs inside a text (outside code fences): path:line anywhere, or a
+// slash path with an extension, or a backticked slash path.
+function textRefs(content) {
+  const refs = [];
+  let inFence = false;
+  content.split('\n').forEach((raw, i) => {
+    if (/^\s*(```|~~~)/.test(raw)) {
+      inFence = !inFence;
+      return;
+    }
+    if (inFence) return;
+    const seen = new Set();
+    const add = (path, line) => {
+      path = path.replace(/^\.\//, '');
+      const k = `${path}:${line}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        refs.push({ path, line, at: i + 1 });
+      }
+    };
+    const noUrl = raw.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, ' ');
+    for (const m of noUrl.matchAll(/(?<![\w./-])((?:[\w.-]+\/)*[\w-][\w.-]*\.[A-Za-z]\w*):(\d+)\b/g)) add(m[1], Number(m[2]));
+    for (const m of noUrl.matchAll(/(?<![\w./`-])((?:[\w.-]+\/)+[\w-][\w.-]*\.[A-Za-z]\w*)(?![\w/:])/g)) add(m[1], null);
+    for (const m of noUrl.matchAll(/`((?:[\w.-]+\/)+[\w.-]+)`/g)) add(m[1], null);
+  });
+  return refs;
+}
+
+// --- run --------------------------------------------------------------
+
+const findings = [];
+const find = (path, line, rule, message) => findings.push({ path, line, rule, message });
+
+const rows = parseLedger(opts.claims);
+const sentenceCount = { text: 0, prior: 0 };
+
+for (const row of rows) {
+  if (!(row.sha.length >= 7 && headSha.startsWith(row.sha.toLowerCase()))) {
+    find(opts.claims, row.line, 'STALE_LEDGER', `row ${row.id} sha ${row.sha || '(empty)'} != HEAD ${headSha.slice(0, 7)}`);
+  }
+}
+
+if (findings.length === 0) {
+  const priorRows = rows.filter((r) => /^prior:/i.test(r.id));
+  const claimRows = rows.filter((r) => !/^prior:/i.test(r.id));
+  const byClaim = new Map(claimRows.map((r) => [r.sentence, r]));
+  const byPrior = new Map(priorRows.map((r) => [r.sentence, r]));
+
+  // checks 2, 3, 4 (text refs)
+  for (const path of opts.text) {
+    const content = readOrExit(path);
+    for (const s of splitSentences(content)) {
+      sentenceCount.text++;
+      if (!isAssertive(s.sentence)) continue;
+      const row = byClaim.get(s.sentence);
+      if (!row) {
+        find(path, s.line, 'UNCOVERED_SENTENCE', `assertive sentence has no ledger row: ${s.sentence}`);
+      } else if (hasAbsolute(s.sentence) && row.type !== 'exhaustive') {
+        find(path, s.line, 'ABSOLUTE_NOT_EXHAUSTIVE', `absolute needs evidence_type exhaustive (row ${row.id} is ${row.type}): ${s.sentence}`);
+      }
+    }
+    for (const ref of textRefs(content)) {
+      const err = resolveFileLine(ref.path, ref.line);
+      if (err) find(path, ref.at, 'DANGLING_CITE', err);
+    }
+  }
+
+  // check 3 for prior rows, and check 4 for every ledger row
+  for (const row of rows) {
+    if (hasAbsolute(row.sentence) && row.type !== 'exhaustive' && /^prior:/i.test(row.id)) {
+      find(opts.claims, row.line, 'ABSOLUTE_NOT_EXHAUSTIVE', `row ${row.id} has an absolute but evidence_type ${row.type}: ${row.sentence}`);
+    }
+    for (const err of checkEvidence(row)) find(opts.claims, row.line, 'DANGLING_CITE', `row ${row.id}: ${err}`);
+  }
+
+  // check 5
+  if (opts.report) {
+    let report;
+    try {
+      report = JSON.parse(readOrExit(opts.report));
+    } catch (e) {
+      usageExit(`cannot parse ${opts.report}: ${e.message}`);
+    }
+    if (!report || !Array.isArray(report.hunks)) usageExit(`${opts.report} is not a revert-check report (no hunks array)`);
+    const killed = report.hunks.filter((h) => h && h.status === 'KILLED');
+    for (const row of rows) {
+      if (row.type !== 'test' || !hasOutcome(row.sentence)) continue;
+      const id = stripTicks(row.evidence);
+      if (!killed.some((h) => typeof h.excerpt === 'string' && h.excerpt.includes(id))) {
+        find(opts.claims, row.line, 'UNPROVEN_FIX', `row ${row.id}: test "${id}" killed no hunk in ${opts.report}`);
+      }
+    }
+  }
+
+  // check 6
+  for (const path of opts.prior) {
+    for (const s of splitSentences(readOrExit(path))) {
+      sentenceCount.prior++;
+      if (isAssertive(s.sentence) && !byPrior.has(s.sentence)) {
+        find(path, s.line, 'PRIOR_UNCHECKED', `prior assertive sentence has no prior:<n> ledger row: ${s.sentence}`);
+      }
+    }
+  }
+}
+
+const CODES = { STALE_LEDGER: 3, UNCOVERED_SENTENCE: 4, ABSOLUTE_NOT_EXHAUSTIVE: 4, DANGLING_CITE: 5, UNPROVEN_FIX: 6, PRIOR_UNCHECKED: 7 };
+const exitCode = findings.length === 0 ? 0 : Math.min(...findings.map((f) => CODES[f.rule]));
+
+if (opts.json) {
+  console.log(JSON.stringify({ head: headSha, rows: rows.length, sentences: sentenceCount, findings, exit_code: exitCode }));
+} else if (findings.length > 0) {
+  for (const f of findings) console.log(`${f.path}:${f.line} ${f.rule} ${f.message}`);
+} else {
+  console.log(`advisor-claims-check: ${rows.length} row(s), ${sentenceCount.text + sentenceCount.prior} sentence(s) checked at ${headSha.slice(0, 7)}, 0 findings.`);
+}
+process.exit(exitCode);
