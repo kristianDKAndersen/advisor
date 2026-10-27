@@ -5,34 +5,43 @@
 // Usage:
 //   advisor-publish --repo <path> --target <ref> --review <review.md>
 //     [--push <remote> <branch>] [--force-with-lease]
-//     [--pr <n>] [--body <file>] [--comment <file>] [--reply <comment-id>=<file>]...
+//     [--pr <n>] [--pr-remote <remote>] [--body <file>] [--comment <file>] [--reply <comment-id>=<file>]...
 //     [--claims <claims.md>] [--decisions <file>] [--policy-paths <glob,...>]
 //     [--execute] [--json]
 //
 // Checks run in order and stop at the first failure:
 //   1. at least one action (--push, --body, --comment, --reply)                   exit 2
 //   2. --repo is the advisor repo ($ADV, else this script's repo): not applicable  exit 0
-//   3. review frontmatter audit_scope full-pr, bound to HEAD and merge-base, or
-//      an equal `git patch-id --stable` of the PR diff                             exit 3 STALE_AUDIT
-//   4. verdict APPROVE / APPROVE WITH WARNINGS, open_blockers 0, and the
-//      `- **[B` entries under ### Blockers equal open_blockers                     exit 4
+//   3. review frontmatter audit_scope full-pr, audit_base_sha and audit_head_sha full
+//      hex SHAs equal to the merge-base and HEAD, or an equal `git patch-id --verbatim`
+//      of the PR diff                                                              exit 3 STALE_AUDIT
+//   4. verdict APPROVE / APPROVE WITH WARNINGS, open_blockers 0, exactly one Blockers
+//      heading (## to ####, any case) and no `**[B<n>]**` list entry outside code fences  exit 4
 //   5. every text file passes bin/advisor-claims-check against --claims            exit 5
 //   6. no .advisor-output/, .advisor-preserved/, graphify-out/, captures/ path,
 //      GRAPH_REPORT.md or added `eco:` line in the PR diff                         exit 6
 //   7. every changed policy path has `<path>: "<decision>"` in --decisions         exit 7
-//   8. dry run prints the target and commands; --execute runs them                 exit 8 on failure
+//   8. the push remote and the PR remote (--pr-remote, else the push remote, else origin)
+//      have a URL path of exactly <owner>/<repo> on a host `gh auth status` accepts   exit 2;
+//      PR <n>'s head is HEAD (no --push) or the pushed branch of the push repo     exit 3 PR_HEAD;
+//      dry run prints the targets and commands; --execute runs them                exit 8 on failure
 //
+// Spec amendments (review of a15d9cf): patch-id is --verbatim, so a whitespace-only change
+// after the audit invalidates it; the push refspec is <H>:refs/heads/<branch>; --pr is bound
+// to the audited head; --execute re-reads the PR head after the push before any gh write.
 // Policy paths: --policy-paths, else policy_paths from the bin/advisor-conventions digest
-// (built into a temp --out dir), else CONTRIBUTING*, CODEOWNERS, .github/CODEOWNERS,
-// .github/PULL_REQUEST_TEMPLATE* and **/guardrails/**.
+// (built into a temp --out dir; a conventions failure exits 7), else
+// {,docs/,.github/}CONTRIBUTING*, {,docs/,.github/}CODEOWNERS,
+// {,docs/,.github/}PULL_REQUEST_TEMPLATE{*,/**} and **/guardrails/**, all matched case-insensitively.
 // Every command runs with cwd <repo>. Spec clarification: `gh api` has no -R flag, so gh pr
-// commands get -R <owner>/<repo> and every gh command gets GH_REPO=<owner>/<repo>; gh api
-// paths spell repos/<owner>/<repo>/... literally.
-// A successful --execute appends one line to <runs root>/publish-log.jsonl (ADVISOR_RUNS_ROOT).
+// commands get -R <owner>/<repo>, every gh pr and gh api command gets GH_HOST=<host> and GH_REPO=<owner>/<repo>,
+// and gh api gets --hostname <host> with repos/<owner>/<repo>/... spelled literally.
+// A successful --execute appends one line to <runs root>/publish-log.jsonl (ADVISOR_RUNS_ROOT); a
+// failure after an action ran appends a status partial line, and a log write failure exits 8.
 //
-// Exit codes: 0 pass (dry run, executed, not applicable), 2 usage, 3 stale or missing audit,
-// 4 verdict or Blockers, 5 claims, 6 advisor artifacts, 7 policy path without decision,
-// 8 publish command failed.
+// Exit codes: 0 pass (dry run, executed, not applicable), 2 usage or unresolvable remote,
+// 3 stale or missing audit or PR head mismatch, 4 verdict or Blockers, 5 claims, 6 advisor artifacts,
+// 7 policy path without decision or conventions failure, 8 publish command or log write failed.
 
 const { readFileSync, existsSync, realpathSync, mkdtempSync, rmSync, mkdirSync, appendFileSync } = require('node:fs');
 const { join, resolve, posix } = require('node:path');
@@ -43,7 +52,7 @@ const { RUNS_ROOT } = require('../lib/session.js');
 
 const USAGE = `Usage: advisor-publish --repo <path> --target <ref> --review <review.md>
   [--push <remote> <branch>] [--force-with-lease]
-  [--pr <n>] [--body <file>] [--comment <file>] [--reply <comment-id>=<file>]...
+  [--pr <n>] [--pr-remote <remote>] [--body <file>] [--comment <file>] [--reply <comment-id>=<file>]...
   [--claims <claims.md>] [--decisions <file>] [--policy-paths <glob,...>]
   [--execute] [--json]
 
@@ -51,11 +60,18 @@ Publish gate: checks the review binding, verdict, claims, advisor artifacts and 
 paths for the PR (merge-base(HEAD, target)..HEAD), then prints (dry run) or runs
 (--execute) the push and gh commands. At least one action is required.
 
-Exit codes: 0 pass, 2 usage, 3 stale or missing audit, 4 verdict or Blockers,
-5 claims, 6 advisor artifacts, 7 policy path without decision, 8 publish command failed.
+Exit codes: 0 pass, 2 usage or unresolvable remote, 3 stale or missing audit or PR head
+mismatch, 4 verdict or Blockers, 5 claims, 6 advisor artifacts, 7 policy path without
+decision or conventions failure, 8 publish command or log write failed.
 `;
 
-const DEFAULT_POLICY = ['CONTRIBUTING*', 'CODEOWNERS', '.github/CODEOWNERS', '.github/PULL_REQUEST_TEMPLATE*', '**/guardrails/**'];
+const DEFAULT_POLICY = [
+  '{,docs/,.github/}CONTRIBUTING*',
+  '{,docs/,.github/}CODEOWNERS',
+  '{,docs/,.github/}PULL_REQUEST_TEMPLATE{*,/**}',
+  '**/guardrails/**',
+];
+const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const ARTIFACT_DIRS = ['.advisor-output', '.advisor-preserved', 'graphify-out', 'captures'];
 
 function usageExit(msg) {
@@ -84,6 +100,7 @@ while (argv.length > 0) {
     case '--push': opts.push = { remote: val(), branch: val() }; break;
     case '--force-with-lease': opts.forceWithLease = true; break;
     case '--pr': opts.pr = val(); break;
+    case '--pr-remote': opts.prRemote = val(); break;
     case '--body': opts.body = resolve(val()); break;
     case '--comment': opts.comment = resolve(val()); break;
     case '--reply': {
@@ -95,7 +112,10 @@ while (argv.length > 0) {
     }
     case '--claims': opts.claims = resolve(val()); break;
     case '--decisions': opts.decisions = resolve(val()); break;
-    case '--policy-paths': opts.policyPaths = val().split(',').map((s) => s.trim()).filter(Boolean); break;
+    case '--policy-paths':
+      opts.policyPaths = val().split(',').map((s) => s.trim()).filter(Boolean);
+      if (opts.policyPaths.length === 0) usageExit('--policy-paths needs at least one glob');
+      break;
     case '--execute': opts.execute = true; break;
     case '--json': opts.json = true; break;
     default: usageExit(`unknown argument ${arg}`);
@@ -131,8 +151,8 @@ function finish(code, rule, lines, extra = {}) {
   process.exit(code);
 }
 
-function run(cmd, args, { input, allowFail = false } = {}) {
-  const r = spawnSync(cmd, args, { cwd: top, encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024 });
+function run(cmd, args, { input, allowFail = false, env } = {}) {
+  const r = spawnSync(cmd, args, { cwd: top, encoding: 'utf8', input, env: env && { ...process.env, ...env }, maxBuffer: 256 * 1024 * 1024 });
   if (r.status !== 0 && !allowFail) usageExit(`${cmd} ${args.join(' ')} failed: ${(r.stderr || '').trim()}`);
   return r;
 }
@@ -159,9 +179,9 @@ function frontmatter(text) {
 }
 
 function patchId(a, b) {
-  const diff = run('git', ['diff', '--no-color', '--no-ext-diff', a, b], { allowFail: true });
+  const diff = run('git', ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--end-of-options', a, b], { allowFail: true });
   if (diff.status !== 0) return null;
-  return run('git', ['patch-id', '--stable'], { input: diff.stdout }).stdout.trim().split(/\s+/)[0] || '';
+  return run('git', ['patch-id', '--verbatim'], { input: diff.stdout }).stdout.trim().split(/\s+/)[0] || '';
 }
 
 if (!existsSync(opts.review)) finish(3, 'STALE_AUDIT', [`review not found: ${opts.review}`]);
@@ -169,11 +189,15 @@ const reviewText = readFileSync(opts.review, 'utf8');
 const fm = frontmatter(reviewText);
 if (!fm) finish(3, 'STALE_AUDIT', [`${opts.review}: no YAML frontmatter`]);
 if (fm.audit_scope !== 'full-pr') finish(3, 'STALE_AUDIT', [`${opts.review}: audit_scope is ${fm.audit_scope || 'missing'}, need full-pr`]);
+// Refs, abbreviations and option strings never reach git: a ref would bind to HEAD at publish time.
+for (const k of ['audit_base_sha', 'audit_head_sha']) {
+  if (!SHA_RE.test(fm[k] || '')) finish(3, 'STALE_AUDIT', [`${opts.review}: ${k} is ${fm[k] || 'missing'}, need a full hex commit SHA`]);
+}
 const H = git('rev-parse', 'HEAD');
 const B = git('merge-base', 'HEAD', opts.target);
 const prPatchId = patchId(B, H);
 if (fm.audit_head_sha !== H || fm.audit_base_sha !== B) {
-  const auditPatchId = fm.audit_base_sha && fm.audit_head_sha ? patchId(fm.audit_base_sha, fm.audit_head_sha) : null;
+  const auditPatchId = patchId(fm.audit_base_sha, fm.audit_head_sha);
   if (auditPatchId === null || auditPatchId !== prPatchId) {
     finish(3, 'STALE_AUDIT', [
       `audit base..head ${fm.audit_base_sha || '?'}..${fm.audit_head_sha || '?'} does not match PR ${B}..${H} and the patch-ids differ`,
@@ -184,9 +208,12 @@ if (fm.audit_head_sha !== H || fm.audit_base_sha !== B) {
 // Check 4: verdict and Blockers recount.
 if (fm.verdict !== 'APPROVE' && fm.verdict !== 'APPROVE WITH WARNINGS') finish(4, 'VERDICT', [`verdict is ${fm.verdict || 'missing'}`]);
 if (fm.open_blockers !== '0') finish(4, 'BLOCKERS', [`open_blockers is ${fm.open_blockers || 'missing'}, need 0`]);
-const blockerSection = reviewText.split(/^### Blockers\b.*$/m)[1]?.split(/^#{2,3} /m)[0] || '';
-const blockerCount = (blockerSection.match(/^- \*\*\[B/gm) || []).length;
-if (blockerCount !== 0) finish(4, 'BLOCKERS', [`open_blockers is 0 but ### Blockers lists ${blockerCount} entries`]);
+let fenced = false;
+const outsideFences = reviewText.split(/\r?\n/).filter((l) => (/^\s*(?:```|~~~)/.test(l) ? ((fenced = !fenced), false) : !fenced));
+const blockerHeadings = outsideFences.filter((l) => /^#{2,4}\s+blockers\b/i.test(l)).length;
+if (blockerHeadings !== 1) finish(4, 'BLOCKERS', [`need exactly one Blockers heading (## to ####), found ${blockerHeadings}`]);
+const blockerCount = outsideFences.filter((l) => /^\s*(?:[-*]|\d+\.)\s+\*\*\[B\d+\]/.test(l)).length;
+if (blockerCount !== 0) finish(4, 'BLOCKERS', [`open_blockers is 0 but the review lists ${blockerCount} **[B<n>]** entries`]);
 
 // Check 5: claims.
 if (texts.length > 0) {
@@ -198,10 +225,9 @@ if (texts.length > 0) {
 }
 
 // Check 6: advisor artifacts in the PR diff (deletions of artifacts are allowed).
-const changes = git('diff', '--no-color', '--no-renames', '--name-status', B, H)
-  .split('\n')
-  .filter(Boolean)
-  .map((l) => ({ status: l[0], path: l.split('\t')[1] }));
+const nameStatus = git('diff', '--no-color', '--no-renames', '--name-status', '-z', B, H).split('\0');
+const changes = [];
+for (let i = 0; i + 1 < nameStatus.length; i += 2) changes.push({ status: nameStatus[i][0], path: nameStatus[i + 1] });
 const artifacts = [];
 for (const { status, path } of changes) {
   if (status === 'D') continue;
@@ -210,10 +236,15 @@ for (const { status, path } of changes) {
 }
 let file = null;
 let lineNo = 0;
-for (const l of git('diff', '--no-color', '--no-ext-diff', '-U0', B, H).split('\n')) {
-  if (l.startsWith('+++ ')) file = l.replace(/^\+\+\+ (b\/)?/, '');
-  else if (l.startsWith('@@')) lineNo = Number(l.match(/\+(\d+)/)[1]);
-  else if (l.startsWith('+')) {
+let inHunk = false;
+// -a --no-textconv: a -diff attribute or textconv driver must not hide added lines.
+for (const l of git('diff', '--no-color', '--no-ext-diff', '-a', '--no-textconv', '-U0', B, H).split('\n')) {
+  if (l.startsWith('diff --git ')) inHunk = false;
+  else if (!inHunk && l.startsWith('+++ ')) file = l.slice(4).replace(/^("?)b\//, '$1');
+  else if (l.startsWith('@@')) {
+    inHunk = true;
+    lineNo = Number(l.match(/\+(\d+)/)[1]);
+  } else if (inHunk && l.startsWith('+')) {
     if (/\beco:\s/.test(l)) artifacts.push(`${file}:${lineNo} added eco: debt marker`);
     lineNo++;
   }
@@ -224,8 +255,12 @@ if (artifacts.length > 0) finish(6, 'ADVISOR_ARTIFACT', artifacts);
 function digestPolicyPaths() {
   scratch = mkdtempSync(join(tmpdir(), 'advisor-publish-'));
   const r = run('bun', [join(__dirname, 'advisor-conventions'), '--repo', top, '--out', scratch, '--quiet'], { allowFail: true });
-  if (r.status !== 0 && r.status !== 4) return null;
-  const digest = readFileSync(join(scratch, 'conventions-digest.md'), 'utf8');
+  if (r.status !== 0 && r.status !== 4) {
+    finish(7, 'POLICY_PATH', [`advisor-conventions exit ${r.status ?? r.signal}; cannot read the repo's policy_paths`, ...`${r.stderr || ''}`.trim().split('\n')]);
+  }
+  const digestPath = join(scratch, 'conventions-digest.md');
+  if (!existsSync(digestPath)) finish(7, 'POLICY_PATH', [`advisor-conventions exit ${r.status} wrote no ${digestPath}`]);
+  const digest = readFileSync(digestPath, 'utf8');
   const yaml = digest.split(/^## Measurable rules\s*$/m)[1]?.split(/^## /m)[0].match(/```yaml\n([\s\S]*?)```/)?.[1];
   if (!yaml) return null;
   const lines = yaml.split('\n');
@@ -242,54 +277,122 @@ const policy = opts.policyPaths || digestPolicyPaths() || DEFAULT_POLICY;
 const decisionLines = opts.decisions && existsSync(opts.decisions) ? readFileSync(opts.decisions, 'utf8').split(/\r?\n/) : [];
 const undecided = [];
 for (const { path } of changes) {
-  if (!policy.some((g) => new Bun.Glob(g).match(path))) continue;
+  if (!policy.some((g) => new Bun.Glob(g.toLowerCase()).match(path.toLowerCase()))) continue;
   const ok = decisionLines.some((l) => l.startsWith(`${path}:`) && /^["“].+["”]$/.test(l.slice(path.length + 1).trim()));
   if (!ok) undecided.push(`${path} needs a line \`${path}: "<the user's decision>"\` in --decisions`);
 }
 if (undecided.length > 0) finish(7, 'POLICY_PATH', undecided);
 
-// Check 8: resolve owner/repo from the push remote, then print or run.
-const remote = opts.push ? opts.push.remote : 'origin';
-const urlRes = run('git', ['remote', 'get-url', '--push', remote], { allowFail: true });
-const url = urlRes.stdout.trim();
-const m = url.match(/^(?:[a-z][a-z0-9+.-]*:\/\/[^/]+\/|[^/@\s]+@[^/:\s]+:)(.+?)(?:\.git)?\/?$/i);
-const segs = m ? m[1].split('/').filter(Boolean) : [];
-if (urlRes.status !== 0 || segs.length < 2) usageExit(`cannot resolve owner/repo from remote ${remote} URL '${url}'`);
-const slug = `${segs[segs.length - 2]}/${segs[segs.length - 1]}`;
+// Check 8: resolve host and owner/repo of the push and PR remotes, bind --pr, then print or run.
+function resolveRemote(name) {
+  const r = run('git', ['remote', 'get-url', '--push', name], { allowFail: true });
+  const url = r.stdout.trim();
+  let host = '';
+  let path = '';
+  let shown = url;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    try {
+      const u = new URL(url);
+      host = u.hostname.toLowerCase();
+      path = decodeURIComponent(u.pathname);
+      u.username = '';
+      u.password = '';
+      shown = u.href;
+    } catch {}
+  } else {
+    const scp = url.match(/^(?:[^@/\s]+@)?([^/:\s]+):(.+)$/);
+    if (scp) [host, path] = [scp[1].toLowerCase(), scp[2]];
+  }
+  const segs = path.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '').split('/');
+  if (r.status !== 0 || !host || segs.length !== 2 || !segs.every((s) => /^[\w.-]+$/.test(s))) {
+    usageExit(`cannot resolve <host>/<owner>/<repo> from remote ${name} URL '${shown}'`);
+  }
+  if (run('gh', ['auth', 'status', '--hostname', host], { allowFail: true }).status !== 0) {
+    usageExit(`remote ${name} host ${host} is not a GitHub host gh is authenticated for`);
+  }
+  return { name, host, slug: segs.join('/'), shown };
+}
+const pushRemote = opts.push ? resolveRemote(opts.push.remote) : null;
+const prRemoteName = opts.prRemote || (opts.push ? opts.push.remote : 'origin');
+const prRemote = texts.length === 0 ? null : pushRemote && pushRemote.name === prRemoteName ? pushRemote : resolveRemote(prRemoteName);
+const ghEnv = prRemote && { GH_HOST: prRemote.host, GH_REPO: prRemote.slug };
+
+// PR <n> must be the PR under audit: its head is H, or (before a push) the pushed branch.
+function prMismatch(pushed) {
+  const fields = 'headRefOid,headRefName,headRepository,headRepositoryOwner';
+  const r = run('gh', ['pr', 'view', opts.pr, '-R', prRemote.slug, '--json', fields], { allowFail: true, env: ghEnv });
+  let pr = null;
+  try {
+    pr = JSON.parse(r.stdout);
+  } catch {}
+  if (r.status !== 0 || !pr) return `cannot read PR #${opts.pr} on ${prRemote.host}/${prRemote.slug}: ${(r.stderr || '').trim()}`;
+  if (!opts.push || pushed) return pr.headRefOid === H ? null : `PR #${opts.pr} head is ${pr.headRefOid}, not the audited HEAD ${H}`;
+  const headRepo = `${pr.headRepositoryOwner?.login}/${pr.headRepository?.name}`;
+  if (pr.headRefName === opts.push.branch && headRepo.toLowerCase() === pushRemote.slug.toLowerCase() && pushRemote.host === prRemote.host) return null;
+  return `PR #${opts.pr} head is ${headRepo}:${pr.headRefName}, not the pushed ${pushRemote.host}/${pushRemote.slug}:${opts.push.branch}`;
+}
+if (prRemote) {
+  const why = prMismatch(false);
+  if (why) finish(3, 'PR_HEAD', [why]);
+}
 
 const commands = [];
 if (opts.push) {
-  const args = ['push', ...(opts.forceWithLease ? ['--force-with-lease'] : []), remote, `HEAD:${opts.push.branch}`];
+  const args = ['push', ...(opts.forceWithLease ? ['--force-with-lease'] : []), opts.push.remote, `${H}:refs/heads/${opts.push.branch}`];
   commands.push({ action: 'push', cmd: 'git', args, env: {} });
 }
-if (opts.body) commands.push({ action: 'pr edit', cmd: 'gh', args: ['pr', 'edit', opts.pr, '-R', slug, '--body-file', opts.body], env: { GH_REPO: slug } });
-if (opts.comment) commands.push({ action: 'pr comment', cmd: 'gh', args: ['pr', 'comment', opts.pr, '-R', slug, '--body-file', opts.comment], env: { GH_REPO: slug } });
+if (opts.body) commands.push({ action: 'pr edit', cmd: 'gh', args: ['pr', 'edit', opts.pr, '-R', prRemote.slug, '--body-file', opts.body], env: ghEnv });
+if (opts.comment) commands.push({ action: 'pr comment', cmd: 'gh', args: ['pr', 'comment', opts.pr, '-R', prRemote.slug, '--body-file', opts.comment], env: ghEnv });
 for (const r of opts.reply) {
-  const api = `repos/${slug}/pulls/${opts.pr}/comments/${r.id}/replies`;
-  commands.push({ action: 'reply', cmd: 'gh', args: ['api', '-X', 'POST', api, '-F', `body=@${r.file}`], env: { GH_REPO: slug } });
+  const api = `repos/${prRemote.slug}/pulls/${opts.pr}/comments/${r.id}/replies`;
+  commands.push({ action: 'reply', cmd: 'gh', args: ['api', '-X', 'POST', api, '-F', `body=@${r.file}`, '--hostname', prRemote.host], env: ghEnv });
 }
 const show = (c) => [...Object.entries(c.env).map(([k, v]) => `${k}=${v}`), c.cmd, ...c.args].join(' ');
-const header = [`target ${slug} (remote ${remote}, ${url})`, `cwd ${top}`, `base ${B} head ${H}`];
+const targets = [...new Set([prRemote, pushRemote].filter(Boolean))];
+const header = [...targets.map((t) => `target ${t.slug} on ${t.host} (remote ${t.name}, ${t.shown})`), `cwd ${top}`, `base ${B} head ${H}`];
+const target = targets[0];
 
 if (!opts.execute) {
   finish(0, null, [...header, ...commands.map((c) => `would run: ${show(c)}`)], {
-    status: 'dry-run', target: slug, cwd: top, head_sha: H, base_sha: B, commands: commands.map(show),
+    status: 'dry-run', target: target.slug, host: target.host, cwd: top, head_sha: H, base_sha: B, commands: commands.map(show),
   });
+}
+
+const executed = [];
+const claimsSha = opts.claims ? createHash('sha256').update(readFileSync(opts.claims)).digest('hex') : null;
+function appendLog(status) {
+  const logPath = join(RUNS_ROOT, 'publish-log.jsonl');
+  try {
+    mkdirSync(RUNS_ROOT, { recursive: true });
+    appendFileSync(
+      logPath,
+      JSON.stringify({
+        ts: new Date().toISOString(), repo: top, target: opts.target, status, head_sha: H, base_sha: B, patch_id: prPatchId,
+        review: opts.review, claims_sha256: claimsSha, actions: executed,
+      }) + '\n',
+    );
+    return null;
+  } catch (e) {
+    return `could not append to ${logPath}: ${e.message}`;
+  }
+}
+// After an action ran, the failure is still logged (status partial) so the push leaves a record.
+function failExecute(msg) {
+  const logErr = executed.length > 0 ? appendLog('partial') : null;
+  finish(8, 'PUBLISH_FAILED', [msg, ...(logErr ? [logErr] : [])]);
 }
 
 for (const c of commands) {
   const r = spawnSync(c.cmd, c.args, { cwd: top, encoding: 'utf8', env: { ...process.env, ...c.env } });
   process.stderr.write(`${r.stdout || ''}${r.stderr || ''}`);
-  if (r.status !== 0) finish(8, 'PUBLISH_FAILED', [`${show(c)} exited ${r.status ?? r.signal}; later commands not run`]);
+  if (r.status !== 0) failExecute(`${show(c)} exited ${r.status ?? r.signal}; later commands not run`);
+  executed.push(show(c));
+  if (c.action === 'push' && prRemote) {
+    const why = prMismatch(true);
+    if (why) failExecute(`${why}; gh commands not run`);
+  }
 }
 
-const claimsSha = opts.claims ? createHash('sha256').update(readFileSync(opts.claims)).digest('hex') : null;
-mkdirSync(RUNS_ROOT, { recursive: true });
-appendFileSync(
-  join(RUNS_ROOT, 'publish-log.jsonl'),
-  JSON.stringify({
-    ts: new Date().toISOString(), repo: top, target: opts.target, head_sha: H, base_sha: B, patch_id: prPatchId,
-    review: opts.review, claims_sha256: claimsSha, actions: commands.map(show),
-  }) + '\n',
-);
-finish(0, null, [...header, ...commands.map((c) => `ran: ${show(c)}`)], { status: 'executed', target: slug, cwd: top, commands: commands.map(show) });
+const logErr = appendLog('executed');
+if (logErr) finish(8, 'PUBLISH_FAILED', [`every action ran but ${logErr}`]);
+finish(0, null, [...header, ...commands.map((c) => `ran: ${show(c)}`)], { status: 'executed', target: target.slug, host: target.host, cwd: top, commands: commands.map(show) });

@@ -37,9 +37,10 @@ function commitAll(repo, msg) {
 }
 
 // Throwaway repo: main has README.md, branch feat adds prFiles. origin's URL is
-// github.com/o/r; the PATH shims log every gh call and turn `git push` into a push
-// to the bare temp origin (or a failure with SHIM_PUSH_FAIL=1). No network.
-function makeFixture({ prFiles = { 'src/a.js': 'a\n' } } = {}) {
+// github.com/o/r; the PATH shims log every gh write and turn `git push` into a push
+// to the bare temp origin (or a failure with SHIM_PUSH_FAIL=1). Read-only gh calls
+// (auth status, pr view) go to reads.log; pr view reports HEAD unless SHIM_PR_* say otherwise.
+function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'advisor-publish-'));
   scratch.push(dir);
   const bare = join(dir, 'origin.git');
@@ -52,10 +53,18 @@ function makeFixture({ prFiles = { 'src/a.js': 'a\n' } } = {}) {
   git(repo, 'checkout', '-q', '-b', 'feat');
   for (const [p, c] of Object.entries(prFiles)) write(repo, p, c);
   const head = commitAll(repo, 'pr');
-  git(repo, 'remote', 'add', 'origin', ORIGIN_URL);
+  git(repo, 'remote', 'add', 'origin', origin);
   const shim = join(dir, 'shim');
   const log = join(dir, 'shim.log');
-  write(shim, 'gh', `#!/bin/sh\necho "gh $* | GH_REPO=$GH_REPO | cwd=$(pwd)" >> "${log}"\nexit 0\n`);
+  const reads = join(dir, 'reads.log');
+  write(
+    shim,
+    'gh',
+    `#!/bin/sh\nif [ "$1" = auth ]; then\n  echo "gh $*" >> "${reads}"\n  [ "$*" = "auth status --hostname \${SHIM_AUTH_HOST:-github.com}" ]; exit $?\nfi\n` +
+      `if [ "$1 $2" = "pr view" ]; then\n  echo "gh $* | GH_HOST=$GH_HOST" >> "${reads}"\n` +
+      `  printf '{"headRefOid":"%s","headRefName":"%s","headRepository":{"name":"r"},"headRepositoryOwner":{"login":"%s"}}\\n' "\${SHIM_PR_HEAD:-$(git rev-parse HEAD)}" "\${SHIM_PR_BRANCH:-feat}" "\${SHIM_PR_OWNER:-o}"\n  exit 0\nfi\n` +
+      `echo "gh $* | GH_REPO=$GH_REPO | GH_HOST=$GH_HOST | cwd=$(pwd)" >> "${log}"\n[ -n "$SHIM_GH_FAIL" ] && exit 1\nexit 0\n`,
+  );
   write(
     shim,
     'git',
@@ -63,7 +72,7 @@ function makeFixture({ prFiles = { 'src/a.js': 'a\n' } } = {}) {
   );
   chmodSync(join(shim, 'gh'), 0o755);
   chmodSync(join(shim, 'git'), 0o755);
-  return { dir, repo, bare, base, head, log, runs: join(dir, 'runs') };
+  return { dir, repo, bare, base, head, log, reads, runs: join(dir, 'runs') };
 }
 
 function review(fx, { scope = 'full-pr', base = fx.base, head = fx.head, verdict = 'APPROVE', open = 0, blockers = [], raw } = {}) {
@@ -106,7 +115,7 @@ test('T1 audit at HEAD and merge-base, APPROVE, 0 Blockers: exit 0, dry run prin
   const fx = makeFixture();
   const res = run(fx, [...base(fx), '--push', 'origin', 'feat']);
   expect(res.code).toBe(0);
-  expect(res.stdout).toContain('git push origin HEAD:feat');
+  expect(res.stdout).toContain(`git push origin ${fx.head}:refs/heads/feat`);
   expect(shimLog(fx)).toBe('');
 });
 
@@ -270,4 +279,200 @@ test('T14 run from the advisor cwd with --repo <temp o/r>: dry run targets o/r, 
   expect(res.stdout).not.toContain('{owner}');
   expect(res.stdout).not.toContain('{repo}');
   expect(shimLog(fx)).toBe('');
+});
+
+const ZERO_SHA = '0'.repeat(40);
+const thanks = (fx) => write(fx.dir, 'text.md', 'Thanks for the review.\n');
+const frontmatterAt = (fx) => `---\naudit_scope: full-pr\naudit_base_sha: ${fx.base}\naudit_head_sha: ${fx.head}\nverdict: APPROVE\nopen_blockers: 0\n---\n`;
+
+test('B1 an option string in audit_base_sha: exit 3 and git never runs it (no file written)', () => {
+  const fx = makeFixture();
+  const target = join(fx.dir, 'pwned');
+  const res = run(fx, [...base(fx, review(fx, { base: `--output=${target}`, head: 'HEAD' })), '--push', 'origin', 'feat']);
+  expect(res.code).toBe(3);
+  expect(res.out).toContain('STALE_AUDIT');
+  expect(existsSync(target)).toBe(false);
+});
+
+test('B2 a symbolic or abbreviated audit_head_sha: exit 3, even when the PR diff matches', () => {
+  const fx = makeFixture();
+  for (const head of ['HEAD', 'feat', fx.head.slice(0, 12)]) {
+    expect(run(fx, [...base(fx, review(fx, { head })), '--push', 'origin', 'feat']).code).toBe(3);
+  }
+  const rv = review(fx, { head: 'feat' });
+  write(fx.repo, 'src/evil.js', 'evil()\n');
+  commitAll(fx.repo, 'after audit');
+  expect(run(fx, [...base(fx, rv), '--push', 'origin', 'feat']).code).toBe(3);
+});
+
+test('B3 a whitespace-only change after the audit: exit 3 (patch-id --verbatim)', () => {
+  const fx = makeFixture({ prFiles: { 'src/a.py': 'if guard:\n    deny()\nallow()\n' } });
+  const rv = review(fx);
+  write(fx.repo, 'src/a.py', 'if guard:\n    deny()\n    allow()\n');
+  commitAll(fx.repo, 'reindent');
+  expect(run(fx, [...base(fx, rv), '--push', 'origin', 'feat']).code).toBe(3);
+});
+
+test('B4 the remote host is pinned (GH_HOST, gh api --hostname); a nested path or unauthenticated host exits 2', () => {
+  const fx = makeFixture({ origin: 'git@ghe.example.com:team/svc.git' });
+  const text = thanks(fx);
+  const args = [...base(fx), '--pr', '7', '--comment', text, '--reply', `99=${text}`, '--claims', passingClaims(fx)];
+  const ghe = run(fx, args, { env: { SHIM_AUTH_HOST: 'ghe.example.com' } });
+  expect(ghe.code).toBe(0);
+  expect(ghe.stdout).toContain('target team/svc on ghe.example.com');
+  const ghLines = ghe.stdout.split('\n').filter((l) => /\bgh /.test(l));
+  expect(ghLines.length).toBe(2);
+  for (const l of ghLines) expect(l).toContain('GH_HOST=ghe.example.com GH_REPO=team/svc gh ');
+  expect(ghLines[1]).toContain('gh api -X POST repos/team/svc/pulls/7/comments/99/replies');
+  expect(ghLines[1]).toMatch(/ --hostname ghe\.example\.com$/);
+  expect(readFileSync(fx.reads, 'utf8')).toContain('GH_HOST=ghe.example.com');
+  expect(run(fx, args).code).toBe(2);
+  // A user-level GH_HOST never leaks into a github.com target.
+  const gh = makeFixture();
+  const leak = run(gh, [...base(gh), '--pr', '7', '--comment', thanks(gh), '--claims', passingClaims(gh)], { env: { GH_HOST: 'ghe.example.com' } });
+  expect(leak.code).toBe(0);
+  expect(leak.stdout).toContain('GH_HOST=github.com GH_REPO=o/r gh pr comment 7 -R o/r');
+  const nested = makeFixture({ origin: 'https://gitlab.com/grp/sub/proj.git' });
+  expect(run(nested, [...base(nested), '--push', 'origin', 'feat']).code).toBe(2);
+  const gitlab = makeFixture({ origin: 'https://gitlab.com/grp/proj.git' });
+  const res = run(gitlab, [...base(gitlab), '--push', 'origin', 'feat']);
+  expect(res.code).toBe(2);
+  expect(res.out).toContain('gitlab.com');
+});
+
+test('W1 --pr must be the PR whose head is the audited HEAD (or the pushed branch): exit 3, no gh write', () => {
+  const fx = makeFixture();
+  const args = [...base(fx), '--pr', '21', '--comment', thanks(fx), '--claims', passingClaims(fx)];
+  const wrongHead = run(fx, args, { env: { SHIM_PR_HEAD: ZERO_SHA } });
+  expect(wrongHead.code).toBe(3);
+  expect(wrongHead.out).toContain('PR_HEAD');
+  expect(run(fx, [...args, '--push', 'origin', 'feat'], { env: { SHIM_PR_BRANCH: 'other' } }).code).toBe(3);
+  expect(run(fx, args).code).toBe(0);
+  expect(readFileSync(fx.reads, 'utf8')).toContain('pr view 21 -R o/r --json');
+  expect(shimLog(fx)).toBe('');
+  // After the push the PR head must be H before any gh write.
+  const res = run(fx, [...args, '--push', 'origin', 'feat', '--execute'], { env: { SHIM_PR_HEAD: ZERO_SHA } });
+  expect(res.code).toBe(8);
+  expect(shimLog(fx)).not.toContain('gh ');
+});
+
+test('W2 the push refspec is the audited SHA; --force-with-lease passes through, never --force', () => {
+  const fx = makeFixture();
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat', '--force-with-lease']);
+  expect(res.code).toBe(0);
+  expect(res.stdout).toContain(`git push --force-with-lease origin ${fx.head}:refs/heads/feat`);
+  expect(res.stdout).not.toMatch(/--force(?!-with-lease)/);
+  expect(res.stdout).not.toContain('HEAD:');
+});
+
+test('W3 a -diff gitattribute does not hide an added eco: line: exit 6', () => {
+  const fx = makeFixture({ prFiles: { '.gitattributes': '*.js -diff\n', 'src/a.js': '// eco: skip tests\n' } });
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat']);
+  expect(res.code).toBe(6);
+  expect(res.out).toContain('src/a.js:1');
+});
+
+test('W4 paths git would C-quote still hit checks 6 and 7', () => {
+  const a = makeFixture({ prFiles: { 'captures/a"b.png': 'x\n' } });
+  expect(run(a, [...base(a), '--push', 'origin', 'feat']).code).toBe(6);
+  const b = makeFixture({ prFiles: { 'guardrails/a"b.md': 'x\n' } });
+  const res = run(b, [...base(b), '--push', 'origin', 'feat']);
+  expect(res.code).toBe(7);
+  expect(res.out).toContain('guardrails/a"b.md needs');
+});
+
+test('W5 default policy paths cover the docs/ and .github/ copies in any case', () => {
+  const files = ['.github/CONTRIBUTING.md', 'docs/CODEOWNERS', '.github/PULL_REQUEST_TEMPLATE/f.md', 'docs/pull_request_template.md', 'contributing.md'];
+  const fx = makeFixture({ prFiles: Object.fromEntries(files.map((f) => [f, 'x\n'])) });
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat']);
+  expect(res.code).toBe(7);
+  for (const f of files) expect(res.out).toContain(`${f} needs`);
+});
+
+test('W6 an empty --policy-paths list exits 2', () => {
+  const fx = makeFixture({ prFiles: { 'CONTRIBUTING.md': 'x\n' } });
+  expect(run(fx, [...base(fx), '--push', 'origin', 'feat', '--policy-paths', ',']).code).toBe(2);
+  expect(run(fx, [...base(fx), '--push', 'origin', 'feat', '--policy-paths', ' ']).code).toBe(2);
+});
+
+test('W7 Blockers recount: variant heading or list marker, or no Blockers heading, exits 4', () => {
+  const fx = makeFixture();
+  const bodies = [
+    '## Blockers\n- **[B1]** `a:1` - real\n',
+    '### BLOCKERS\n1. **[B1]** `a:1` - real\n',
+    '### Blockers (must fix)\n* **[B1]** `a:1` - real\n',
+    '## Code Review: x\n\n### Warnings (should fix)\n- **[W1]** w\n',
+  ];
+  for (const body of bodies) expect(run(fx, [...base(fx, review(fx, { raw: frontmatterAt(fx) + body })), '--push', 'origin', 'feat']).code).toBe(4);
+  const fenced = '### Blockers (must fix)\nNone.\n\n```\n- **[B1]** example\n```\n';
+  expect(run(fx, [...base(fx, review(fx, { raw: frontmatterAt(fx) + fenced })), '--push', 'origin', 'feat']).code).toBe(0);
+});
+
+test('W8 --execute: a gh failure after the push exits 8 and logs the push as partial; a log write failure exits 8', () => {
+  const fx = makeFixture();
+  const args = [...base(fx), '--push', 'origin', 'feat', '--pr', '7', '--comment', thanks(fx), '--claims', passingClaims(fx), '--execute'];
+  expect(run(fx, args, { env: { SHIM_GH_FAIL: '1' } }).code).toBe(8);
+  const lines = readFileSync(join(fx.runs, 'publish-log.jsonl'), 'utf8').trim().split('\n');
+  expect(lines.length).toBe(1);
+  const entry = JSON.parse(lines[0]);
+  expect(entry.status).toBe('partial');
+  expect(entry.actions.length).toBe(1);
+  expect(entry.actions[0]).toContain('git push');
+  const blocked = write(fx.dir, 'runs-file', 'x');
+  const noLog = run(fx, args, { env: { ADVISOR_RUNS_ROOT: join(blocked, 'runs') } });
+  expect(noLog.code).toBe(8);
+  expect(noLog.out).toContain('publish-log.jsonl');
+});
+
+test('W9 --pr-remote: PR actions target the upstream repo while the push goes to the fork', () => {
+  const fx = makeFixture();
+  git(fx.repo, 'remote', 'add', 'fork', 'https://github.com/me/r.git');
+  const args = [...base(fx), '--push', 'fork', 'feat', '--pr', '12', '--comment', thanks(fx), '--claims', passingClaims(fx), '--pr-remote', 'origin'];
+  const res = run(fx, args, { env: { SHIM_PR_OWNER: 'me' } });
+  expect(res.code).toBe(0);
+  expect(res.stdout).toContain(`git push fork ${fx.head}:refs/heads/feat`);
+  expect(res.stdout).toContain('GH_REPO=o/r gh pr comment 12 -R o/r');
+  expect(readFileSync(fx.reads, 'utf8')).toContain('pr view 12 -R o/r');
+  // PR #12's head must be the fork's branch.
+  expect(run(fx, args).code).toBe(3);
+});
+
+test('W10 a failing advisor-conventions exits 7 instead of falling back to the defaults', () => {
+  const fx = makeFixture();
+  const bunShim = join(fx.dir, 'bunshim');
+  write(bunShim, 'bun', `#!/bin/sh\ncase "$1" in */advisor-conventions) exit \${SHIM_CONV_EXIT:-1};; esac\nexec "${process.execPath}" "$@"\n`);
+  chmodSync(join(bunShim, 'bun'), 0o755);
+  const PATH = `${bunShim}:${join(fx.dir, 'shim')}:${process.env.PATH}`;
+  const crash = run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { PATH } });
+  expect(crash.code).toBe(7);
+  expect(crash.out).toContain('advisor-conventions');
+  expect(run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { PATH, SHIM_CONV_EXIT: '0' } }).code).toBe(7);
+});
+
+test('W11 --json output shape; ADV unset falls back to the script repo', () => {
+  const fx = makeFixture();
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat', '--json']);
+  expect(res.code).toBe(0);
+  const out = JSON.parse(res.stdout);
+  expect(out).toMatchObject({ exit: 0, rule: null, status: 'dry-run', target: 'o/r', host: 'github.com', head_sha: fx.head, base_sha: fx.base });
+  expect(out.commands).toEqual([`git push origin ${fx.head}:refs/heads/feat`]);
+  const adv = run(fx, ['--repo', ROOT, '--target', 'master', '--review', review(fx), '--push', 'origin', 'x'], { env: { ADV: '' } });
+  expect(adv.code).toBe(0);
+  expect(adv.out).toContain('not applicable: advisor repo');
+});
+
+test('W12 an added line starting with "++ " is scanned for eco: markers: exit 6', () => {
+  const fx = makeFixture({ prFiles: { 'b.txt': '++ eco: skip\n' } });
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat']);
+  expect(res.code).toBe(6);
+  expect(res.out).toContain('b.txt:1');
+});
+
+test('W13 credentials in the remote URL are never printed', () => {
+  const fx = makeFixture({ origin: 'https://u:SECRET@github.com/o/r.git' });
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat']);
+  expect(res.code).toBe(0);
+  expect(res.out).not.toContain('SECRET');
+  expect(res.stdout).toContain('https://github.com/o/r.git');
+  expect(run(fx, [...base(fx), '--push', 'origin', 'feat', '--json']).out).not.toContain('SECRET');
 });
