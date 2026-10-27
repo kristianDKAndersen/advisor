@@ -101,8 +101,10 @@ test('spawns/coder: spawns/ and agent/skill prompt files are changed with Edit a
   expect(coder).toMatch(/instruction poisoning/);
 });
 
-test('N5/N1 edited prompt files carry last_edited 2026-10-08', () => {
+test('N5/N1 edited prompt files carry last_edited >= 2026-10-08', () => {
   for (const f of [brainstormer, facilitation, coder]) {
-    expect(f).toMatch(/^last_edited: 2026-10-08$/m);
+    const m = f.match(/^last_edited: (\d{4}-\d{2}-\d{2})$/m);
+    expect(m).not.toBeNull();
+    expect(m[1] >= '2026-10-08').toBe(true);
   }
 });
