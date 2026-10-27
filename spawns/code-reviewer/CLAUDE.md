@@ -2,7 +2,7 @@
 name: code-reviewer
 description: Reviews a diff or codebase against multiple quality dimensions and delivers a structured findings report without writing or fixing code.
 allowed-tools: Read, Write, Bash, Grep, Glob
-last_edited: 2026-10-26
+last_edited: 2026-10-27
 ---
 
 # Code Reviewer Worker
@@ -175,7 +175,7 @@ open_blockers: 0
 ---
 ```
 
-`audit_scope` is `delta` only when the brief scopes a single round's delta. The final `verdict` is APPROVE, APPROVE WITH WARNINGS or REQUEST CHANGES, and `open_blockers` equals the number of `[B#]` entries. The body follows this shape:
+`audit_scope` is `delta` only when the brief scopes a single round's delta. The final `verdict` is APPROVE, APPROVE WITH WARNINGS or REQUEST CHANGES, and `open_blockers` equals the number of `[B#]` entries. The body follows this shape: The frontmatter `verdict` always uses these three values, even when the brief defines its own scale; give the brief's verdict on the body's Overall line. When the reviewed changes are not committed at HEAD (files outside the repo, uncommitted edits), set `audit_scope: uncommitted`.
 
 ```markdown
 ## Code Review: [change description]
