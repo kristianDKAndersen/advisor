@@ -974,7 +974,7 @@ test('safeSweep: forced run with alerts shows one toast, scheduled keeps the ale
 
 // ─── Click-to-open notifications (terminal-notifier) ──────────────────
 
-import { buildOpenUrl, buildTerminalNotifierArgv, notify, deliverFresh } from '../hooks/register.js'
+import { buildOpenUrl, buildTerminalNotifierArgv, notify, deliverFresh, renderReportHtml } from '../hooks/register.js'
 
 const CTI_DIR = '/home/u/.advisor/cti'
 const BREW_TN = '/opt/homebrew/bin/terminal-notifier'
@@ -1025,6 +1025,7 @@ function notifyHarness(opts: { sent?: boolean; bins?: string[]; tnExit?: number 
 
 const REPORT = CTI_DIR + '/2026-10-26.md'
 const REPORT_URL = 'file://' + REPORT
+const HTML_URL = REPORT_URL.replace(/\.md$/, '.html')
 
 test('notify: $.ui.notify sent -> no process spawned at all', async () => {
   const h = notifyHarness({ sent: true, bins: [BREW_TN] })
@@ -1098,7 +1099,7 @@ test('call site: sweep failure opens the day report only when it exists', async 
   await safeSweep(present.h.$, false)
   const tn = tnRuns(present.runs)
   expect(tn.length).toBe(1)
-  expect(tn[0]).toContain(REPORT_URL)
+  expect(tn[0]).toContain(HTML_URL)
   expect(tn[0][4]).toMatch(/^CTI sweep failed: spawn refused/)
 })
 
@@ -1122,4 +1123,146 @@ test('call site: feed alert opens the feed log; a failed log write omits -open',
   const failed = await feedRun(true)
   expect(tnRuns(failed)).toEqual([])
   expect(failed[failed.length - 1][0]).toBe('osascript')
+})
+
+// ─── HTML report rendering ─────────────────────────────────────────────
+
+const HTML_FINDING = {
+  id: 'a1', title: 'Bad <b>bug</b> in axios', severity: 'critical', exploited: true, category: 'vulnerability',
+  products: ['axios', 'next.js'], summary: 'Remote "code" exec & more', action: 'Upgrade to 1.8.2',
+  sources: ['https://ex.example/a?b=1&c=2', 'https://ex.example/second'],
+}
+
+test('renderReportHtml: escapes script tags, attribute breaks and quotes in every text position', () => {
+  const evil = '<script>alert(1)</script> "><img src=x onerror=alert(2)> \' &amp;'
+  const md = ['# ' + evil, '', evil, '', '### ' + evil, '', '- id: ' + evil, '- summary: ' + evil, '- ' + evil, '', '- 09:00 [' + evil + '] ' + evil].join('\n')
+  const html = renderReportHtml(md, evil)
+  expect(html).not.toContain('<script')
+  expect(html).not.toContain('<img')
+  expect(html).not.toContain('onerror=alert(2)>')
+  expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+  expect(html).toContain('&quot;&gt;&lt;img')
+  expect(html).toContain('&#39;')
+  expect(html).toContain('&amp;amp;')
+})
+
+test('renderReportHtml: only http(s) autolinks become anchors; other schemes stay escaped text', () => {
+  const md = ['- sources: <javascript:alert(1)> <data:text/html,<b>x</b>> <JaVaScRiPt:alert(2)> <https://ok.example/a?x=1&y=2> <https://bad.example/"onmouseover=alert(3)> <http://ok.example/b>', '', '<vbscript:x> and <ftp://h/x> and <file:///etc/passwd>'].join('\n')
+  const html = renderReportHtml(md, 't')
+  expect(html).not.toMatch(/href="(?!https?:\/\/)/i)
+  expect(html).not.toMatch(/javascript:alert\(1\)"/)
+  expect(html).toContain('&lt;javascript:alert(1)&gt;')
+  expect(html).toContain('&lt;ftp://h/x&gt;')
+  expect(html).toContain('href="https://ok.example/a?x=1&amp;y=2"')
+  expect(html).toContain('&lt;https://bad.example/&quot;onmouseover=alert(3)&gt;')
+  expect(html).not.toContain('href="https://bad.example')
+  expect(html).toContain('href="http://ok.example/b"')
+  expect((html.match(/<a /g) ?? []).length).toBe(2)
+  for (const a of html.match(/<a [^>]*>/g) ?? []) expect(a).toContain('rel="noopener noreferrer"')
+})
+
+test('renderReportHtml: CSP meta, no script, no external resources, light and dark styles, self-contained', () => {
+  const html = renderReportHtml(buildReport('2026-10-26', [HTML_FINDING], [HTML_FINDING], 0), 'CTI sweep 2026-10-26')
+  expect(html).toContain('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src \'none\'">')
+  expect(html.toLowerCase()).not.toContain('<script')
+  expect(html).not.toMatch(/<link|<img|<iframe|@import|url\(/i)
+  expect(html).toContain('prefers-color-scheme: dark')
+  expect(html).toContain('max-width: 760px')
+  expect(html).toContain('<title>CTI sweep 2026-10-26</title>')
+})
+
+test('renderReportHtml: a report finding becomes a card with ALERT and severity badges, summary line and escaped fields', () => {
+  const html = renderReportHtml(buildReport('2026-10-26', [HTML_FINDING], [HTML_FINDING], 0), 'r')
+  expect(html).toContain('<h1>CTI sweep 2026-10-26</h1>')
+  expect(html).toContain('1 findings, 1 alerts, 0 invalid items dropped.')
+  expect(html).toContain('class="card"')
+  expect(html).toContain('badge alert')
+  expect(html).toContain('badge sev-critical')
+  expect(html).toContain('exploited in the wild')
+  expect(html).toContain('Bad &lt;b&gt;bug&lt;/b&gt; in axios')
+  expect(html).toContain('Remote &quot;code&quot; exec &amp; more')
+  expect(html).toContain('href="https://ex.example/a?b=1&amp;c=2"')
+  expect(html).toContain('href="https://ex.example/second"')
+  expect((html.match(/class="card"/g) ?? []).length).toBe(1)
+})
+
+test('renderReportHtml: merged runs keep run headings and rules; each finding is its own card', () => {
+  const run = buildReport('2026-10-26', [HTML_FINDING, { ...HTML_FINDING, id: 'a2', severity: 'low', exploited: false }], [], 0)
+  const html = renderReportHtml(mergeReport(run, run, '14:30'), 'r')
+  expect((html.match(/class="card"/g) ?? []).length).toBe(4)
+  expect(html).toContain('<hr>')
+  expect(html).toContain('<h2>Run 14:30</h2>')
+  expect(html).toContain('badge sev-low')
+  expect(html).not.toContain('badge alert')
+})
+
+test('renderReportHtml: feed-log lines show time, source, linked title and badges', () => {
+  const md = ['# CTI feed items 2026-10-26', '- 09:15 [CISA KEV] CVE-2026-1 in <b>Axios</b> <https://ex.example/cve?a=1&b=2> [WATCHLIST] [KEV]', '- 09:20 [Blog] No link here'].join('\n')
+  const html = renderReportHtml(md, 'feed')
+  expect(html).toContain('09:15')
+  expect(html).toContain('CISA KEV')
+  expect(html).toContain('<a href="https://ex.example/cve?a=1&amp;b=2" rel="noopener noreferrer">CVE-2026-1 in &lt;b&gt;Axios&lt;/b&gt;</a>')
+  expect(html).toContain('badge watch')
+  expect(html).toContain('badge kev')
+  expect(html).toContain('No link here')
+  expect(html).toContain('2 items')
+})
+
+test('renderReportHtml: non-string input and empty markdown still yield a safe document', () => {
+  for (const md of [undefined, null, '', 42]) {
+    const html = renderReportHtml(md as never, 'x')
+    expect(html).toContain('Content-Security-Policy')
+    expect(html.toLowerCase()).not.toContain('<script')
+  }
+})
+
+// Stub fs on the notify harness: `files` maps path -> content, `writes` records writes.
+function htmlNotifyHarness(files: Record<string, string>, opts: { writeFails?: boolean } = {}) {
+  const h = notifyHarness({ bins: [BREW_TN] })
+  const writes: Array<[string, string]> = []
+  h.$.fs = {
+    read: async (p: string) => { if (!(p in files)) throw new Error('ENOENT'); return files[p] },
+    write: async (p: string, c: string) => { if (opts.writeFails) throw new Error('disk full'); writes.push([p, c]) },
+  }
+  return { ...h, writes }
+}
+
+test('notify: a .md openPath is rendered to the sibling .html, written, and its file URL is passed to terminal-notifier', async () => {
+  const h = htmlNotifyHarness({ [REPORT]: buildReport('2026-10-26', [HTML_FINDING], [HTML_FINDING], 0) })
+  await notify(h.$, 'hello', undefined, REPORT)
+  expect(h.writes.length).toBe(1)
+  expect(h.writes[0][0]).toBe(CTI_DIR + '/2026-10-26.html')
+  expect(h.writes[0][1]).toContain('Content-Security-Policy')
+  expect(h.writes[0][1]).toContain('Bad &lt;b&gt;bug&lt;/b&gt; in axios')
+  const tn = h.runs.filter(r => r[0] === BREW_TN)
+  expect(tn).toEqual([[BREW_TN, ...buildTerminalNotifierArgv('hello', 'CTI sweep', HTML_URL)]])
+  expect(h.runs.some(r => r[0] === 'osascript')).toBe(false)
+})
+
+test('notify: feed-log .md is rendered to feed-<date>.html', async () => {
+  const feed = CTI_DIR + '/feed-2026-10-26.md'
+  const h = htmlNotifyHarness({ [feed]: '# CTI feed items 2026-10-26\n- 09:15 [KEV] Bad <https://ex.example/x> [KEV]\n' })
+  await notify(h.$, 'hello', undefined, feed)
+  expect(h.writes.map(w => w[0])).toEqual([CTI_DIR + '/feed-2026-10-26.html'])
+  expect(h.runs.filter(r => r[0] === BREW_TN)[0]).toContain('file://' + CTI_DIR + '/feed-2026-10-26.html')
+})
+
+test('notify: read failure or write failure falls back to opening the .md exactly as before', async () => {
+  for (const h of [htmlNotifyHarness({}), htmlNotifyHarness({ [REPORT]: '# r\n' }, { writeFails: true })]) {
+    await notify(h.$, 'hello', undefined, REPORT)
+    expect(h.writes).toEqual([])
+    expect(h.runs.filter(r => r[0] === BREW_TN)).toEqual([[BREW_TN, ...buildTerminalNotifierArgv('hello', 'CTI sweep', REPORT_URL)]])
+    expect(h.runs.some(r => r[0] === 'osascript')).toBe(false)
+  }
+})
+
+test('notify: renderer never reads or writes for a path outside ctiDir; osascript fallback chain intact', async () => {
+  const h = htmlNotifyHarness({ '/home/u/elsewhere/x.md': '# x' })
+  await notify(h.$, 'hello', undefined, '/home/u/elsewhere/x.md')
+  expect(h.writes).toEqual([])
+  expect(h.runs).toEqual([buildOsascriptArgv('hello', 'CTI sweep')])
+  const f = htmlNotifyHarness({ [REPORT]: '# r\n' })
+  f.$.process.run = async (argv: string[]) => { f.runs.push(argv); return { exitCode: argv[0] === 'test' ? 0 : argv[0] === BREW_TN ? 1 : 0 } }
+  await notify(f.$, 'hello', undefined, REPORT)
+  expect(f.runs[f.runs.length - 1]).toEqual(buildOsascriptArgv('hello', 'CTI sweep'))
 })

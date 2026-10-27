@@ -396,6 +396,165 @@ export function buildReport(date, findings, alerts, invalid) {
   ].join('\n')
 }
 
+// ─── HTML view of the report ───────────────────────────────────────────
+
+const HTML_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'"
+const HTML_CSS = `
+:root { color-scheme: light dark; --bg: #f6f7f9; --card: #fff; --fg: #1c2024; --muted: #606a75; --line: #dde1e6; --link: #0b57d0; }
+@media (prefers-color-scheme: dark) { :root { --bg: #14171a; --card: #1e2227; --fg: #e6e9ec; --muted: #9aa5b1; --line: #2f353c; --link: #8ab4f8; } }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
+h1 { font-size: 1.7rem; line-height: 1.25; margin: 0 0 8px; }
+h2 { font-size: 1.25rem; margin: 32px 0 8px; }
+h3 { font-size: 1.1rem; line-height: 1.35; margin: 0 0 10px; }
+p { margin: 0 0 12px; overflow-wrap: anywhere; }
+.lead { color: var(--muted); font-size: 1.05rem; margin-bottom: 20px; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 32px 0; }
+a { color: var(--link); overflow-wrap: anywhere; word-break: break-word; }
+ul { padding-left: 22px; margin: 0 0 12px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 14px 0; }
+.kv { display: flex; gap: 12px; margin: 6px 0; }
+.k { flex: 0 0 76px; color: var(--muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; padding-top: 2px; }
+.v { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.feed { list-style: none; padding: 0; }
+.feed li { padding: 8px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.time { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 8px; }
+.src { color: var(--muted); font-size: 0.85rem; margin-right: 8px; }
+.badge { display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 1px 8px; border-radius: 999px; margin-right: 6px; vertical-align: 1px; color: #fff; background: #5f6b76; }
+.badge.alert, .badge.sev-critical { background: #c5221f; }
+.badge.sev-high { background: #c25400; }
+.badge.sev-medium { background: #9a6700; }
+.badge.sev-low { background: #2e7d32; }
+.badge.watch { background: #6b3fa0; }
+.badge.kev { background: #a31d52; }
+`
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+}
+
+function safeHttpUrl(u) {
+  if (!/^https?:\/\/[^\s<>"']+$/i.test(u)) return null
+  try {
+    const p = new URL(u).protocol
+    return p === 'http:' || p === 'https:' ? u : null
+  } catch {
+    return null
+  }
+}
+
+const anchor = (url, label) => `<a href="${esc(url)}" rel="noopener noreferrer">${esc(label)}</a>`
+const TAG_BADGES = { ALERT: 'alert', KEV: 'kev', WATCHLIST: 'watch' }
+
+function badgeText(escaped) {
+  return escaped.replace(/\[(ALERT|KEV|WATCHLIST)\]/g, (_, t) => `<span class="badge ${TAG_BADGES[t]}">${t}</span>`)
+}
+
+// Escapes everything; only <http(s)://...> autolinks become anchors, [TAG]s become badges.
+function inlineHtml(text) {
+  let out = ''
+  let last = 0
+  for (const m of text.matchAll(/<([^\s<>]+)>/g)) {
+    const url = safeHttpUrl(m[1])
+    if (!url) continue
+    out += badgeText(esc(text.slice(last, m.index))) + anchor(url, url)
+    last = m.index + m[0].length
+  }
+  return out + badgeText(esc(text.slice(last)))
+}
+
+function severityHtml(value) {
+  const m = /^(critical|high|medium|low)\b(.*)$/.exec(value)
+  return m ? `<span class="badge sev-${m[1]}">${m[1]}</span>${inlineHtml(m[2])}` : inlineHtml(value)
+}
+
+const KV_KEYS = ['id', 'severity', 'category', 'products', 'summary', 'action', 'sources']
+
+// `- HH:MM [source] title <link> [WATCHLIST] [KEV]`, as written by feedLogLine.
+function feedItemHtml(m) {
+  let rest = m[3]
+  let tags = ''
+  for (let t; (t = /\s*\[(WATCHLIST|KEV)\]$/.exec(rest)); rest = rest.slice(0, t.index)) tags = ` [${t[1]}]` + tags
+  const l = /\s+<([^\s<>]+)>$/.exec(rest)
+  const url = l && safeHttpUrl(l[1])
+  const title = url ? rest.slice(0, l.index) : rest
+  return `<li><span class="time">${esc(m[1])}</span><span class="src">${esc(m[2])}</span>${url ? anchor(url, title) : inlineHtml(title)}${badgeText(esc(tags))}</li>`
+}
+
+// Renders only the subset buildReport/mergeReport/feedLogLine write. The text is attacker-influenced:
+// everything is escaped and links are http(s) only, so keep it that way.
+export function renderReportHtml(markdown, title) {
+  const lines = (typeof markdown === 'string' ? markdown : '').split(/\r?\n/)
+  const body = []
+  let card = false
+  let list = null
+  let leadDone = false
+  let items = 0
+  const close = () => {
+    if (list) body.push('</ul>')
+    list = null
+  }
+  const closeCard = () => {
+    close()
+    if (card) body.push('</section>')
+    card = false
+  }
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '')
+    const h = /^(#{1,3}) (.*)$/.exec(line)
+    if (h) {
+      closeCard()
+      const n = h[1].length
+      if (n === 3) {
+        card = true
+        body.push('<section class="card">')
+      }
+      body.push(`<h${n}>${inlineHtml(h[2])}</h${n}>`)
+      continue
+    }
+    if (line === '---') {
+      closeCard()
+      body.push('<hr>')
+      continue
+    }
+    const li = /^- (.*)$/.exec(line)
+    if (li) {
+      const feed = /^(\d\d:\d\d) \[([^\]]*)\] (.*)$/.exec(li[1])
+      const kv = card && /^([a-z]+): (.*)$/.exec(li[1])
+      if (kv && KV_KEYS.includes(kv[1])) {
+        close()
+        body.push(`<div class="kv"><span class="k">${kv[1]}</span><span class="v">${kv[1] === 'severity' ? severityHtml(kv[2]) : inlineHtml(kv[2])}</span></div>`)
+        continue
+      }
+      const kind = feed ? 'feed' : 'plain'
+      if (list !== kind) {
+        close()
+        list = kind
+        body.push(feed ? '<ul class="feed">' : '<ul>')
+      }
+      if (feed) items++
+      body.push(feed ? feedItemHtml(feed) : `<li>${inlineHtml(li[1])}</li>`)
+      continue
+    }
+    if (!line.trim()) continue
+    close()
+    body.push(`<p${leadDone ? '' : ' class="lead"'}>${inlineHtml(line)}</p>`)
+    leadDone = true
+  }
+  closeCard()
+  if (items && !leadDone) body.splice(1, 0, `<p class="lead">${items} items</p>`)
+  return [
+    '<!doctype html>',
+    '<html lang="en"><head><meta charset="utf-8">',
+    `<meta http-equiv="Content-Security-Policy" content="${esc(HTML_CSP).replace(/&#39;/g, "'")}">`,
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${esc(title)}</title>`,
+    `<style>${HTML_CSS}</style></head><body><main>`,
+    ...body,
+    '</main></body></html>',
+  ].join('\n')
+}
+
 // Old-shape digests (one run, no runs/alertsAt/last) read as a single prior run.
 function digestView(d) {
   const finishedAt = Number(d.finishedAt) || 0
@@ -1077,8 +1236,20 @@ function waitForAnswer($, agentId) {
 // toastText null skips the toast (a forced run's done toast already reports the alerts).
 // openPath (a report under ctiDir) makes a click open it, via terminal-notifier when installed.
 async function sendWithTerminalNotifier($, text, openPath) {
-  const url = buildOpenUrl(openPath, await ctiDirOf($))
+  const ctiDir = await ctiDirOf($)
+  let url = buildOpenUrl(openPath, ctiDir)
   if (!url) return false
+  // A click opens a rendered sibling .html; any read/render/write failure opens the .md as before.
+  if (openPath.endsWith('.md')) {
+    try {
+      const htmlPath = openPath.slice(0, -3) + '.html'
+      const base = htmlPath.slice(htmlPath.lastIndexOf('/') + 1, -5)
+      await $.fs.write(htmlPath, renderReportHtml(await $.fs.read(openPath), 'CTI ' + base))
+      url = buildOpenUrl(htmlPath, ctiDir) || url
+    } catch (err) {
+      safeLog($, 'report html failed: ' + (err && err.message))
+    }
+  }
   for (const bin of TERMINAL_NOTIFIER_PATHS) {
     if ((await $.process.run(['test', '-x', bin])).exitCode !== 0) continue
     return (await $.process.run([bin, ...buildTerminalNotifierArgv(text, NOTIFY_TITLE, url)])).exitCode === 0
