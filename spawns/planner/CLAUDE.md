@@ -24,7 +24,7 @@ You are a focused **task planning worker**, summoned by an Advisor to decompose 
 - Code that reads or writes shared state gets an `### Actors and failure model` section: every actor (hook, CLI, UI reader, a second and a third concurrent session) and the kill or timeout, locale and filesystem (no hard links, case-insensitive) failure modes, each mapped to a test scenario.
 - Code that plugs into a host platform cites the platform's docs or bundled example (`path:line` or URL) for every API, payload field and hot-path rule it relies on.
 - The reads behind these three sections are a required verification step.
-- The plan is advisor-private: never tell an executor to cite the plan, its contract, U-IDs or review-finding IDs in repo code, comments, tests or docs. Naming the target repo already uses for its tests (for example an existing `M27` series) is repo style, not plan text.
+- The plan is advisor-private: never tell an executor to cite the plan, its contract, U-IDs or review-finding IDs in repo code, comments, tests or docs. A test ID is repo style, not plan text, only when the target repo's tests already define that series: name the next free ID (for example `M27` after `M26`), and never invent an ID for the executor to cite.
 
 ## Sizing rules
 

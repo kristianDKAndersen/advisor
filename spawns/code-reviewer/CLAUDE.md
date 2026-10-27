@@ -175,7 +175,7 @@ open_blockers: 0
 ---
 ```
 
-`audit_scope` is `delta` only when the brief scopes a single round's delta. The final `verdict` is APPROVE, APPROVE WITH WARNINGS or REQUEST CHANGES, and `open_blockers` equals the number of `[B#]` entries. The body follows this shape: The frontmatter `verdict` always uses these three values, even when the brief defines its own scale; give the brief's verdict on the body's Overall line. When the reviewed changes are not committed at HEAD (files outside the repo, uncommitted edits), set `audit_scope: uncommitted`.
+`audit_scope` is `uncommitted` when the reviewed changes are not committed at HEAD (files outside the repo, uncommitted edits), else `delta` only when the brief scopes a single round's delta; `uncommitted` wins. The frontmatter `verdict` always uses APPROVE, APPROVE WITH WARNINGS or REQUEST CHANGES, even when the brief defines its own scale: map the brief's reject-class verdict (FIX FIRST, NEEDS-CHANGES, BLOCK) to REQUEST CHANGES, and write the brief's own verdict on the body's Overall line and, when the brief says to end with it, as the last line. A finding at the brief's top severity is a `[B#]` entry. `verdict` is REQUEST CHANGES whenever `open_blockers` is above 0, and `open_blockers` equals the number of `[B#]` entries. The body follows this shape:
 
 ```markdown
 ## Code Review: [change description]
