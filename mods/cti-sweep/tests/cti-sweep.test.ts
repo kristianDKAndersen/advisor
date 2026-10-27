@@ -971,3 +971,155 @@ test('safeSweep: forced run with alerts shows one toast, scheduled keeps the ale
   expect(scheduled.notices.length).toBe(1)
   expect(scheduled.toasts).toEqual([scheduled.notices[0]])
 })
+
+// ─── Click-to-open notifications (terminal-notifier) ──────────────────
+
+import { buildOpenUrl, buildTerminalNotifierArgv, notify, deliverFresh } from '../hooks/register.js'
+
+const CTI_DIR = '/home/u/.advisor/cti'
+const BREW_TN = '/opt/homebrew/bin/terminal-notifier'
+const INTEL_TN = '/usr/local/bin/terminal-notifier'
+
+test('buildOpenUrl: file URL percent-encoded; null outside ctiDir, on traversal, or for the dir itself', () => {
+  expect(buildOpenUrl(CTI_DIR + '/2026-10-26.md', CTI_DIR)).toBe('file:///home/u/.advisor/cti/2026-10-26.md')
+  expect(buildOpenUrl('/Users/a b/.advisor/cti/feed 1.md', '/Users/a b/.advisor/cti')).toBe('file:///Users/a%20b/.advisor/cti/feed%201.md')
+  expect(buildOpenUrl('/home/u/.advisor/other/x.md', CTI_DIR)).toBe(null)
+  expect(buildOpenUrl('/home/u/.advisor/cti-evil/x.md', CTI_DIR)).toBe(null)
+  expect(buildOpenUrl(CTI_DIR + '/../secret.md', CTI_DIR)).toBe(null)
+  expect(buildOpenUrl(CTI_DIR + '/', CTI_DIR)).toBe(null)
+  expect(buildOpenUrl(CTI_DIR, CTI_DIR)).toBe(null)
+  expect(buildOpenUrl(undefined as never, CTI_DIR)).toBe(null)
+})
+
+test('buildTerminalNotifierArgv: one element per value, no -sender, flag-like text padded, no -open without a URL', () => {
+  const url = 'file:///home/u/.advisor/cti/2026-10-26.md'
+  expect(buildTerminalNotifierArgv('CTI: 1 alert', 'CTI sweep', url)).toEqual(['-title', 'CTI sweep', '-message', 'CTI: 1 alert', '-open', url, '-group', 'cti-sweep'])
+  const flagLike = buildTerminalNotifierArgv('-execute rm -rf ~', 'CTI sweep', url)
+  expect(flagLike[3]).toBe(' -execute rm -rf ~')
+  expect(buildTerminalNotifierArgv('[x] y', 'CTI sweep', url)[3]).toBe(' [x] y')
+  const spaced = buildOpenUrl('/Users/a b/.advisor/cti/feed 1.md', '/Users/a b/.advisor/cti')
+  expect(buildTerminalNotifierArgv('t', 'T', spaced)).toContain('file:///Users/a%20b/.advisor/cti/feed%201.md')
+  const none = buildTerminalNotifierArgv('t', 'T', buildOpenUrl('/etc/passwd', CTI_DIR))
+  expect(none).toEqual(['-title', 'T', '-message', 't', '-group', 'cti-sweep'])
+  expect(none).not.toContain('-open')
+  expect(flagLike).not.toContain('-sender')
+})
+
+// Stub $ for notify: `bins` are the terminal-notifier paths that exist, tnExit its exit code.
+function notifyHarness(opts: { sent?: boolean; bins?: string[]; tnExit?: number } = {}) {
+  const runs: string[][] = []
+  const $: any = {
+    env: { get: async () => '/home/u' },
+    process: {
+      run: async (argv: string[]) => {
+        runs.push(argv)
+        if (argv[0] === 'test') return { exitCode: (opts.bins ?? []).includes(argv[2]) ? 0 : 1 }
+        if (argv[0].endsWith('terminal-notifier')) return { exitCode: opts.tnExit ?? 0 }
+        return { exitCode: 0 }
+      },
+    },
+    ui: { log: () => {}, notify: async () => ({ isSent: opts.sent ?? false }), toast: async () => {} },
+  }
+  return { $, runs }
+}
+
+const REPORT = CTI_DIR + '/2026-10-26.md'
+const REPORT_URL = 'file://' + REPORT
+
+test('notify: $.ui.notify sent -> no process spawned at all', async () => {
+  const h = notifyHarness({ sent: true, bins: [BREW_TN] })
+  await notify(h.$, 'hello', undefined, REPORT)
+  expect(h.runs).toEqual([])
+})
+
+test('notify: not sent + openPath + homebrew terminal-notifier -> its argv, osascript not used', async () => {
+  const h = notifyHarness({ bins: [BREW_TN, INTEL_TN] })
+  await notify(h.$, 'hello', undefined, REPORT)
+  expect(h.runs).toEqual([['test', '-x', BREW_TN], [BREW_TN, ...buildTerminalNotifierArgv('hello', 'CTI sweep', REPORT_URL)]])
+})
+
+test('notify: only /usr/local/bin terminal-notifier exists -> it is used', async () => {
+  const h = notifyHarness({ bins: [INTEL_TN] })
+  await notify(h.$, 'hello', undefined, REPORT)
+  expect(h.runs.map(r => r[0])).toEqual(['test', 'test', INTEL_TN])
+})
+
+test('notify: terminal-notifier missing -> osascript fallback unchanged', async () => {
+  const h = notifyHarness({ bins: [] })
+  await notify(h.$, 'hello', undefined, REPORT)
+  expect(h.runs[h.runs.length - 1]).toEqual(buildOsascriptArgv('hello', 'CTI sweep'))
+  expect(h.runs.some(r => r[0].endsWith('terminal-notifier'))).toBe(false)
+})
+
+test('notify: terminal-notifier exits non-zero -> osascript fallback', async () => {
+  const h = notifyHarness({ bins: [BREW_TN], tnExit: 1 })
+  await notify(h.$, 'hello', undefined, REPORT)
+  expect(h.runs[h.runs.length - 1]).toEqual(buildOsascriptArgv('hello', 'CTI sweep'))
+})
+
+test('notify: no openPath, or openPath outside ctiDir -> osascript only, terminal-notifier never probed', async () => {
+  for (const p of [undefined, null, '/home/u/elsewhere/x.md', CTI_DIR + '/../x.md']) {
+    const h = notifyHarness({ bins: [BREW_TN] })
+    await notify(h.$, 'hello', undefined, p as never)
+    expect(h.runs).toEqual([buildOsascriptArgv('hello', 'CTI sweep')])
+  }
+})
+
+// Drive a sweep with a notifier that is not sent and record every spawned argv.
+function sweepNotifyRun(opts: { answer?: string | null; spawn?: object; reportExists?: boolean }) {
+  const h = sweepHarness({ answer: opts.answer, spawn: opts.spawn })
+  const runs: string[][] = []
+  h.$.ui.notify = async () => ({ isSent: false })
+  h.$.process.run = async (argv: string[]) => {
+    runs.push(argv)
+    if (argv[0] === 'test') return { exitCode: argv[2] === BREW_TN ? 0 : 1 }
+    return { exitCode: 0 }
+  }
+  if (opts.reportExists) h.$.fs.read = async () => '# existing report\n'
+  return { h, runs }
+}
+
+const tnRuns = (runs: string[][]) => runs.filter(r => r[0] === BREW_TN)
+
+test('call site: sweep result opens the day report', async () => {
+  const { h, runs } = sweepNotifyRun({ answer: sweepAnswer(['a1']) })
+  await safeSweep(h.$, false)
+  const tn = tnRuns(runs)
+  expect(tn.length).toBe(1)
+  expect(tn[0].slice(tn[0].indexOf('-open'), tn[0].indexOf('-open') + 2)).toEqual(['-open', REPORT_URL])
+})
+
+test('call site: sweep failure opens the day report only when it exists', async () => {
+  const absent = sweepNotifyRun({ spawn: { deny: 'no' } })
+  await safeSweep(absent.h.$, false)
+  expect(tnRuns(absent.runs)).toEqual([])
+  expect(absent.runs[absent.runs.length - 1][0]).toBe('osascript')
+  const present = sweepNotifyRun({ spawn: { deny: 'no' }, reportExists: true })
+  await safeSweep(present.h.$, false)
+  const tn = tnRuns(present.runs)
+  expect(tn.length).toBe(1)
+  expect(tn[0]).toContain(REPORT_URL)
+  expect(tn[0][4]).toMatch(/^CTI sweep failed: spawn refused/)
+})
+
+test('call site: feed alert opens the feed log; a failed log write omits -open', async () => {
+  const item = { at: SWEEP_NOW, feedId: 'kev', feed: 'CISA KEV', key: 'k', title: 'Bad', link: '', watch: true, kev: true, worthy: true }
+  const feedRun = async (writeFails: boolean) => {
+    const h = sweepHarness()
+    const runs: string[][] = []
+    h.$.ui.notify = async () => ({ isSent: false })
+    h.$.process.run = async (argv: string[]) => {
+      runs.push(argv)
+      return { exitCode: argv[0] === 'test' ? (argv[2] === BREW_TN ? 0 : 1) : 0 }
+    }
+    if (writeFails) h.$.fs.write = async () => { throw new Error('disk full') }
+    await deliverFresh(h.$, CTI_DIR, [item], SWEEP_NOW)
+    return runs
+  }
+  const ok = tnRuns(await feedRun(false))
+  expect(ok.length).toBe(1)
+  expect(ok[0]).toContain('file://' + CTI_DIR + '/feed-2026-10-26.md')
+  const failed = await feedRun(true)
+  expect(tnRuns(failed)).toEqual([])
+  expect(failed[failed.length - 1][0]).toBe('osascript')
+})

@@ -334,6 +334,28 @@ export function buildOsascriptArgv(text, title) {
   ]
 }
 
+const TERMINAL_NOTIFIER_PATHS = ['/opt/homebrew/bin/terminal-notifier', '/usr/local/bin/terminal-notifier']
+
+// file:// URL for openPath, or null unless it sits strictly inside ctiDir (no . or .. segments).
+export function buildOpenUrl(openPath, ctiDir) {
+  if (typeof openPath !== 'string' || typeof ctiDir !== 'string' || !ctiDir.startsWith('/')) return null
+  const prefix = ctiDir.replace(/\/+$/, '') + '/'
+  if (!openPath.startsWith(prefix) || openPath.length === prefix.length) return null
+  const segments = openPath.split('/').slice(1)
+  if (segments.some(s => s === '' || s === '.' || s === '..')) return null
+  return 'file://' + segments.map(s => '/' + encodeURIComponent(s)).join('')
+}
+
+// Args after the terminal-notifier binary. A leading '-' or '[' would be read as a flag, so pad it.
+// No -sender: it disables click actions. fileUrl null omits -open.
+export function buildTerminalNotifierArgv(text, title, fileUrl) {
+  const safeText = /^[-[]/.test(text) ? ' ' + text : text
+  const argv = ['-title', title, '-message', safeText]
+  if (fileUrl) argv.push('-open', fileUrl)
+  argv.push('-group', 'cti-sweep')
+  return argv
+}
+
 function reportEntry(f, isAlerted) {
   return [
     `### ${isAlerted ? '[ALERT] ' : ''}${f.title}`,
@@ -906,8 +928,12 @@ async function pollOne($, feed, dir, entry, now) {
   return { feed, entry: out, fresh }
 }
 
+function feedLogPath(ctiDir, now) {
+  return ctiDir + '/feed-' + localDateKey(now) + '.md'
+}
+
 async function appendFeedLog($, ctiDir, items, now) {
-  const path = ctiDir + '/feed-' + localDateKey(now) + '.md'
+  const path = feedLogPath(ctiDir, now)
   let existing = ''
   try {
     existing = await $.fs.read(path)
@@ -917,16 +943,18 @@ async function appendFeedLog($, ctiDir, items, now) {
   await $.fs.write(path, existing.replace(/\s+$/, '') + '\n' + items.map(feedLogLine).join('\n') + '\n')
 }
 
-async function deliverFresh($, ctiDir, fresh, now) {
+export async function deliverFresh($, ctiDir, fresh, now) {
+  let logged = false
   try {
     await appendFeedLog($, ctiDir, fresh, now)
+    logged = true
   } catch (err) {
     safeLog($, 'feed log write failed: ' + (err && err.message))
   }
   await $.store.set('feedRecent', mergeRecent(await $.store.get('feedRecent'), fresh))
   const toastText = buildFeedToast(fresh.length, fresh.filter(i => i.watch).length)
   const note = buildFeedNotification(fresh)
-  if (note) await notify($, note, toastText)
+  if (note) await notify($, note, toastText, logged ? feedLogPath(ctiDir, now) : null)
   else
     try {
       await $.ui.toast(toastText)
@@ -1047,10 +1075,23 @@ function waitForAnswer($, agentId) {
 }
 
 // toastText null skips the toast (a forced run's done toast already reports the alerts).
-async function notify($, text, toastText = text) {
+// openPath (a report under ctiDir) makes a click open it, via terminal-notifier when installed.
+async function sendWithTerminalNotifier($, text, openPath) {
+  const url = buildOpenUrl(openPath, await ctiDirOf($))
+  if (!url) return false
+  for (const bin of TERMINAL_NOTIFIER_PATHS) {
+    if ((await $.process.run(['test', '-x', bin])).exitCode !== 0) continue
+    return (await $.process.run([bin, ...buildTerminalNotifierArgv(text, NOTIFY_TITLE, url)])).exitCode === 0
+  }
+  return false
+}
+
+export async function notify($, text, toastText = text, openPath = null) {
   try {
     const sent = await $.ui.notify(text, { title: NOTIFY_TITLE })
-    if (!sent.isSent) await $.process.run(buildOsascriptArgv(text, NOTIFY_TITLE))
+    if (!sent.isSent && !(openPath && (await sendWithTerminalNotifier($, text, openPath)))) {
+      await $.process.run(buildOsascriptArgv(text, NOTIFY_TITLE))
+    }
   } catch (err) {
     safeLog($, 'notify failed: ' + (err && err.message))
   }
@@ -1105,12 +1146,19 @@ async function runSweep($, force) {
     await $.store.set('digest', digest)
     await $.store.set(key, { status: 'done', startedAt: now, finishedAt, attempts: attempt })
     const note = buildNotification(alerts, watchlist)
-    if (note) await notify($, note.text, force ? null : undefined)
+    if (note) await notify($, note.text, force ? null : undefined, reportPath)
     return { ok: true, alerts: alerts.length, findings: parsed.findings.length, alertsToday: digest.alerts.length, reportPath }
   } catch (err) {
     safeLog($, 'sweep failed: ' + (err && err.message))
     await $.store.set(key, { status: 'failed', startedAt: now, finishedAt: await $.clock.now(), attempts: attempt })
-    await notify($, 'CTI sweep failed: ' + sanitizeText(String(err && err.message), 120))
+    const failedReport = ctiDir + '/' + date + '.md'
+    let reportExists = true
+    try {
+      await $.fs.read(failedReport)
+    } catch {
+      reportExists = false
+    }
+    await notify($, 'CTI sweep failed: ' + sanitizeText(String(err && err.message), 120), undefined, reportExists ? failedReport : null)
     return { ok: false, reason: 'failed' }
   }
 }
