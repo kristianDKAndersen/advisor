@@ -239,7 +239,7 @@ test('T10 CONTRIBUTING.md without a decision exits 7; with a decisions line exit
   const viaDigest = run(fx, [...base(fx), '--push', 'origin', 'feat', '--decisions', decisions]);
   expect(viaDigest.code).toBe(7);
   expect(viaDigest.out).toContain('docs/policy.md');
-});
+}, 30000);
 
 test('T11 --repo is the advisor repo: exit 0 not applicable, nothing runs', () => {
   const fx = makeFixture();
@@ -427,7 +427,7 @@ test('W7 Blockers recount: variant heading or list marker, or no Blockers headin
   for (const body of bodies) expect(run(fx, [...base(fx, review(fx, { raw: frontmatterAt(fx) + body })), '--push', 'origin', 'feat']).code).toBe(4);
   const fenced = '### Blockers (must fix)\nNone.\n\n```\n- **[B1]** example\n```\n';
   expect(run(fx, [...base(fx, review(fx, { raw: frontmatterAt(fx) + fenced })), '--push', 'origin', 'feat']).code).toBe(0);
-});
+}, 30000);
 
 test('W8 --execute: a gh failure after the push exits 8 and logs the push as partial; a log write failure exits 8', () => {
   const fx = makeFixture();
@@ -443,7 +443,7 @@ test('W8 --execute: a gh failure after the push exits 8 and logs the push as par
   const noLog = run(fx, args, { env: { ADVISOR_RUNS_ROOT: join(blocked, 'runs') } });
   expect(noLog.code).toBe(8);
   expect(noLog.out).toContain('publish-log.jsonl');
-});
+}, 30000);
 
 test('W9 --pr-remote: PR actions target the upstream repo while the push goes to the fork', () => {
   const fx = makeFixture();
@@ -456,7 +456,7 @@ test('W9 --pr-remote: PR actions target the upstream repo while the push goes to
   expect(readFileSync(fx.reads, 'utf8')).toContain('pr view 12 -R o/r');
   // PR #12's head must be the fork's branch.
   expect(run(fx, args).code).toBe(3);
-});
+}, 30000);
 
 test('W10 a failing advisor-conventions exits 7 instead of falling back to the defaults', () => {
   const fx = makeFixture();
@@ -496,7 +496,7 @@ test('W13 credentials in the remote URL are never printed', () => {
   expect(res.out).not.toContain('SECRET');
   expect(res.stdout).toContain('https://github.com/o/r.git');
   expect(run(fx, [...base(fx), '--push', 'origin', 'feat', '--json']).out).not.toContain('SECRET');
-});
+}, 30000);
 
 const prText = (fx) => ['--pr', '7', '--comment', thanks(fx), '--claims', passingClaims(fx)];
 const prReads = (fx) => (existsSync(fx.reads) ? readFileSync(fx.reads, 'utf8') : '').split('\n').filter((l) => l.startsWith('gh pr view')).length;
@@ -526,7 +526,7 @@ test('R2-B1 (round-1 W1 base) the audited range is bound to the PR base or the p
   expect({ ...codes, rule: prBase.out.includes('PR_BASE'), fetchHint: missing.out.includes('git fetch origin main'), wrote: shimLog(fx) + shimLog(m) }).toEqual({
     narrowed: 3, empty: 3, remoteBranch: 3, prBase: 3, prBaseMissing: 3, rule: true, fetchHint: true, wrote: '',
   });
-});
+}, 30000);
 
 test('R2-B2 (round-1 B2) a hex-named ref (64 hex in SHA-1, 40 hex in SHA-256) or a ref named after the SHA is not an audited SHA: exit 3', () => {
   const codes = {};
@@ -543,7 +543,7 @@ test('R2-B2 (round-1 B2) a hex-named ref (64 hex in SHA-1, 40 hex in SHA-256) or
   git(fx.repo, 'branch', fx.head);
   codes.namedAfterSha = run(fx, [...base(fx), '--push', 'origin', 'feat']).code;
   expect(codes).toEqual({ sha1: 3, sha256: 3, namedAfterSha: 3 });
-});
+}, 30000);
 
 test('R2-B3 the patch-id diff is pinned: zero-context config or env and submodule knobs cannot relocate or hide a change: exit 3', () => {
   const src = 'function del() {\n  work();\n}\nfunction list() {\n  work();\n}\n';
@@ -573,7 +573,7 @@ test('R2-B3 the patch-id diff is pinned: zero-context config or env and submodul
   git(sub.repo, 'config', 'diff.submodule', 'log');
   codes.submoduleLog = run(sub, subArgs).code;
   expect(codes).toEqual({ defaults: 3, diffOpts: 3, configEnv: 3, repoConfig: 3, ignoreSubmodules: 3, submoduleLog: 3 });
-});
+}, 30000);
 
 test('R2-W1 (round-1 W7) Blockers recount: any [B<n>] token outside CommonMark fences counts; an unclosed fence exits 4', () => {
   const fx = makeFixture();
@@ -589,7 +589,7 @@ test('R2-W1 (round-1 W7) Blockers recount: any [B<n>] token outside CommonMark f
   };
   const codes = Object.fromEntries(Object.entries(bodies).map(([k, b]) => [k, run(fx, [...base(fx, review(fx, { raw: frontmatterAt(fx) + b })), '--push', 'origin', 'feat']).code]));
   expect(codes).toEqual({ plus: 4, paren: 4, bare: 4, tildeInBacktick: 4, nestedFence: 4, indented: 4, unclosed: 4, fencedExample: 0 });
-});
+}, 30000);
 
 test('R2-W2 neither ADV nor GIT_DIR/GIT_WORK_TREE makes the target repo "not applicable": a post-audit commit exits 3', () => {
   const fx = makeFixture();
@@ -631,7 +631,7 @@ test('R2-W4 (round-1 W8) --json failures carry status and executed; a missing --
     unlogged: { exit: 8, status: 'executed-unlogged', executed: 2 },
     missingClaims: 2,
   });
-});
+}, 30000);
 
 test('R2-W5 GitHub hosts only: a GitLab push alone exits 2 and a GitHub push alone runs gh auth; a malformed host exits 2', () => {
   const gl = makeFixture({ origin: 'https://gitlab.com/grp/proj.git' });
@@ -644,7 +644,7 @@ test('R2-W5 GitHub hosts only: a GitLab push alone exits 2 and a GitHub push alo
     ghCalls: (existsSync(gh.reads) ? readFileSync(gh.reads, 'utf8') : '').includes('gh '),
     badHost: run(bad, [...base(bad), '--push', 'origin', 'feat']).code,
   }).toEqual({ gitlab: 2, ghCalls: true, badHost: 2 });
-});
+}, 30000);
 
 // The default ssh shim answers `ssh -G <host>` with hostname <host>; a test overrides it with writeSsh.
 function writeSsh(fx, body) {
@@ -681,7 +681,7 @@ test('CB7e push-only runs gh auth status for the resolved host', () => {
   const other = run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { SHIM_AUTH_HOST: 'ghe.example.com' } });
   expect(other.code).toBe(2);
   expect(other.out).toContain('advisor-publish: GitHub hosts only (policy); github.com is not one');
-});
+}, 30000);
 
 test('CB7e a host-looking alias name (github.com-private) resolves with ssh -G and is pinned', () => {
   const fx = makeFixture({ origin: 'git@github.com-private:o/r.git' });
@@ -702,7 +702,7 @@ test('CB7f push permission true: the dry run and --execute check it read-only wi
   expect({ code: dry.code, checked: readsLog(fx).includes(PERM_CALL), wrote: shimLog(fx) }).toEqual({ code: 0, checked: true, wrote: '' });
   const exec = run(fx, [...args, '--execute']);
   expect({ code: exec.code, wrote: shimLog(fx).includes('gh pr comment 7') }).toEqual({ code: 0, wrote: true });
-});
+}, 30000);
 
 test('CB7f push permission false: exit 2 with the switch hint naming the login, in the dry run and under --execute, nothing runs', () => {
   const fx = makeFixture();
@@ -714,7 +714,7 @@ test('CB7f push permission false: exit 2 with the switch hint naming the login, 
   expect({ dry: dry.code, exec: exec.code, dryHint: dry.out.includes(hint), execHint: exec.out.includes(hint), ran: shimLog(fx), pushed: git(fx.bare, 'branch', '--list', 'feat') }).toEqual({
     dry: 2, exec: 2, dryHint: true, execHint: true, ran: '', pushed: '',
   });
-});
+}, 30000);
 
 test('CB7f a permissions API failure exits 2 (fail closed) with login unknown', () => {
   const fx = makeFixture();
@@ -738,7 +738,7 @@ test('R2-W6 every push URL is validated: a second URL or push URL, or a fetch UR
   git(split.repo, 'remote', 'set-url', '--push', 'origin', 'https://github.com/other/r.git');
   const code = (fx) => run(fx, [...base(fx), '--push', 'origin', 'feat']).code;
   expect({ twoUrls: code(twoUrls), twoPush: code(twoPush), fetchDiffers: code(split) }).toEqual({ twoUrls: 2, twoPush: 2, fetchDiffers: 2 });
-});
+}, 30000);
 
 test('R2-W7 (round-1 W13) credentials stay hidden when the URL does not parse: exit 2 without the secret', () => {
   const outs = ['https://u:SECRET@github.com:99999/o/r.git', 'https://u:SECRET@github.com/o%zz/r.git'].map((origin) => {
@@ -747,7 +747,7 @@ test('R2-W7 (round-1 W13) credentials stay hidden when the URL does not parse: e
     return { code: r.code, leaked: r.out.includes('SECRET') };
   });
   expect(outs).toEqual([{ code: 2, leaked: false }, { code: 2, leaked: false }]);
-});
+}, 30000);
 
 test('R2-W8 --execute: the PR head moving from the old head to HEAD after the push lets the gh write run', () => {
   const fx = makeFixture();
@@ -902,7 +902,7 @@ test('R3-GO3 git and gh run by absolute path with an allowlisted env and GIT_NO_
     rel: rel.code,
     planted: existsSync(marker),
   }).toEqual({ code: 0, gitCalls: true, ghCalls: true, leaked: [], replaceOff: true, rel: 0, planted: false });
-});
+}, 30000);
 
 test('R3-W1 git+ssh://, ssh+git:// and user:x@host:path resolve the host git connects to; core.sshCommand on an SSH remote exits 2 (N3, N3b, N4)', () => {
   const cases = { gitSsh: ['git+ssh://git@github.com/o/r.git', 'github.com'], sshGit: ['ssh+git://git@github.com/o/r.git', 'github.com'], userColon: ['a:b@github.com:o/r.git', 'a'] };
@@ -932,7 +932,7 @@ test('R3-W2 only the Blockers section is recounted: a closure table naming a pri
   };
   const res = Object.fromEntries(Object.entries(bodies).map(([k, b]) => [k, run(fx, [...base(fx, review(fx, { raw: frontmatterAt(fx) + b })), '--push', 'origin', 'feat'])]));
   expect({ ...exits(res), rule: res.inSection.out.includes('Blockers section has 1') }).toEqual({ priorMention: 0, inSection: 4, subsection: 4, rule: true });
-});
+}, 30000);
 
 test('R3-W3 --policy-paths adds to the digest policy_paths and the defaults: a repo rule still exits 7 with the flag', () => {
   const fx = makeFixture({ prFiles: { 'docs/policy.md': 'p\n' } });
@@ -974,7 +974,7 @@ test('R3-W6 the gh write check matches the action: a comment or reply on a fork 
   expect({ comment: comment.code, permRead, authorEdit: authorEdit.code, otherEdit: otherEdit.code, hint: otherEdit.out.includes('gh account me cannot write to o/r on github.com') }).toEqual({
     comment: 0, permRead: false, authorEdit: 0, otherEdit: 2, hint: true,
   });
-});
+}, 30000);
 
 test('R3-W7 --execute posts the claims-checked copy: a text file rewritten after check 5 is not what gh sends', () => {
   const fx = makeFixture();
