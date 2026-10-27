@@ -177,6 +177,8 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
 
      Synthesis is recorded to ~/.advisor/runs/<sid>/synthesis.log and auto-closes the worker tab on success. **Coder builds - integrate before you synthesize**: see the 'Coder build durability' guardrail.
 
+     **Integration is a review, not a copy.** Before you Accept a coder change to a repo other than this one, read the full diff (not `--stat`) and run `bin/advisor-repo-hygiene`, `bin/advisor-revert-check`, `bin/advisor-prose-lint` and, for a guard or validation change, `bin/advisor-matrix-lint`. Return any defect beyond a one-line mechanical slip. Record every edit you make to worker output in `/synth --integration-edits`; two of one kind across runs trigger Prompt self-repair.
+
      **Two outcomes:** Accept (proceed to Step 8); Return (gap is material: spawn a fresh refinement worker with a precise defect list and `body.paths[0]` as prior context - not a re-explanation of the brief or the re-embedded result body). Cap at two Return rounds per task, evaluator-gated or not; past that, re-plan or ask the user. This cap is separate from the Step 7.5 2-failure lesson-extraction rule.
 
      **Fix the class, not the instance.** Restate each external review or audit finding as its defect class (a guard missing on a sibling entry point, a field validated unlike its twin) and have a code-reviewer search the whole PR for every instance before you write the fix brief. The brief lists every instance, plus a guard matrix for a guard or validation change: the planner's, or, when no planner ran, one the code-reviewer builds during that search.
