@@ -1,7 +1,7 @@
 ---
 scope: "lib/ — core advisor library modules: channel, summon, doc-queue, and related utilities"
-last_updated_by: "sid:1781303323-2aa9ef seq:3"
-last_updated_ts: "2026-06-13T15:15:44Z"
+last_updated_by: "sid:1793109249-9768ee seq:1"
+last_updated_ts: "2026-10-27T13:54:30Z"
 ---
 
 # lib/
@@ -38,3 +38,25 @@ Persistent JSONL queue for doc-agent work items.
 - `markProcessed()` — marks records processed by `{sid, seq}` key; spinlock-safe against concurrent enqueues
 - `queuePath()` — resolves to `~/.advisor/doc-queue.jsonl`
 - consumed by `lib/channel.js synthesize` (enqueue) and the doc-agent worker (dequeue/mark)
+
+## lib/hooks/publish-guard.js
+
+PreToolUse hook (Bash) that blocks raw `git`/`gh` publish commands so outward publishes go through `bin/advisor-publish`.
+
+- a string parser, not a sandbox: it guards against careless or prompt-injected agents only
+- exit 2 blocks (reason on stderr and stdout); malformed JSON exits 0; an internal error exits 2
+- wired into worker sessions by `lib/summon.js` (pinned by `tests/summon-gates.test.js`)
+
+## lib/hooks/worker-auto-close-match.js
+
+Prints `1` when a Bash PostToolUse event is a real, successful `result` send.
+
+- some command segment (split outside quotes/heredocs/comments) runs `channel.js send --type result` to the outbox, and the output has a `#<seq> [result]` marker or the outbox's last line is a result under 10s old
+
+## lib/sentences.js
+
+Markdown-aware sentence splitter shared by `bin/advisor-claims-check` and `bin/advisor-prose-lint`.
+
+- takes `[{line, text}]` entries and returns `[{sentence, line, endLine}]`
+- skips code fences (`opts.fences`, default true); strips list/quote/heading markers; joins wrapped paragraph lines; splits on `.` `!` `?` except after `e.g.` / `i.e.` / `vs.`
+- a table yields one sentence per body row (`opts.tableRows`, default true)
