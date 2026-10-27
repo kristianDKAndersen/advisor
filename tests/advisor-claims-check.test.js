@@ -195,3 +195,101 @@ test('bare invocation and --help print usage and exit 2', () => {
     expect(r.stdout + r.stderr).toContain('Usage: advisor-claims-check');
   }
 });
+
+// A table row is one sentence: its cells joined with ' | '. Ledger cells escape the pipes.
+const asCell = (s) => s.replace(/\|/g, '\\|');
+const TABLE_TEXT = [
+  '## Results',
+  '',
+  '| id | what | status |',
+  '|----|:----:|-------:|',
+  '| G1 | guard rejects empty input | tested |',
+  '| G2 | guard rejects bad path | tested |',
+  '| G3 | guard blocks symlinks | tested |',
+  '',
+].join('\n');
+const ROWS = ['G1 | guard rejects empty input | tested', 'G2 | guard rejects bad path | tested', 'G3 | guard blocks symlinks | tested'];
+const ledgerRows = (fx, rows) => rows.map((s, i) => [`C${i + 1}`, asCell(s), 'command', 'bun test', fx.sha]);
+
+test('a 3-row table with a ledger row per data row: exit 0', () => {
+  const fx = makeRepo();
+  const res = run(fx, { text: TABLE_TEXT, rows: ledgerRows(fx, ROWS) });
+  expect(res.json.findings).toEqual([]);
+  expect(res.code).toBe(0);
+});
+
+test('a table row missing from the ledger: exit 4 naming only that row', () => {
+  const fx = makeRepo();
+  const res = run(fx, { text: TABLE_TEXT, rows: ledgerRows(fx, [ROWS[0], ROWS[2]]) });
+  expect(res.code).toBe(4);
+  expect(rules(res)).toEqual(['UNCOVERED_SENTENCE']);
+  expect(res.json.findings[0].message).toContain(ROWS[1]);
+  expect(res.json.findings[0].line).toBe(6);
+});
+
+test('table header and separator rows never need ledger rows', () => {
+  const fx = makeRepo();
+  const res = run(fx, { text: TABLE_TEXT, rows: ledgerRows(fx, ROWS) });
+  expect(res.json.sentences.text).toBe(4);
+  expect(res.json.findings.map((f) => f.message).join('\n')).not.toMatch(/id \| what/);
+});
+
+test('a table inside a code fence is ignored; a table in --prior needs prior:<n> rows', () => {
+  const fx = makeRepo();
+  const fenced = run(fx, { text: `Plain words here.\n\n\`\`\`\n${TABLE_TEXT}\`\`\`\n` });
+  expect(fenced.code).toBe(0);
+  const prior = run(fx, { text: 'Nothing assertive here.\n', prior: [TABLE_TEXT] });
+  expect(prior.code).toBe(7);
+  expect(prior.json.findings.length).toBe(3);
+  const rows = ROWS.map((s, i) => [`prior:${i + 1}`, asCell(s), 'command', 'bun test', fx.sha]);
+  expect(run(fx, { text: 'Nothing assertive here.\n', prior: [TABLE_TEXT], rows }).code).toBe(0);
+});
+
+// --- end to end with the real bin/advisor-revert-check -------------------------
+
+const REVERT = join(__dirname, '..', 'bin', 'advisor-revert-check');
+const GUARD_BASE = 'exports.check = (s) => {\n  return true;\n};\n';
+const GUARD_HEAD = 'exports.check = (s) => {\n  if (!s) return false;\n  return true;\n};\n';
+const TEST_NAME = 'G1 guard rejects empty input';
+
+// Base has the unguarded module; head adds the guard and one bun test.
+function makeGuardRepo(testBody) {
+  const dir = mkdtempSync(join(tmpdir(), 'claims-check-e2e-'));
+  scratch.push(dir);
+  const repo = join(dir, 'repo');
+  mkdirSync(repo, { recursive: true });
+  git(repo, 'init', '-q');
+  writeFileSync(join(repo, 'guard.js'), GUARD_BASE);
+  const base = commitAll(repo, 'base');
+  writeFileSync(join(repo, 'guard.js'), GUARD_HEAD);
+  writeFileSync(join(repo, 'guard.test.js'), `const { test, expect } = require('bun:test');\nconst { check } = require('./guard.js');\ntest('${TEST_NAME}', () => {\n  ${testBody}\n});\n`);
+  const sha = commitAll(repo, 'head');
+  return { dir, repo, base, sha };
+}
+
+function revertReport(fx) {
+  const r = spawnSync('bun', [REVERT, '--repo', fx.repo, '--base', fx.base, '--head', fx.sha, '--test-cmd', 'bun test', '--json'], { encoding: 'utf8' });
+  return { status: r.status, report: JSON.parse(r.stdout) };
+}
+
+test('e2e: a test that asserts the guard KILLS the hunk and the fixed claim passes (exit 0)', () => {
+  const fx = makeGuardRepo("expect(check('')).toBe(false);");
+  const { status, report } = revertReport(fx);
+  expect(status).toBe(0);
+  expect(report.hunks.map((h) => h.status)).toEqual(['KILLED']);
+  const s = `${TEST_NAME} is fixed.`;
+  const res = run(fx, { text: `${s}\n`, rows: [['C1', s, 'test', TEST_NAME, fx.sha]], report });
+  expect(res.json.findings).toEqual([]);
+  expect(res.code).toBe(0);
+});
+
+test('e2e: a test that does not assert the guard SURVIVES and the fixed claim is UNPROVEN_FIX (exit 6)', () => {
+  const fx = makeGuardRepo('expect(typeof check).toBe(\'function\');');
+  const { status, report } = revertReport(fx);
+  expect(status).toBe(1);
+  expect(report.hunks.map((h) => h.status)).toEqual(['SURVIVED']);
+  const s = `${TEST_NAME} is fixed.`;
+  const res = run(fx, { text: `${s}\n`, rows: [['C1', s, 'test', TEST_NAME, fx.sha]], report });
+  expect(res.code).toBe(6);
+  expect(rules(res)).toEqual(['UNPROVEN_FIX']);
+});

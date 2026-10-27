@@ -21,6 +21,14 @@
 //   6. every assertive sentence in --prior needs a prior:<n> row  exit 7 PRIOR_UNCHECKED
 // Check 1 stops the run: a stale ledger proves nothing about the other checks.
 //
+// Tables: in a --text or --prior file a contiguous block of lines starting with '|' is a
+// table (code fences win). Its first row (header) and any separator row (`|---|:-:|`) are
+// skipped. Each other row is ONE sentence: cells split on unescaped '|', each trimmed,
+// joined with ' | ', whitespace runs collapsed, no trailing-punctuation split. A row is
+// assertive by the prose rules. A ledger sentence cell must match that string; since the
+// ledger is itself a pipe table, write each pipe in the cell as `\|`
+// (row `| G1 | guard rejects x | tested |` -> cell `G1 \| guard rejects x \| tested`).
+//
 // Spec deviation (M2 hunks carry no test name): in check 5 a test row is PROVEN iff
 // some KILLED hunk's excerpt contains the row's evidence string verbatim
 // (case-sensitive substring). Report hunks are {file,old_start,new_start,added,removed,status,excerpt}.
@@ -117,11 +125,14 @@ function readOrExit(path) {
 const EVIDENCE_TYPES = new Set(['file_line', 'test', 'command', 'exhaustive']);
 const norm = (s) => s.replace(/\s+/g, ' ').trim();
 
+// Cells of a markdown table row; `\|` is a literal pipe inside a cell.
+const splitRow = (line) => line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, '|').trim());
+
 function parseLedger(path) {
   const rows = [];
   readOrExit(path).split('\n').forEach((line, i) => {
     if (!line.trim().startsWith('|')) return;
-    const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+    const cells = splitRow(line);
     if (cells.every((c) => /^:?-+:?$/.test(c))) return;
     if (cells[0].toLowerCase() === 'id' && cells[2] && cells[2].toLowerCase() === 'evidence_type') return;
     if (cells.length !== 5) usageExit(`${path}:${i + 1} ledger row needs 5 columns, got ${cells.length}`);
@@ -167,13 +178,25 @@ function splitSentences(content) {
     const n = norm(s);
     if (n && /[A-Za-z0-9]/.test(n)) out.push({ sentence: n, line });
   };
+  let inTable = false;
   content.split('\n').forEach((raw, i) => {
     if (/^\s*(```|~~~)/.test(raw)) {
       flush();
+      inTable = false;
       inFence = !inFence;
       return;
     }
     if (inFence) return;
+    if (raw.trim().startsWith('|')) {
+      flush();
+      const wasTable = inTable;
+      inTable = true;
+      if (!wasTable) return; // header row
+      const cells = splitRow(raw);
+      if (!cells.every((c) => /^:?-+:?$/.test(c))) push(cells.join(' | '), i + 1);
+      return;
+    }
+    inTable = false;
     if (!raw.trim()) return flush();
     const isItem = /^\s*([-*+]|\d+[.)])\s+/.test(raw);
     const stripped = raw.replace(/^\s*(>\s*)*/, '').replace(/^(#{1,6}\s+|([-*+]|\d+[.)])\s+)/, '');
