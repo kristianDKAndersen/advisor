@@ -30,6 +30,11 @@
 //      repo; GitHub hosts only (policy): every action, a push alone included, needs the remote's
 //      host to pass `gh auth status`; an scp-style or ssh:// host is first resolved with
 //      `ssh -G` (its `hostname` line), so an SSH alias never reaches gh                exit 2;
+//      a gh action (PR body, comment, reply) also needs the gh account active on that host to
+//      have push rights: read-only `gh api repos/<o>/<r> --jq .permissions.push` must print
+//      exactly true, in the dry run too and before any action; anything else, an API
+//      failure included, names the account (`gh api user`) and a gh auth switch hint exit 2;
+//      push only skips it (the SSH key decides)
 //      PR <n>'s head is HEAD (no --push) or the pushed branch of the push repo     exit 3 PR_HEAD;
 //      with a PR, merge-base(HEAD, its baseRefOid) is the merge-base of check 3; push only,
 //      --target is the commit `git ls-remote` reports for the remote's HEAD or the pushed branch
@@ -76,6 +81,9 @@ paths for the PR (merge-base(HEAD, target)..HEAD), then prints (dry run) or runs
 (--execute) the push and gh commands. At least one action is required.
 GitHub hosts only (policy): the remote's host must pass gh auth status for every action, a
 push alone included; an SSH host alias is resolved with ssh -G first.
+gh write check: for --body, --comment and --reply the gh account active on the PR repo's host
+must have push rights (gh api repos/<o>/<r> --jq .permissions.push prints true), in the dry run
+too; otherwise exit 2 with: gh auth switch --hostname <host>. Push alone skips this check.
 
 Exit codes: 0 pass, 2 usage or unresolvable remote, 3 stale or missing audit or PR head
 mismatch, 4 verdict or Blockers, 5 claims, 6 advisor artifacts, 7 policy path without
@@ -388,6 +396,17 @@ const prRemoteName = opts.prRemote || (opts.push ? opts.push.remote : 'origin');
 const pushRemote = opts.push ? resolveRemote(opts.push.remote) : null;
 const prRemote = texts.length === 0 ? null : pushRemote && pushRemote.name === prRemoteName ? pushRemote : resolveRemote(prRemoteName);
 const ghEnv = prRemote && { GH_HOST: prRemote.host, GH_REPO: prRemote.slug };
+
+// gh uses one active account per host, so a gh write needs that account to hold push rights on the
+// PR repo; anything but exactly `true` (an API failure included) fails closed. Push only skips it.
+if (prRemote) {
+  const can = run('gh', ['api', `repos/${prRemote.slug}`, '--hostname', prRemote.host, '--jq', '.permissions.push'], { allowFail: true, env: ghEnv });
+  if (can.status !== 0 || (can.stdout || '').trim() !== 'true') {
+    const who = run('gh', ['api', 'user', '--hostname', prRemote.host, '--jq', '.login'], { allowFail: true, env: ghEnv });
+    const login = who.status === 0 && (who.stdout || '').trim() ? who.stdout.trim() : 'unknown';
+    usageExit(`gh account ${login} cannot write to ${prRemote.slug} on ${prRemote.host}; switch with: gh auth switch --hostname ${prRemote.host}`);
+  }
+}
 
 // PR <n> must be the PR under audit: its head is H (or, before a push, the pushed branch) and its
 // base gives the merge-base check 3 bound the audit to.

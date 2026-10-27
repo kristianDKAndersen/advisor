@@ -66,6 +66,8 @@ function makeFixture({ prFiles = { 'src/a.js': 'a\n' }, origin = ORIGIN_URL, bas
       `if [ "$1 $2" = "pr view" ]; then\n  echo "gh $* | GH_HOST=$GH_HOST" >> "${reads}"\n  head=\${SHIM_PR_HEAD:-$(git rev-parse HEAD)}\n` +
       `  if [ -n "$SHIM_PR_HEADS" ]; then\n    n=$(grep -c '^gh pr view' "${reads}")\n    set -- $SHIM_PR_HEADS\n    while [ "$n" -gt 1 ] && [ $# -gt 1 ]; do shift; n=$((n - 1)); done\n    head=$1\n  fi\n` +
       `  printf '{"headRefOid":"%s","headRefName":"%s","headRepository":{"name":"r"},"headRepositoryOwner":{"login":"%s"},"baseRefName":"%s","baseRefOid":"%s","state":"%s"}\\n' "$head" "\${SHIM_PR_BRANCH:-feat}" "\${SHIM_PR_OWNER:-o}" "\${SHIM_PR_BASE_NAME:-main}" "\${SHIM_PR_BASE_OID:-$(git rev-parse main)}" "\${SHIM_PR_STATE:-OPEN}"\n  exit 0\nfi\n` +
+      `if [ "$1" = api ] && [ "$2" != -X ]; then\n  echo "gh $* | GH_HOST=$GH_HOST | GH_REPO=$GH_REPO" >> "${reads}"\n  [ -n "$SHIM_PERM_FAIL" ] && exit 1\n` +
+      `  if [ "$2" = user ]; then echo "\${SHIM_LOGIN:-me}"; else echo "\${SHIM_PERM_PUSH:-true}"; fi\n  exit 0\nfi\n` +
       `echo "gh $* | GH_REPO=$GH_REPO | GH_HOST=$GH_HOST | cwd=$(pwd)" >> "${log}"\n[ -n "$SHIM_GH_FAIL" ] && exit 1\nexit 0\n`,
   );
   write(
@@ -670,6 +672,51 @@ test('CB7e push-only runs gh auth status for the resolved host', () => {
   const other = run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { SHIM_AUTH_HOST: 'ghe.example.com' } });
   expect(other.code).toBe(2);
   expect(other.out).toContain('advisor-publish: GitHub hosts only (policy); github.com is not one');
+});
+
+test('CB7e a host-looking alias name (github.com-private) resolves with ssh -G and is pinned', () => {
+  const fx = makeFixture({ origin: 'git@github.com-private:o/r.git' });
+  writeSsh(fx, 'if [ "$1" = -G ] && [ "$2" = github.com-private ]; then printf "hostname github.com\\n"; exit 0; fi\nexit 255');
+  const res = run(fx, [...base(fx), '--push', 'origin', 'feat', ...prText(fx)]);
+  expect(res.code).toBe(0);
+  expect(res.stdout).toContain('target o/r on github.com');
+  expect(res.stdout).not.toContain('GH_HOST=github.com-private');
+});
+
+const PERM_CALL = 'gh api repos/o/r --hostname github.com --jq .permissions.push | GH_HOST=github.com | GH_REPO=o/r';
+const readsLog = (fx) => (existsSync(fx.reads) ? readFileSync(fx.reads, 'utf8') : '');
+
+test('CB7f push permission true: the dry run and --execute check it read-only with the pinned host, then proceed', () => {
+  const fx = makeFixture();
+  const args = [...base(fx), '--push', 'origin', 'feat', ...prText(fx)];
+  const dry = run(fx, args);
+  expect({ code: dry.code, checked: readsLog(fx).includes(PERM_CALL), wrote: shimLog(fx) }).toEqual({ code: 0, checked: true, wrote: '' });
+  const exec = run(fx, [...args, '--execute']);
+  expect({ code: exec.code, wrote: shimLog(fx).includes('gh pr comment 7') }).toEqual({ code: 0, wrote: true });
+});
+
+test('CB7f push permission false: exit 2 with the switch hint naming the login, in the dry run and under --execute, nothing runs', () => {
+  const fx = makeFixture();
+  const hint = 'advisor-publish: gh account work-me cannot write to o/r on github.com; switch with: gh auth switch --hostname github.com';
+  const env = { SHIM_PERM_PUSH: 'false', SHIM_LOGIN: 'work-me' };
+  const args = [...base(fx), '--push', 'origin', 'feat', '--pr', '7', '--body', thanks(fx), '--comment', thanks(fx), '--reply', `99=${thanks(fx)}`, '--claims', passingClaims(fx)];
+  const dry = run(fx, args, { env });
+  const exec = run(fx, [...args, '--execute'], { env });
+  expect({ dry: dry.code, exec: exec.code, dryHint: dry.out.includes(hint), execHint: exec.out.includes(hint), ran: shimLog(fx), pushed: git(fx.bare, 'branch', '--list', 'feat') }).toEqual({
+    dry: 2, exec: 2, dryHint: true, execHint: true, ran: '', pushed: '',
+  });
+});
+
+test('CB7f a permissions API failure exits 2 (fail closed) with login unknown', () => {
+  const fx = makeFixture();
+  const res = run(fx, [...base(fx), '--pr', '7', '--comment', thanks(fx), '--claims', passingClaims(fx), '--execute'], { env: { SHIM_PERM_FAIL: '1' } });
+  expect({ code: res.code, hint: res.out.includes('advisor-publish: gh account unknown cannot write to o/r on github.com; switch with: gh auth switch --hostname github.com'), ran: shimLog(fx) }).toEqual({ code: 2, hint: true, ran: '' });
+});
+
+test('CB7f push-only never calls the permissions endpoint', () => {
+  const fx = makeFixture();
+  expect(run(fx, [...base(fx), '--push', 'origin', 'feat'], { env: { SHIM_PERM_PUSH: 'false', SHIM_PERM_FAIL: '1' } }).code).toBe(0);
+  expect(readsLog(fx)).not.toContain('gh api');
 });
 
 test('R2-W6 every push URL is validated: a second URL or push URL, or a fetch URL naming another repo, exits 2', () => {
