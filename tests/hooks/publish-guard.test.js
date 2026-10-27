@@ -42,7 +42,7 @@ function runHook(command, cwd, extraEnv = {}) {
 
 function expectBlocked(r) {
   expect(r.status).toBe(2);
-  expect(r.stdout).toMatch(/^publish-guard: .+ - publish through bin\/advisor-publish \(claude\.md, Publish gate\)$/m);
+  expect(r.stdout).toMatch(/^publish-guard: .+ - publish through bin\/advisor-publish \(claude\.md, Guardrails\)$/m);
 }
 
 function expectAllowed(r) {
@@ -53,7 +53,7 @@ describe('spec cases', () => {
   test('PG-1: blocks git push origin x in a non-advisor repo', () => {
     const r = runHook('git push origin x', other);
     expectBlocked(r);
-    expect(r.stdout).toBe('publish-guard: git push origin x - publish through bin/advisor-publish (claude.md, Publish gate)\n');
+    expect(r.stdout).toBe('publish-guard: git push origin x - publish through bin/advisor-publish (claude.md, Guardrails)\n');
   });
 
   test('PG-2: blocks cd <repo> && git push (cd tracked away from the advisor cwd)', () => {
@@ -345,5 +345,228 @@ describe('non-Bash and empty input', () => {
       env: { PATH: process.env.PATH, ADVISOR_SID: 'x' },
     });
     expectAllowed(r);
+  });
+});
+
+describe('review round 1 findings', () => {
+  const W = { ADVISOR_SID: 'x' };
+  const URL9 = 'https://github.com/me/advisor/pull/9';
+  let advWt, adv2, adv3, adv4;
+
+  beforeAll(() => {
+    const g = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
+    const both = [['origin', 'git@github.com:me/advisor.git'], ['upstream', 'https://github.com/org/ai-koala.git']];
+    const mk = (name, remotes) => {
+      const d = path.join(tmp, name);
+      execFileSync('git', ['init', '-q', '-b', 'main', d]);
+      for (const [n, u] of remotes) g(d, 'remote', 'add', n, u);
+      return d;
+    };
+    const advC = mk('adv-c', [both[0]]);
+    g(advC, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '--allow-empty', '-m', 'i');
+    advWt = path.join(tmp, 'adv-wt');
+    g(advC, 'worktree', 'add', '-q', '-b', 'ws/x', advWt);
+    adv2 = mk('adv2', both);
+    adv3 = mk('adv3', both);
+    g(adv3, 'config', 'remote.origin.gh-resolved', 'base');
+    adv4 = mk('adv4', both);
+    g(adv4, 'config', 'branch.main.pushRemote', 'upstream');
+  });
+
+  test.each([
+    `gh pr comment 5 --body "follow-up to ${URL9}"`,
+    `gh pr create --title t --body "ports ${URL9}"`,
+    `gh issue create -t t -b "see ${URL9}"`,
+    `gh pr comment 5 --body ${URL9}`,
+  ])('PG-70: B1 blocks %p from a non-advisor cwd (a URL in a text flag is not the target)', (cmd) => {
+    expectBlocked(runHook(cmd, other));
+  });
+
+  test('PG-70b: B1 mirror: a body citing another repo does not block an advisor-cwd comment', () => {
+    expectAllowed(runHook('gh pr comment 17 --body "see https://github.com/org/x/pull/1"', adv));
+    expectAllowed(runHook(`gh pr comment ${URL9} --body x`, other));
+  });
+
+  test('PG-70c: B1 a selector URL after a boolean flag still counts as a target', () => {
+    expectBlocked(runHook('gh pr merge -m https://github.com/org/ai-koala/pull/1', adv));
+  });
+
+  test.each([
+    'pr update-branch 5', 'pr lock 5', 'pr unlock 5', 'issue develop 5', 'repo fork org/ai-koala',
+    'repo deploy-key add k.pub', "repo autolink create X- 'https://x/<num>'", 'gist rename a.md b.md',
+  ])('PG-71: B2 blocks gh %s in a worker and from a non-advisor cwd', (cmd) => {
+    expectBlocked(runHook(`gh ${cmd}`, adv, W));
+    expectBlocked(runHook(`gh ${cmd}`, other));
+  });
+
+  test('PG-71b: B2/N1 read-only gh verbs and groups stay allowed in a worker', () => {
+    const reads = [
+      'gist clone abc', 'repo deploy-key list', 'repo autolink list', 'repo gitignore view Node',
+      'project item-list 1 --owner me', 'variable get X', 'ruleset view 1', 'attestation verify a.tgz -o me',
+      'search prs push', 'status', 'co 5', '--version', 'auth status', 'config get editor', 'alias list',
+      'run watch 1', 'release download v1', 'pr status', 'label list', 'cache list', 'codespace list', 'extension list',
+    ];
+    expectAllowed(runHook(reads.map(c => `gh ${c}`).join(' && '), adv, W));
+  });
+
+  test.each([
+    'cache delete --all', 'project item-add 1 --owner me --url x', 'ssh-key add k.pub', 'gpg-key add k.asc',
+    'codespace create -R org/ai-koala', 'agent-task create x', 'extension install o/gh-x', 'frobnicate 5',
+  ])('PG-72: W4 blocks gh %s in a worker', (cmd) => {
+    expectBlocked(runHook(`gh ${cmd}`, adv, W));
+  });
+
+  test('PG-72b: W4 account-level, org-level and unknown gh writes have no repo target', () => {
+    for (const cmd of ['ssh-key add k.pub', 'project item-add 1 --owner me --url x', 'secret set X --org o', 'secret set X --user', 'frobnicate 5']) {
+      expectBlocked(runHook(`gh ${cmd}`, adv));
+    }
+    expectBlocked(runHook("gh alias set c 'pr comment' && gh c 5 -b x", adv));
+    expectAllowed(runHook('gh cache delete --all', adv));
+  });
+
+  test.each([
+    'git subtree push --prefix=x origin main', 'git lfs push origin main', 'git send-pack origin main',
+    'git http-push https://x/r.git main', '/usr/libexec/git-core/git-push origin main', 'git-send-pack origin main',
+    'git send-email 0001.patch', 'git svn dcommit', 'git -c alias.p=push p', 'git --config-env=alias.p=P p',
+  ])('PG-73: W5 blocks %p in a worker and from the advisor cwd', (cmd) => {
+    expectBlocked(runHook(cmd, adv, W));
+    expectBlocked(runHook(cmd, adv));
+  });
+
+  test('PG-73b: W5 non-publish git forms stay allowed in a worker', () => {
+    expectAllowed(runHook('git stash push -m x && git -c push.default=current status && git subtree split --prefix=x && git lfs ls-files && git svn log', adv, W));
+  });
+
+  test.each([
+    'git push https://github.com/org/ai-koala main',
+    'git push --repo=https://github.com/org/ai-koala',
+    'git push ../ai-koala main',
+    'git push --receive-pack=x origin main',
+    'git -c remote.origin.pushurl=https://github.com/org/ai-koala push',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.url GIT_CONFIG_VALUE_0=https://github.com/org/ai-koala git push',
+    'git remote set-url origin https://github.com/org/ai-koala && git push',
+    'git config remote.origin.pushurl https://github.com/org/ai-koala; git push origin main',
+    'git push nosuchremote main',
+  ])('PG-74: W2 blocks %p from the advisor checkout (push destination, not checkout path)', (cmd) => {
+    expectBlocked(runHook(cmd, adv));
+  });
+
+  test('PG-74b: W2 git target identity is the push remote URL', () => {
+    expectAllowed(runHook('git push origin ws/x', advWt));
+    expectAllowed(runHook('git push -o ci.skip --force-with-lease origin main', adv));
+    expectAllowed(runHook('git push', adv2));
+    expectBlocked(runHook('git push upstream main', adv2));
+    expectBlocked(runHook('git push', adv4));
+    expectBlocked(runHook('git push origin main', adv, { GIT_CONFIG_PARAMETERS: "'remote.origin.url'='x'" }));
+  });
+
+  test('PG-75: W8 a gh cwd target needs every remote (or the gh-resolved one) to be the advisor repo', () => {
+    expectBlocked(runHook('gh pr comment 5 --body x', adv2));
+    expectAllowed(runHook('gh pr comment 5 --body x', adv3));
+  });
+
+  test.each([
+    `gh api graphql -f query='mutation{addComment(input:{subjectId:"X",body:"y"}){clientMutationId}}'`,
+    'gh api graphql -F query=@q.graphql',
+    'gh api graphql --input q.json',
+    'gh api graphql -f owner=me',
+    'gh api -X POST /user/repos -f name=x',
+    'gh api orgs/o/repos -f name=x',
+    'gh api -X PATCH gists/1 -f x=y',
+  ])('PG-76: W1 blocks %p from the advisor cwd (no repos/<o>/<r> target)', (cmd) => {
+    expectBlocked(runHook(cmd, adv));
+  });
+
+  test('PG-76b: W1 REST writes to repos/me/advisor resolve with a leading slash or a host', () => {
+    expectAllowed(runHook('gh api -X POST /repos/me/advisor/issues/1/comments -f body=x', other));
+    expectAllowed(runHook('gh api https://api.github.com/repos/me/advisor/issues/1/comments -f body=x', other));
+  });
+
+  test('PG-77: W3 GraphQL reads are allowed in a worker and from any cwd', () => {
+    for (const q of ["'{viewer{login}}'", "'query($n:Int!){viewer{login}}' -F n=1", '"query { repository(owner:\\"o\\",name:\\"r\\"){id} }"']) {
+      expectAllowed(runHook(`gh api graphql -f query=${q}`, adv, W));
+      expectAllowed(runHook(`gh api graphql -f query=${q}`, other));
+    }
+  });
+
+  test('PG-78: B3 deep $( nesting fails closed with a reason instead of crashing', () => {
+    const r = runHook('echo ' + '$('.repeat(5000) + ')'.repeat(5000) + '; git push', other, W);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toMatch(/^publish-guard: /);
+    expect(runHook('echo "' + '$(echo "'.repeat(3000) + '"; git push', other, W).status).toBe(2);
+  });
+
+  test('PG-78b: B3 size caps fail closed', () => {
+    expect(runHook('echo a; '.repeat(140000), other).status).toBe(2);
+    expect(runHook('git push origin main; '.repeat(60), adv).status).toBe(2);
+  });
+
+  test.each([
+    "env -S 'git push'", 'find . -maxdepth 0 -exec git push \;', 'caffeinate git push', 'stdbuf -oL git push',
+    'G=git; $G push', 'echo push | xargs git',
+  ])('PG-79: W6 blocks %p in a worker and from a non-advisor cwd', (cmd) => {
+    expectBlocked(runHook(cmd, other, W));
+    expectBlocked(runHook(cmd, other));
+  });
+
+  test.each([
+    '$(echo git) push', '${G:-git} push', '{git,push}', '/usr/bin/gi? push', '$"git" push',
+    `eval "$(printf 'git push')"`, 'gh auth token',
+  ])('PG-79b: W6 blocks the non-literal or token form %p in a worker', (cmd) => {
+    expectBlocked(runHook(cmd, other, W));
+  });
+
+  test('PG-79c: W6 literal and env-expanded programs stay allowed', () => {
+    expectAllowed(runHook('"$ADV/bin/capture" bun test && find . -name "*.js" -exec grep -l push {} + && gh auth status', adv, W));
+    expectAllowed(runHook('gh auth token', adv));
+  });
+
+  test('PG-80: W7 substitutions in an unquoted heredoc body are analyzed', () => {
+    expectBlocked(runHook('cat <<EOF\n$(git push)\nEOF', other, W));
+    expectBlocked(runHook('cat <<EOF\n`gh pr comment 5 -b x`\nEOF', other));
+    expectAllowed(runHook("cat <<'EOF'\n$(git push)\nEOF", other, W));
+    expectAllowed(runHook('cat <<"EOF"\n`git push`\nEOF', other, W));
+    expectAllowed(runHook('cat <<\\EOF\n$(git push)\nEOF', other, W));
+  });
+
+  test('PG-81: W9/W10 the block reason goes to stderr and stdout and cites an existing claude.md section', () => {
+    const r = runHook('git push origin x', other);
+    const msg = 'publish-guard: git push origin x - publish through bin/advisor-publish (claude.md, Guardrails)\n';
+    expect({ status: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ status: 2, stdout: msg, stderr: msg });
+  });
+
+  test.each([
+    "bin/advisor-publish --repo . --policy-paths 'docs/**' --execute",
+    "bin/advisor-publish --repo . --policy-paths='docs/**' --execute",
+    "bun bin/advisor-publish --repo . --policy-paths 'docs/**'",
+    "\"$ADV/bin/advisor-publish\" --policy-paths 'docs/**'",
+    "echo --policy-paths=x | xargs bin/advisor-publish --repo .",
+    'bash -c "bin/advisor-publish --policy-paths x"',
+  ])('PG-82: blocks advisor-publish with --policy-paths %p in a worker and from the advisor cwd', (cmd) => {
+    expectBlocked(runHook(cmd, adv, W));
+    expectBlocked(runHook(cmd, adv));
+  });
+
+  test.each([
+    'PATH=/tmp/x:$PATH bin/advisor-publish --repo . --execute',
+    'ADVISOR_RUNS_ROOT=/tmp bin/advisor-publish --repo . --execute',
+    'env PATH=/tmp/x bin/advisor-publish --repo . --execute',
+    'env -i bin/advisor-publish --repo . --execute',
+    'env -u HOME bun bin/advisor-publish --repo . --execute',
+    'export PATH=/tmp/x; bin/advisor-publish --repo . --execute',
+    'PATH=/tmp/x; bin/advisor-publish --repo . --execute',
+    'unset HOME && bin/advisor-publish --repo . --execute',
+    'exec -c bin/advisor-publish --repo .',
+    'sudo bin/advisor-publish --repo .',
+    'X=1 "$ADV/bin/advisor-publish" --repo .',
+  ])('PG-83: blocks advisor-publish after an env or PATH change %p in a worker and from the advisor cwd', (cmd) => {
+    expectBlocked(runHook(cmd, adv, W));
+    expectBlocked(runHook(cmd, adv));
+  });
+
+  test('PG-83b: plain advisor-publish forms stay allowed', () => {
+    const cmd = 'cd "$ADV" && n=1; bin/advisor-publish --repo . --execute && "$ADV/bin/advisor-publish" --repo . && bun bin/advisor-publish --repo .';
+    expectAllowed(runHook(cmd, adv, W));
+    expectAllowed(runHook(cmd, other));
   });
 });
