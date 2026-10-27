@@ -49,6 +49,10 @@
           {
             "type": "command",
             "command": "node $CLAUDE_PROJECT_DIR/lib/hooks/agents-md-lint.js --commit-gate"
+          },
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PROJECT_DIR/lib/hooks/publish-guard.js"
           }
         ]
       }
