@@ -1,0 +1,388 @@
+#!/usr/bin/env bun
+// bin/advisor-revert-check - hunk-revert mutation check: does any test fail when one hunk is undone?
+//
+// Usage:
+//   advisor-revert-check --repo <path> --base <ref> [--head <ref>] --test-cmd "<cmd>"
+//     [--include <glob,...>] [--exclude <glob,...>] [--max-hunks 60]
+//     [--timeout-per-run 300] [--allow-partial] [--json] [--out <file>]
+//
+// Reverse-applies each non-test, non-doc hunk of `git diff -U0 <base> <head>` one at a
+// time in a scratch worktree of <head>, runs --test-cmd, and classifies the hunk:
+//   KILLED    non-zero exit, no error signature (a test noticed the change)
+//   ERROR     non-zero exit and the output matches SyntaxError, Cannot find module,
+//             ModuleNotFoundError, ImportError, command not found or syntax error
+//   SURVIVED  exit 0 (no test noticed the change)
+//   TIMEOUT   the run exceeded --timeout-per-run
+//   NOT_RUN   beyond --max-hunks (only with --allow-partial, or in the exit 5 report)
+// A KILLED hunk's excerpt holds the runner's failure lines (bun "(fail) <name>", TAP
+// "not ok", jest "FAIL"/"●", pytest "FAILED", go "--- FAIL"), or the last 40 lines
+// when none is recognizable, so the failing test's name appears verbatim.
+//
+// Spec clarifications:
+//  1. Default excludes: **/test*/**, *.test.*, *_test.*, test-*.sh, *.md. --include narrows
+//     the candidates to matching paths, and those bypass the default excludes; --exclude
+//     always wins over --include.
+//  2. Exit 5 is decided before the baseline: nothing runs, every hunk is NOT_RUN. With
+//     --allow-partial the first N run and NOT_RUN hunks do not affect the exit code.
+//  3. Zero selected hunks is a vacuous pass: exit 0, but JSON gets "no_hunks": true and
+//     NO_HUNKS is printed on stderr and as the table line.
+//  4. --out always writes the JSON report; stdout follows --json.
+//  5. Report base/head are resolved full SHAs.
+// Output: one `path:line STATUS +added/-removed` line per hunk and a summary line, or
+// with --json one object {base, head, test_cmd, hunks:[{file,old_start,new_start,added,
+// removed,status,excerpt}], exit_code}; exit 3 and 5 add error/excerpt.
+//
+// Exit codes: 0 every hunk KILLED, 1 any SURVIVED/ERROR/TIMEOUT, 2 usage, 3 baseline
+// red (or timed out), 4 git/worktree failure, 5 more hunks than --max-hunks (unless
+// --allow-partial; extra hunks are listed NOT_RUN).
+// The scratch worktree lives under os.tmpdir() and is removed on exit, SIGINT and SIGTERM.
+// The target checkout is never modified; the repo's .git gains and loses one worktree entry.
+
+const { execFileSync, spawn } = require('node:child_process');
+const { mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { join, resolve, basename } = require('node:path');
+
+const USAGE = `Usage: advisor-revert-check --repo <path> --base <ref> [--head <ref>] --test-cmd "<cmd>"
+  [--include <glob,...>] [--exclude <glob,...>] [--max-hunks 60]
+  [--timeout-per-run 300] [--allow-partial] [--json] [--out <file>]
+
+Reverse-applies each non-test diff hunk between --base and --head in a scratch
+worktree, runs --test-cmd, and reports KILLED / ERROR / SURVIVED / TIMEOUT per hunk.
+
+Flags:
+  --repo <path>          Git repository to check
+  --base <ref>           Ref the diff starts from
+  --head <ref>           Ref the diff ends at and the scratch worktree is cut from (default: HEAD)
+  --test-cmd <cmd>       Shell command that must exit 0 on the unmodified head
+  --include <glob,...>   Whitelist; overrides the default test/doc excludes
+  --exclude <glob,...>   Always removes matching files
+  --max-hunks <n>        Hunk cap (default: 60)
+  --timeout-per-run <s>  Seconds per test run (default: 300)
+  --allow-partial        Run the first --max-hunks hunks, list the rest as NOT_RUN
+  --json                 Print one JSON object instead of one line per hunk
+  --out <file>           Also write the JSON report to <file>
+
+Exit codes: 0 all hunks killed, 1 survivor/error/timeout, 2 usage, 3 baseline red,
+4 git or worktree failure, 5 too many hunks.
+`;
+
+function usageExit(msg) {
+  if (msg) console.error(`advisor-revert-check: ${msg}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const opts = { head: 'HEAD', include: [], exclude: [], maxHunks: 60, timeout: 300, allowPartial: false, json: false };
+const argv = process.argv.slice(2);
+if (argv.length === 0 || argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(2);
+}
+const csv = (v) => v.split(',').map((s) => s.trim()).filter(Boolean);
+const posInt = (flag, v) => {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) usageExit(`${flag} needs an integer >= 1`);
+  return n;
+};
+while (argv.length > 0) {
+  const arg = argv.shift();
+  const val = () => {
+    const v = argv.shift();
+    if (v === undefined) usageExit(`${arg} needs a value`);
+    return v;
+  };
+  switch (arg) {
+    case '--repo': opts.repo = resolve(val()); break;
+    case '--base': opts.base = val(); break;
+    case '--head': opts.head = val(); break;
+    case '--test-cmd': opts.testCmd = val(); break;
+    case '--include': opts.include.push(...csv(val())); break;
+    case '--exclude': opts.exclude.push(...csv(val())); break;
+    case '--max-hunks': opts.maxHunks = posInt(arg, val()); break;
+    case '--timeout-per-run': opts.timeout = posInt(arg, val()); break;
+    case '--allow-partial': opts.allowPartial = true; break;
+    case '--json': opts.json = true; break;
+    case '--out': opts.out = val(); break;
+    default: usageExit(`unknown flag: ${arg}`);
+  }
+}
+if (!opts.repo || !opts.base || !opts.testCmd) usageExit('--repo, --base and --test-cmd are required');
+
+class Fail extends Error {
+  constructor(code, msg) {
+    super(msg);
+    this.code = code;
+  }
+}
+
+const MAX_OUT = 4 * 1024 * 1024;
+const git = (cwd, args, input) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'latin1', maxBuffer: 512 * 1024 * 1024, input, stdio: ['pipe', 'pipe', 'pipe'] });
+
+// --- file selection ------------------------------------------------------
+
+function globRe(g) {
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*') {
+      if (g[i + 1] === '*') {
+        i++;
+        if (g[i + 1] === '/') {
+          i++;
+          re += '(?:.*/)?';
+        } else re += '.*';
+      } else re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`);
+}
+// A glob without a slash matches the basename at any depth, like .gitignore.
+const matcher = (g) => {
+  const re = globRe(g);
+  return g.includes('/') ? (p) => re.test(p) : (p) => re.test(basename(p));
+};
+const DEFAULT_EXCLUDE = ['**/test*/**', '*.test.*', '*_test.*', 'test-*.sh', '*.md'].map(matcher);
+const includeM = opts.include.map(matcher);
+const excludeM = opts.exclude.map(matcher);
+const selected = (p) => {
+  if (excludeM.some((m) => m(p))) return false;
+  if (includeM.length > 0) return includeM.some((m) => m(p));
+  return !DEFAULT_EXCLUDE.some((m) => m(p));
+};
+
+// --- diff ----------------------------------------------------------------
+
+// Splits a -U0 diff into single-hunk patches: {file, header, lines, old_start, new_start, added, removed}.
+function parseDiff(text) {
+  const hunks = [];
+  let file = null;
+  let header = [];
+  let inHeader = false;
+  let cur = null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      const rest = line.slice('diff --git a/'.length);
+      if (line.startsWith('diff --git "') || (rest.length - 3) % 2 !== 0) throw new Fail(4, `unsupported path in diff header: ${line}`);
+      file = Buffer.from(rest.slice(0, (rest.length - 3) / 2), 'latin1').toString('utf8');
+      header = [line];
+      inHeader = true;
+      cur = null;
+      continue;
+    }
+    if (file === null) continue;
+    if (inHeader && !line.startsWith('@@ ')) {
+      header.push(line);
+      continue;
+    }
+    inHeader = false;
+    const m = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (m) {
+      cur = { file, header, lines: [line], old_start: Number(m[1]), new_start: Number(m[3]), removed: m[2] === undefined ? 1 : Number(m[2]), added: m[4] === undefined ? 1 : Number(m[4]) };
+      hunks.push(cur);
+    } else if (cur && line !== '') cur.lines.push(line);
+  }
+  return hunks;
+}
+
+const patchOf = (h) => `${h.header.join('\n')}\n${h.lines.join('\n')}\n`;
+
+// --- test runs -----------------------------------------------------------
+
+let activeChild = null;
+const killGroup = (child) => {
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {}
+};
+
+// Runs --test-cmd in its own process group so a timeout or signal also kills grandchildren.
+function runTests(cwd) {
+  return new Promise((done) => {
+    const child = spawn('/bin/sh', ['-c', opts.testCmd], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    activeChild = child;
+    let out = '';
+    let timedOut = false;
+    let finished = false;
+    let grace = null;
+    const take = (b) => {
+      out += b.toString('utf8');
+      if (out.length > MAX_OUT) out = out.slice(-MAX_OUT);
+    };
+    child.stdout.on('data', take);
+    child.stderr.on('data', take);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup(child);
+    }, opts.timeout * 1000);
+    const finish = (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      clearTimeout(grace);
+      killGroup(child);
+      activeChild = null;
+      done({ code: code === null ? 1 : code, timedOut, out });
+    };
+    child.on('error', (e) => {
+      out += String(e);
+      finish(127);
+    });
+    child.on('close', finish);
+    child.on('exit', (code) => {
+      grace = setTimeout(() => finish(code), 1000);
+    });
+  });
+}
+
+const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
+const ERROR_RE = /SyntaxError|Cannot find module|ModuleNotFoundError|ImportError|command not found|syntax error/;
+const FAIL_LINE_RE = /^\s*(\(fail\)|✗|✘|✕|not ok\b|FAIL\b|--- FAIL|FAILED\b|● )/;
+
+const classify = (r) => (r.timedOut ? 'TIMEOUT' : r.code === 0 ? 'SURVIVED' : ERROR_RE.test(r.out) ? 'ERROR' : 'KILLED');
+
+function excerptOf(status, out) {
+  const lines = out.replace(ANSI_RE, '').replace(/\r/g, '').split('\n').map((l) => l.replace(/\s+$/, ''));
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const tail = (n) => lines.slice(-n).join('\n');
+  if (status === 'KILLED') {
+    const fails = [...new Set(lines.filter((l) => FAIL_LINE_RE.test(l)).map((l) => l.trim()))].slice(0, 40);
+    return fails.length > 0 ? fails.join('\n') : tail(40);
+  }
+  if (status === 'ERROR') {
+    const errs = lines.filter((l) => ERROR_RE.test(l)).slice(0, 10);
+    return errs.length > 0 ? errs.join('\n') : tail(10);
+  }
+  return tail(status === 'SURVIVED' ? 5 : 10);
+}
+
+// --- scratch worktree ----------------------------------------------------
+
+const state = { tmp: null, wt: null, added: false };
+
+function cleanup() {
+  if (!state.tmp) return;
+  const { tmp, wt, added } = state;
+  state.tmp = null;
+  if (added) {
+    try {
+      git(opts.repo, ['worktree', 'remove', '--force', wt]);
+    } catch {
+      rmSync(tmp, { recursive: true, force: true });
+      try {
+        git(opts.repo, ['worktree', 'prune']);
+      } catch {}
+    }
+  }
+  rmSync(tmp, { recursive: true, force: true });
+}
+process.on('exit', cleanup);
+for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  process.on(sig, () => {
+    if (activeChild) killGroup(activeChild);
+    cleanup();
+    process.exit(code);
+  });
+}
+
+// Undo whatever the hunk apply or the test run changed in the scratch tree.
+function restore(wt) {
+  git(wt, ['checkout', '--', '.']);
+  git(wt, ['clean', '-fdq']);
+}
+
+// --- report --------------------------------------------------------------
+
+function report(exitCode, hunks, extra = {}) {
+  const body = { base: opts.baseSha, head: opts.headSha, test_cmd: opts.testCmd, hunks, exit_code: exitCode, ...extra };
+  if (opts.out) writeFileSync(opts.out, `${JSON.stringify(body, null, 2)}\n`);
+  const noHunks = 'NO_HUNKS: 0 hunks selected (check --base/--include)';
+  if (extra.no_hunks) console.error(noHunks);
+  if (opts.json) {
+    console.log(JSON.stringify(body));
+    return exitCode;
+  }
+  if (extra.no_hunks) console.log(noHunks);
+  for (const h of hunks) console.log(`${h.file}:${Math.max(h.new_start, 1)} ${h.status} +${h.added}/-${h.removed}`);
+  const counts = {};
+  for (const h of hunks) counts[h.status] = (counts[h.status] || 0) + 1;
+  const parts = Object.entries(counts).map(([k, v]) => `${v} ${k}`);
+  console.log(`advisor-revert-check: ${hunks.length} hunk(s)${parts.length > 0 ? `: ${parts.join(', ')}` : ''} (${opts.baseSha.slice(0, 7)}..${opts.headSha.slice(0, 7)})`);
+  if (extra.error) console.error(`advisor-revert-check: ${extra.error}${extra.excerpt ? `\n${extra.excerpt}` : ''}`);
+  return exitCode;
+}
+
+// --- main ----------------------------------------------------------------
+
+async function main() {
+  const resolveRef = (ref) => {
+    try {
+      return git(opts.repo, ['rev-parse', '--verify', `${ref}^{commit}`]).trim();
+    } catch {
+      throw new Fail(4, `cannot resolve ${ref} in ${opts.repo}`);
+    }
+  };
+  opts.baseSha = resolveRef(opts.base);
+  opts.headSha = resolveRef(opts.head);
+
+  let diff;
+  try {
+    diff = git(opts.repo, ['-c', 'core.quotepath=false', 'diff', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', opts.baseSha, opts.headSha, '--']);
+  } catch (e) {
+    throw new Fail(4, `git diff failed: ${String(e.stderr || e.message).trim()}`);
+  }
+  const all = parseDiff(diff).filter((h) => selected(h.file));
+  const summary = (h, status) => ({ file: h.file, old_start: h.old_start, new_start: h.new_start, added: h.added, removed: h.removed, status, excerpt: '' });
+
+  if (all.length > opts.maxHunks && !opts.allowPartial) {
+    const code = report(5, all.map((h) => summary(h, 'NOT_RUN')), { error: `${all.length} hunks exceed --max-hunks ${opts.maxHunks}; raise it or pass --allow-partial` });
+    return code;
+  }
+  if (all.length === 0) return report(0, [], { no_hunks: true });
+
+  state.tmp = mkdtempSync(join(tmpdir(), 'revert-check-'));
+  state.wt = join(state.tmp, 'wt');
+  try {
+    git(opts.repo, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--detach', state.wt, opts.headSha]);
+  } catch (e) {
+    throw new Fail(4, `git worktree add failed: ${String(e.stderr || e.message).trim()}`);
+  }
+  state.added = true;
+
+  const base = await runTests(state.wt);
+  restore(state.wt);
+  if (base.code !== 0 || base.timedOut) {
+    const why = base.timedOut ? `timed out after ${opts.timeout}s` : `exited ${base.code}`;
+    return report(3, all.map((h) => summary(h, 'NOT_RUN')), { error: `BASELINE_RED: --test-cmd ${why} on unmodified ${opts.headSha.slice(0, 7)}`, excerpt: excerptOf('SURVIVED', base.out) });
+  }
+
+  const results = [];
+  for (const [i, h] of all.entries()) {
+    if (i >= opts.maxHunks) {
+      results.push(summary(h, 'NOT_RUN'));
+      continue;
+    }
+    try {
+      git(state.wt, ['apply', '-R', '--unidiff-zero', '-'], Buffer.from(patchOf(h), 'latin1'));
+    } catch (e) {
+      throw new Fail(4, `cannot reverse-apply hunk ${h.file}:${h.new_start}: ${String(e.stderr || e.message).trim()}`);
+    }
+    const r = await runTests(state.wt);
+    restore(state.wt);
+    const status = classify(r);
+    results.push({ ...summary(h, status), excerpt: excerptOf(status, r.out) });
+  }
+  return report(results.every((h) => h.status === 'KILLED' || h.status === 'NOT_RUN') ? 0 : 1, results);
+}
+
+let exitCode;
+try {
+  exitCode = await main();
+} catch (e) {
+  console.error(`advisor-revert-check: ${e instanceof Fail ? e.message : e && e.stack ? e.stack : e}`);
+  exitCode = e instanceof Fail ? e.code : 4;
+} finally {
+  cleanup();
+}
+process.exit(exitCode);
