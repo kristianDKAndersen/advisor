@@ -7,16 +7,8 @@ set -euo pipefail
 [[ "${ADVISOR_WORKER_HOOKS:-}" == "0" ]] && exit 0
 [[ -z "${ADV:-}" ]] && exit 0
 
-MATCHES=$(node -e "
-  const data = JSON.parse(require('fs').readFileSync(0,'utf8'));
-  const cmd = (data.tool_input && data.tool_input.command) || '';
-  // Must be a channel.js send with --type result to the outbox (not a different file)
-  const isResult = cmd.includes('channel.js') &&
-    /--type\s+result/.test(cmd) &&
-    !cmd.includes('--type result-check') &&
-    (cmd.includes('OUTBOX') || cmd.includes('outbox.jsonl'));
-  process.stdout.write(isResult ? '1' : '');
-" 2>/dev/null || true)
+# Close only after a real successful result send; matching rule is in worker-auto-close-match.js.
+MATCHES=$(node "$(dirname "${BASH_SOURCE[0]}")/worker-auto-close-match.js" 2>/dev/null || true)
 
 if [[ "$MATCHES" == "1" ]]; then
   # Brief sleep to let channel.js append fully flush before killing the process.

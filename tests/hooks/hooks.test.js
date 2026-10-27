@@ -240,7 +240,7 @@ test('H2: result send triggers close-tab (AT-2.1)', () => {
   const input = JSON.stringify({
     tool_name: 'Bash',
     tool_input: { command: `bun "$ADV/lib/channel.js" send --file "${outbox}" --type result --body "{}"` },
-    tool_response: { output: '' }
+    tool_response: { output: '#1 [result] {}' }
   });
 
   const result = spawnSync('bash', [WORKER_AUTO_CLOSE_SH], {
