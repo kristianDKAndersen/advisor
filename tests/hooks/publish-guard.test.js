@@ -108,11 +108,11 @@ describe('spec cases', () => {
     expectBlocked(runHook('gh api repos/o/r/issues/1/comments -f body=x', adv));
   });
 
-  test('PG-15: allows bin/advisor-publish --repo <repo> --execute from any cwd, worker or not', () => {
+  test('PG-15: allows bin/advisor-publish --repo <repo> --execute from any cwd, and its dry run in a worker', () => {
     const cmd = `bin/advisor-publish --repo '${other}' --execute`;
     for (const cwd of [adv, other, noOrigin, plain]) {
       expectAllowed(runHook(cmd, cwd));
-      expectAllowed(runHook(cmd, cwd, { ADVISOR_SID: 'x' }));
+      expectAllowed(runHook(cmd.replace(' --execute', ''), cwd, { ADVISOR_SID: 'x' }));
     }
   });
 
@@ -403,7 +403,7 @@ describe('review round 1 findings', () => {
     const reads = [
       'gist clone abc', 'repo deploy-key list', 'repo autolink list', 'repo gitignore view Node',
       'project item-list 1 --owner me', 'variable get X', 'ruleset view 1', 'attestation verify a.tgz -o me',
-      'search prs push', 'status', 'co 5', '--version', 'auth status', 'config get editor', 'alias list',
+      'search prs push', 'status', '--version', 'auth status', 'config get editor', 'alias list',
       'run watch 1', 'release download v1', 'pr status', 'label list', 'cache list', 'codespace list', 'extension list',
     ];
     expectAllowed(runHook(reads.map(c => `gh ${c}`).join(' && '), adv, W));
@@ -566,7 +566,63 @@ describe('review round 1 findings', () => {
 
   test('PG-83b: plain advisor-publish forms stay allowed', () => {
     const cmd = 'cd "$ADV" && n=1; bin/advisor-publish --repo . --execute && "$ADV/bin/advisor-publish" --repo . && bun bin/advisor-publish --repo .';
-    expectAllowed(runHook(cmd, adv, W));
+    expectAllowed(runHook(cmd.replace(' --execute', ''), adv, W));
     expectAllowed(runHook(cmd, other));
+  });
+
+  test.each([
+    'gh api graphql -f query="$(cat m.graphql)"',
+    'gh api graphql -f query="$(<m.graphql)" -f id=I_kwDOabc',
+    'gh api graphql -f query="`cat m.graphql`"',
+    'gh api graphql -f query="$Q"',
+    'gh api graphql --raw-field=query="${MUT}"',
+    'gh api graphql -f query=$Q',
+    'Q=$(cat m.graphql); gh api graphql -f query="$Q"',
+    "Q=$(cat <<'EOF'\nmutation { mergePullRequest(input:{pullRequestId:\"PR_x\"}) { clientMutationId } }\nEOF\n)\ngh api graphql -f query=\"$Q\"",
+    'cat m.graphql | xargs -0 -I{} gh api graphql -f query={}',
+  ])('PG-84: a non-literal GraphQL query %p is a write in a worker and from the advisor cwd', (cmd) => {
+    expectBlocked(runHook(cmd, adv, W));
+    expectBlocked(runHook(cmd, adv));
+  });
+
+  test.each([
+    'git $(echo push) origin main', 'git `echo push` origin main', 'git ${S:-push} origin main',
+    'git "${S:-push}" origin main', 'git "$SUB" origin main', 'git {push,} origin main', 'git pu?h origin main',
+  ])('PG-85: a non-literal git subcommand %p is a publish in a worker and from the advisor cwd', (cmd) => {
+    expectBlocked(runHook(cmd, adv, W));
+    expectBlocked(runHook(cmd, adv));
+  });
+
+  test.each([
+    "gh alias set co 'pr merge' --clobber",
+    "gh alias set co 'pr merge' --clobber && gh co 5",
+    `gh alias set --shell co 'gh pr merge "$1"' --clobber && gh co 5`,
+    'gh alias import aliases.yml --clobber && gh co 5',
+    'gh alias delete co',
+    'gh co 5',
+  ])('PG-86: gh alias writes and the co alias %p are writes in a worker and from the advisor cwd', (cmd) => {
+    expectBlocked(runHook(cmd, adv, W));
+    expectBlocked(runHook(cmd, adv));
+  });
+
+  test('PG-86b: gh alias list stays a read', () => {
+    expectAllowed(runHook('gh alias list', other, W));
+  });
+
+  test('PG-87: a worker may dry-run advisor-publish but not run it with --execute', () => {
+    for (const cmd of ['bin/advisor-publish --branch ws/abc --execute', 'bun bin/advisor-publish --pr 12 --execute',
+      '"$ADV/bin/advisor-publish" --repo . --execute', 'bash -c "bin/advisor-publish --repo . --execute"']) {
+      expectBlocked(runHook(cmd, adv, W));
+      expectAllowed(runHook(cmd, adv));
+    }
+    expectAllowed(runHook('bin/advisor-publish --branch ws/abc --json', adv, W));
+  });
+
+  test('PG-88: a remote rewrite earlier in the command leaves a later gh cwd target unresolved', () => {
+    expectBlocked(runHook('git remote add up https://github.com/o/x.git && git config remote.up.gh-resolved base && gh pr merge 5', adv));
+    expectAllowed(runHook('gh pr comment 5 -b x', adv3));
+    expectBlocked(runHook('git config remote.upstream.gh-resolved base; gh pr comment 5 -b x', adv3));
+    expectAllowed(runHook('gh pr merge 5 -R me/advisor', adv));
+    expectAllowed(runHook('git remote add up https://github.com/o/x.git && gh pr merge 5 -R me/advisor', adv));
   });
 });
