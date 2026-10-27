@@ -1,0 +1,332 @@
+#!/usr/bin/env bun
+// bin/advisor-conventions - build a repo-rules digest (conventions-digest.md) for a target repo.
+//
+// Usage:
+//   advisor-conventions --repo <path> [--out <dir>] [--with-reviews <n>] [--quiet] [--json]
+//
+// Output: <out>/conventions-digest.md. Default <out> is ~/.advisor/conventions/<slug>/,
+// where <slug> is `<top-level basename>-<first 8 hex of sha1(origin URL, else top-level path)>`.
+// Read-only on the target repo: sources come from `git ls-files` (tracked files only), plus
+// .advisor-preserved/** from disk when present (the harness overlay keeps displaced originals there).
+//
+// Sources read: CLAUDE.md, AGENTS.md, REVIEW.md at any depth (case-insensitive); CONTRIBUTING*
+// (root, .github/, docs/); .github/PULL_REQUEST_TEMPLATE*; CODEOWNERS (root or .github/); and at
+// the root .editorconfig, .eslintrc*, eslint.config.*, .prettierrc*, ruff.toml, .markdownlint*,
+// .shellcheckrc. Markdown-style sources contribute each rule-like line (a bullet or numbered line,
+// or one containing must, never, always, required, do not, at most, limit or max) as `path:line text`;
+// config sources contribute their first 40 non-blank, non-comment lines.
+//
+// Digest layout (stable; CB7 advisor-publish and CB8 prose-lint parse the first section):
+//   ## Measurable rules   then a blank line, then one ```yaml fence holding the vault note's
+//                         frontmatter verbatim (the text between its two --- lines). Without a
+//                         vault note or frontmatter the section holds one line starting "none:"
+//                         and no fence. Keys, all optional, hand-written, never inferred:
+//                         max_sentence_words, max_comment_sentences, max_comment_words,
+//                         max_line_length, banned_chars, banned_phrases, file_max_lines,
+//                         policy_paths
+//   ## Rule sources      `Rule files: none found` or `Rule files: N found`, then one path per line
+//   ## Rule lines        `path:line text` per rule-like line
+//   ## Commit pattern    `Pattern: ...` plus up to 3 example subjects of the last 30
+//   ## Vault rules       the vault note body verbatim (omitted when there is none)
+//   ## Reviewer comments (unverified rules)   only with --with-reviews <n>
+//
+// Vault note: <vault root>/repo-rules/<slug>.md, vault root = $ADVISOR_VAULT or ~/.advisor/vault.
+// --with-reviews <n> (off by default): when `gh auth status` succeeds, read-only gh calls fetch
+// review comments of the last n merged PRs.
+//
+// Exit codes: 0 written, 2 usage, 3 not a git repo, 4 no rule sources found (digest still written).
+// The vault note is a rule source: exit 4 only when there are no tracked/preserved rule files AND no note.
+//
+// Spec clarifications: the commit pattern is a generalised shape (`[<ticket>] <type>(<scope>): <subject>`)
+// plus 3 verbatim examples; CONTRIBUTING* matches at root, .github/ and docs/, configs at root only;
+// --out <dir> replaces ~/.advisor/conventions/<slug>/ (the file name stays conventions-digest.md);
+// the slug hash input is the origin URL, else the repo path.
+
+const { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync, lstatSync, readdirSync } = require('node:fs');
+const { join, basename, dirname, posix } = require('node:path');
+const { homedir } = require('node:os');
+const { createHash } = require('node:crypto');
+const { execFileSync, spawnSync } = require('node:child_process');
+
+const USAGE = `Usage: advisor-conventions --repo <path> [--out <dir>] [--with-reviews <n>] [--quiet] [--json]
+
+Builds conventions-digest.md from a repo's tracked rule sources (CLAUDE.md, AGENTS.md,
+REVIEW.md, CONTRIBUTING*, PR template, CODEOWNERS, editor/lint configs), its commit-subject
+pattern and the vault note repo-rules/<slug>.md. Read-only on the repo.
+
+Flags:
+  --repo <path>        Git repository to read
+  --out <dir>          Output directory (default: ~/.advisor/conventions/<slug>)
+  --with-reviews <n>   Add review comments of the last n merged PRs via gh (default: off)
+  --quiet              Print nothing on success
+  --json               Print one JSON object instead of one summary line
+
+Exit codes: 0 written, 2 usage, 3 not a git repo, 4 no rule sources found (digest still written).
+`;
+
+function usageExit(msg) {
+  if (msg) console.error(`advisor-conventions: ${msg}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const opts = { json: false, quiet: false };
+const argv = process.argv.slice(2);
+if (argv.length === 0 || argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(2);
+}
+while (argv.length > 0) {
+  const arg = argv.shift();
+  const val = () => {
+    const v = argv.shift();
+    if (v === undefined) usageExit(`${arg} needs a value`);
+    return v;
+  };
+  switch (arg) {
+    case '--repo': opts.repo = val(); break;
+    case '--out': opts.out = val(); break;
+    case '--with-reviews': {
+      const v = val();
+      if (!/^[1-9]\d*$/.test(v)) usageExit(`--with-reviews needs a positive integer, got "${v}"`);
+      opts.reviews = Number(v);
+      break;
+    }
+    case '--quiet': opts.quiet = true; break;
+    case '--json': opts.json = true; break;
+    default: usageExit(`unknown flag: ${arg}`);
+  }
+}
+if (!opts.repo) usageExit('--repo is required');
+
+function git(cwd, ...args) {
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
+let top;
+try {
+  top = git(opts.repo, 'rev-parse', '--show-toplevel').trim();
+} catch {
+  console.error(`advisor-conventions: ${opts.repo} is not a git repository`);
+  process.exit(3);
+}
+
+// --- slug and paths -------------------------------------------------------
+
+let origin = '';
+try {
+  origin = git(top, 'config', '--get', 'remote.origin.url').trim();
+} catch {}
+const slug = `${basename(top)}-${createHash('sha1').update(origin || top).digest('hex').slice(0, 8)}`;
+const outDir = opts.out || join(homedir(), '.advisor', 'conventions', slug);
+const vaultRoot = process.env.ADVISOR_VAULT || join(homedir(), '.advisor', 'vault');
+const vaultNote = join(vaultRoot, 'repo-rules', `${slug}.md`);
+
+// --- rule sources ---------------------------------------------------------
+
+const DOC_NAMES = new Set(['claude.md', 'agents.md', 'review.md']);
+const CONFIG_RE = /^(\.editorconfig|\.eslintrc.*|eslint\.config\..*|\.prettierrc.*|ruff\.toml|\.markdownlint.*|\.shellcheckrc)$/i;
+
+// Returns 'doc', 'config' or null for a repo-relative posix path.
+function classify(rel) {
+  const base = posix.basename(rel).toLowerCase();
+  const dir = posix.dirname(rel).toLowerCase();
+  if (DOC_NAMES.has(base)) return 'doc';
+  if (base.startsWith('contributing') && ['.', '.github', 'docs'].includes(dir)) return 'doc';
+  if (rel.toLowerCase().startsWith('.github/pull_request_template')) return 'doc';
+  if (base === 'codeowners' && ['.', '.github'].includes(dir)) return 'config';
+  if (dir === '.' && CONFIG_RE.test(base)) return 'config';
+  return null;
+}
+
+function preservedFiles() {
+  const root = join(top, '.advisor-preserved');
+  const out = [];
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile()) out.push(p.slice(top.length + 1).split('\\').join('/'));
+    }
+  };
+  if (existsSync(root)) walk(root);
+  return out;
+}
+
+const tracked = git(top, 'ls-files', '-z').split('\0').filter(Boolean);
+const sources = [];
+for (const rel of [...new Set([...tracked, ...preservedFiles()])].sort()) {
+  const stripped = rel.startsWith('.advisor-preserved/') ? rel.slice('.advisor-preserved/'.length) : rel;
+  const kind = classify(stripped);
+  if (kind) sources.push({ rel, kind });
+}
+
+const RULE_RE = /^\s*([-*+]|\d+[.)])\s+\S|\b(must|never|always|required|do not|at most|limit|max)\b/i;
+const MAX_BYTES = 512 * 1024;
+const CONFIG_LINE_CAP = 40;
+
+const ruleLines = [];
+const readable = [];
+for (const { rel, kind } of sources) {
+  const abs = join(top, rel);
+  let text;
+  try {
+    const st = lstatSync(abs);
+    if (!st.isFile() || st.size > MAX_BYTES) continue;
+    text = readFileSync(abs, 'utf8');
+  } catch {
+    continue;
+  }
+  readable.push(rel);
+  let inFence = false;
+  let configCount = 0;
+  text.split('\n').forEach((raw, i) => {
+    const line = raw.replace(/\r$/, '');
+    if (!line.trim()) return;
+    if (kind === 'config') {
+      if (/^\s*[#;]|^\s*\/\//.test(line) || configCount >= CONFIG_LINE_CAP) return;
+      configCount++;
+      ruleLines.push(`${rel}:${i + 1} ${line.trim()}`);
+      return;
+    }
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      return;
+    }
+    if (!inFence && RULE_RE.test(line)) ruleLines.push(`${rel}:${i + 1} ${line.trim()}`);
+  });
+}
+
+// --- commit pattern -------------------------------------------------------
+
+function shapeOf(subject) {
+  let s = subject;
+  let shape = '';
+  const ticket = s.match(/^\[[A-Za-z][A-Za-z0-9]*-\d+\]\s+/);
+  if (ticket) {
+    shape += '[<ticket>] ';
+    s = s.slice(ticket[0].length);
+  }
+  const conv = s.match(/^[A-Za-z]+(\([^)]*\))?(!)?:\s+\S/);
+  shape += conv ? `<type>${conv[1] ? '(<scope>)' : ''}${conv[2] || ''}: <subject>` : '<subject>';
+  return shape;
+}
+
+let subjects = [];
+try {
+  subjects = git(top, 'log', '-n', '30', '--format=%s').split('\n').filter(Boolean);
+} catch {}
+let commitPattern = null;
+const examples = [];
+if (subjects.length > 0) {
+  const counts = new Map();
+  for (const s of subjects) counts.set(shapeOf(s), (counts.get(shapeOf(s)) || 0) + 1);
+  const [best, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (best !== '<subject>') {
+    for (const s of subjects) if (shapeOf(s) === best && examples.length < 3) examples.push(s);
+    commitPattern = { shape: best, n };
+  }
+}
+
+// --- vault note -----------------------------------------------------------
+
+let measurable = `none: no vault note at ${vaultNote}`;
+let vaultBody = '';
+let vaultFound = false;
+if (existsSync(vaultNote)) {
+  vaultFound = true;
+  const note = readFileSync(vaultNote, 'utf8');
+  const fm = note.match(/^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+  if (fm) {
+    measurable = `\`\`\`yaml\n${fm[1]}\n\`\`\``;
+    vaultBody = note.slice(fm[0].length);
+  } else {
+    measurable = 'none: vault note has no frontmatter';
+    vaultBody = note;
+  }
+}
+
+// --- reviewer comments (opt-in) -------------------------------------------
+
+function gh(...args) {
+  return spawnSync('gh', args, { cwd: top, encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
+}
+
+function reviewSection(n) {
+  const out = ['## Reviewer comments (unverified rules)', ''];
+  const auth = gh('auth', 'status');
+  if (auth.error || auth.status !== 0) return [...out, 'skipped: `gh auth status` failed', ''];
+  const list = gh('pr', 'list', '--state', 'merged', '--limit', String(n), '--json', 'number', '--jq', '.[].number');
+  if (list.error || list.status !== 0) return [...out, 'skipped: `gh pr list` failed', ''];
+  const numbers = list.stdout.split('\n').filter(Boolean);
+  let count = 0;
+  for (const num of numbers) {
+    const jq = '.[] | [.path, (.line // .original_line // 0), .user.login, (.body | gsub("\\r?\\n"; " "))] | @tsv';
+    const r = gh('api', `repos/{owner}/{repo}/pulls/${num}/comments`, '--paginate', '--jq', jq);
+    if (r.error || r.status !== 0) continue;
+    for (const row of r.stdout.split('\n').filter(Boolean)) {
+      const [path, line, user, ...body] = row.split('\t');
+      out.push(`- PR #${num} ${path}:${line} (${user}): ${body.join('\t')}`);
+      count++;
+    }
+  }
+  if (count === 0) out.push(`none found in the last ${numbers.length} merged PR(s)`);
+  out.push('');
+  return out;
+}
+
+// --- digest ---------------------------------------------------------------
+
+const lines = [
+  `# Conventions digest: ${basename(top)}`,
+  '',
+  `Repo: ${top}`,
+  `Slug: ${slug}`,
+  '',
+  '## Measurable rules',
+  '',
+  measurable,
+  '',
+  '## Rule sources',
+  '',
+  readable.length === 0 ? 'Rule files: none found' : `Rule files: ${readable.length} found`,
+  ...readable.map((p) => `- ${p}`),
+  '',
+  '## Rule lines',
+  '',
+  ...(ruleLines.length === 0 ? ['none found'] : ruleLines.map((l) => `- ${l}`)),
+  '',
+  '## Commit pattern',
+  '',
+];
+if (commitPattern) {
+  lines.push(`Pattern: \`${commitPattern.shape}\` (${commitPattern.n} of the last ${subjects.length} subjects)`, '', 'Examples:', ...examples.map((e) => `- ${e}`));
+} else {
+  lines.push(subjects.length === 0 ? 'none found: no commits' : `none found: no common prefix pattern in the last ${subjects.length} subjects`);
+}
+lines.push('');
+if (vaultFound && vaultBody.trim()) lines.push('## Vault rules', '', `Source: ${vaultNote}`, '', vaultBody.replace(/\s+$/, ''), '');
+if (opts.reviews) lines.push(...reviewSection(opts.reviews));
+
+mkdirSync(outDir, { recursive: true });
+const digestPath = join(outDir, 'conventions-digest.md');
+const tmp = `${digestPath}.${process.pid}.tmp`;
+writeFileSync(tmp, lines.join('\n').replace(/\n*$/, '\n'));
+renameSync(tmp, digestPath);
+
+const exitCode = readable.length === 0 && !vaultFound ? 4 : 0;
+if (opts.json) {
+  console.log(JSON.stringify({
+    digest: digestPath,
+    slug,
+    sources: readable,
+    rule_lines: ruleLines.length,
+    commit_pattern: commitPattern ? commitPattern.shape : null,
+    vault_note: vaultFound ? vaultNote : null,
+    reviews: Boolean(opts.reviews),
+    exit_code: exitCode,
+  }));
+} else if (!opts.quiet) {
+  console.log(`advisor-conventions: wrote ${digestPath} (${ruleLines.length} rule line(s) from ${readable.length} file(s))${exitCode === 4 ? '; no rule sources found' : ''}`);
+}
+process.exit(exitCode);
