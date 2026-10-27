@@ -32,7 +32,7 @@ beforeAll(() => {
       '--established', 'e',
       '--gap', 'g',
       '--material', 'no',
-      '--next', 'n',
+      '--next', 'n', '--integration-edits', 'none',
       '--key-quotes', 'q',
     ],
     {

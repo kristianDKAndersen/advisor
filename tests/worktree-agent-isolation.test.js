@@ -132,7 +132,7 @@ test('[WAI-c] synthesize teardown removes a doc-agent worktree and branch', { ti
   const result = spawnSync(
     'bun',
     [CHANNEL_JS, 'synthesize', '--sid', sid, '--seq', '1',
-      '--established', 'test task', '--gap', 'none', '--material', 'yes', '--next', 'proceed'],
+      '--established', 'test task', '--gap', 'none', '--material', 'yes', '--next', 'proceed', '--integration-edits', 'none'],
     { encoding: 'utf8', timeout: 25000,
       env: { ...process.env, ADVISOR_RUNS_ROOT: tmpRuns, ADVISOR_SKIP_TAB_CLOSE: '1' } }
   );

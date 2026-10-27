@@ -30,7 +30,7 @@ test('channel synthesize: writeEpisode called when result body has established f
     '--established', 'Pattern X worked well for this task.',
     '--gap', 'none',
     '--material', 'yes',
-    '--next', 'proceed-to-step-8',
+    '--next', 'proceed-to-step-8', '--integration-edits', 'none',
     '--key-quotes', 'The key insight was Y.',
   ], {
     encoding: 'utf8',

@@ -197,7 +197,7 @@ function runSynthesize(env, extraArgs = []) {
   return spawnSync('bun', [
     CHANNEL_JS, 'synthesize',
     '--sid', env.sid, '--seq', '1',
-    '--established', 'x', '--gap', 'y', '--material', 'yes', '--next', 'z',
+    '--established', 'x', '--gap', 'y', '--material', 'yes', '--next', 'z', '--integration-edits', 'none',
     ...extraArgs,
   ], {
     encoding: 'utf8',

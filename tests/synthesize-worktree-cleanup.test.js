@@ -61,7 +61,7 @@ function runSynthesize(extraEnv = {}) {
       '--established', 'test task',
       '--gap', 'none',
       '--material', 'yes',
-      '--next', 'proceed'],
+      '--next', 'proceed', '--integration-edits', 'none'],
     {
       encoding: 'utf8',
       timeout: 25000,

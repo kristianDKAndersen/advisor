@@ -29,7 +29,7 @@ test('[ISO-1] channel.js synthesize routes synthesis.log to ADVISOR_RUNS_ROOT, n
     '--established', 'isolation test established',
     '--gap', 'none',
     '--material', 'no',
-    '--next', 'proceed-to-step-8',
+    '--next', 'proceed-to-step-8', '--integration-edits', 'none',
   ], {
     encoding: 'utf8',
     env: {
@@ -57,7 +57,7 @@ test('[ISO-2] channel.js synthesize routes checkpoint dir to ADVISOR_RUNS_ROOT, 
     '--established', 'checkpoint isolation test',
     '--gap', 'none',
     '--material', 'no',
-    '--next', 'proceed-to-step-8',
+    '--next', 'proceed-to-step-8', '--integration-edits', 'none',
   ], {
     encoding: 'utf8',
     env: {

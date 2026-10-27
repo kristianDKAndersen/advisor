@@ -37,7 +37,7 @@ function runSynthesize(sid, extraArgs = []) {
      '--established', 'the fix works',
      '--gap', 'none',
      '--material', 'yes',
-     '--next', 'proceed',
+     '--next', 'proceed', '--integration-edits', 'none',
      ...extraArgs],
     {
       encoding: 'utf8',

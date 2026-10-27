@@ -98,7 +98,7 @@ test('E: channel.js synthesize persists terminal.json for a result message', () 
     '--established', 'terminal persistence wired into synthesize',
     '--gap',         'none',
     '--material',    'yes',
-    '--next',        'done',
+    '--next',        'done', '--integration-edits', 'none',
   ], {
     encoding: 'utf8',
     env: { ...process.env, HOME: HOME_TMP, ADVISOR_RUNS_ROOT: runsDir, ADVISOR_SKIP_TAB_CLOSE: '1' },

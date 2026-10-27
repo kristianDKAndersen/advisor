@@ -26,7 +26,7 @@ function runSynthesize(args, sid) {
     'bun',
     [CHANNEL_JS, 'synthesize', '--sid', sid, '--seq', '99',
      '--established', 'test', '--gap', 'none', '--material', 'yes',
-     '--next', 'proceed-to-step-8',
+     '--next', 'proceed-to-step-8', '--integration-edits', 'none',
      ...args],
     {
       encoding: 'utf8',
