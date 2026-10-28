@@ -1,0 +1,129 @@
+#!/usr/bin/env bun
+// bin/handover-write — create a headered context-handover file under
+// <runs>/plans from the session.json snapshot plus optional stdin notes.
+// Replaces the inline `node -e` snippet in .claude/skills/pre-compact/SKILL.md.
+//
+// Usage:
+//   handover-write [--sid <sid>] [--slug <slug>] [--no-session] [-h|--help]
+//
+// sid precedence: --sid > $ADVISOR_SID > newest valid run dir. stdout is the
+// absolute path of the new file; diagnostics go to stderr.
+// Exit: 0 ok, 1 IO/collision, 2 usage or no session, 3 symlinked plans/_archive.
+
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { createExclusive, renderHeader } from '../lib/handover.js';
+import { pickLastSession } from '../lib/maintenance.js';
+import { readSessionState } from '../lib/session.js';
+
+const USAGE = `Usage: handover-write [--sid <sid>] [--slug <slug>] [--no-session] [-h|--help]
+  stdin: optional free-text notes (read only when stdin is not a TTY)
+  env:   ADVISOR_RUNS_ROOT, ADVISOR_SID, HANDOVER_NOW (epoch seconds)`;
+
+const args = process.argv.slice(2);
+if (args.includes('-h') || args.includes('--help')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+function usageError(msg) {
+  console.error(`handover-write: ${msg}\n${USAGE}`);
+  process.exit(2);
+}
+
+let sidFlag = null;
+let slugFlag = '';
+let noSession = false;
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--sid' || a === '--slug') {
+    if (i + 1 >= args.length) usageError(`${a} needs a value`);
+    if (a === '--sid') sidFlag = args[++i];
+    else slugFlag = args[++i];
+  } else if (a === '--no-session') noSession = true;
+  else if (a.startsWith('-')) usageError(`unknown flag: ${a}`);
+  else usageError(`unexpected argument: ${a}`);
+}
+
+const runsRoot = process.env.ADVISOR_RUNS_ROOT || path.join(os.homedir(), '.advisor', 'runs');
+const nowS = /^[0-9]{1,12}$/.test(process.env.HANDOVER_NOW || '') ? Number(process.env.HANDOVER_NOW) : Math.floor(Date.now() / 1000);
+
+let sid = '';
+let state = null;
+if (!noSession) {
+  let raw;
+  let source;
+  if (sidFlag !== null) { raw = sidFlag; source = 'flag'; }
+  else if (process.env.ADVISOR_SID) { raw = process.env.ADVISOR_SID; source = 'env'; }
+  else {
+    const last = pickLastSession(runsRoot);
+    if (!last) {
+      console.error('handover-write: no valid session found; pass --sid or --no-session');
+      process.exit(2);
+    }
+    raw = last.sid;
+    source = 'newest';
+  }
+  // Same restriction as the header sid, so a hostile value cannot walk out of the runs root.
+  sid = raw.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64);
+  if (!sid || /^\.+$/.test(sid)) usageError(`invalid sid: ${JSON.stringify(raw)}`);
+  console.error(`handover-write: sid=${sid} (source: ${source})`);
+  state = readSessionState(sid);
+  if (state === null) {
+    console.error(`handover-write: no session.json for ${sid}`);
+    process.exit(2);
+  }
+}
+
+let notes = '';
+if (!process.stdin.isTTY) {
+  try { notes = fs.readFileSync(0, 'utf8'); } catch (_) { notes = ''; }
+}
+notes = notes.trim();
+
+const slug = slugFlag.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
+
+const d = new Date(nowS * 1000);
+const p2 = (n) => String(n).padStart(2, '0');
+const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+const nameFn = (n) => `${stamp}${slug ? `-${slug}` : ''}${n > 1 ? `-${n}` : ''}-context-handover.md`;
+
+let body = renderHeader({ status: 'open', created: nowS, sid });
+if (!noSession) {
+  body += `\n# Context handover ${sid}\n\n## Session state\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n`;
+} else {
+  body += `\n# Context handover\n`;
+}
+if (notes) body += `\n## Notes\n\n${notes}\n`;
+
+const plansDir = path.join(runsRoot, 'plans');
+for (const dir of [plansDir, path.join(plansDir, '_archive')]) {
+  let st = null;
+  try { st = fs.lstatSync(dir); } catch (e) {
+    if (e.code !== 'ENOENT') { console.error(`handover-write: ${dir}: ${e.code}`); process.exit(1); }
+  }
+  if (st && st.isSymbolicLink()) {
+    console.error(`handover-write: refusing symlinked directory: ${dir}`);
+    process.exit(3);
+  }
+  if (dir === plansDir && !st) {
+    try { fs.mkdirSync(plansDir, { recursive: true }); } catch (e) {
+      console.error(`handover-write: cannot create ${plansDir}: ${e.code || e.message}`);
+      process.exit(1);
+    }
+    // recheck: another process may have raced a symlink in
+    if (fs.lstatSync(plansDir).isSymbolicLink()) {
+      console.error(`handover-write: refusing symlinked directory: ${plansDir}`);
+      process.exit(3);
+    }
+  }
+}
+
+try {
+  const name = createExclusive(plansDir, nameFn, body);
+  console.log(path.join(plansDir, name));
+} catch (e) {
+  console.error(`handover-write: ${e.code === 'EEXHAUST' ? 'no free name after 99 attempts' : e.code || e.message}`);
+  process.exit(1);
+}
