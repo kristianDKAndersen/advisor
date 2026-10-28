@@ -49,7 +49,8 @@ bin/
   close-tab           # close current macOS Terminal tab (called by workers on self-terminate); in ADVISOR_TMUX_MULTIPLEX=1 mode, kills only $TMUX_PANE (never falls back to the attached client's active pane, which could kill an unrelated live worker)
   close-worker-tab    # close a specific worker's tab by SID (called by Advisor post-result)
   advisor-terminate   # atomic terminate + close-worker-tab in one call
-  handover-resolve    # resolve a context-handover file by appending "FINAL OUTCOME: <text>" (run from the successor session, not at handover-write time)
+  handover-write      # write a context-handover file with a status header (status/created/sid/resolved/outcome/archived/archive_reason; format in lib/handover.js)
+  handover-resolve    # resolve a context-handover file: headered files get status: resolved plus an outcome, legacy files get an appended "FINAL OUTCOME: <text>" line (run from the successor session)
   run-pipeline        # pipeline orchestrator (internal)
   summon              # provision + open a worker session in a new Terminal tab; flags: --agent, --task, --goal, --model, --intelligence, --ensemble, --allowed-tools, --sub-team, --sub-team-model, --timeout
   summon-parallel     # fan out multiple briefs to parallel worker sessions (--briefs <path.json>)
@@ -98,7 +99,7 @@ skills/
   worker-protocol/          # /worker-protocol — inbox polling, tracing, self-terminate rules
 .claude/
   settings.json       # Advisor harness config (permissions, hooks, env vars)
-  hooks/              # SessionStart banner (vault-due next 14d + last handover), PostToolUse session.json updater, statusline
+  hooks/              # SessionStart banner (vault-due next 14d + handover lines: OPEN, STALE >7d, open-count, archived, INVALID; open handovers auto-archive after 30 days), PostToolUse session.json updater, statusline
   skills/
     context-timeline/ # /context-timeline — triggers bin/advisor-timeline for the current session
     observe/          # /observe — live session observation mode
@@ -279,7 +280,7 @@ Seven hook commands are registered across five lifecycle events in `.claude/sett
 
 | Hook command | Event | Matcher | What it does |
 |---|---|---|---|
-| `session-start.js` | `SessionStart` | — | Surfaces a 'vault due (next 14d)' banner (all note types, not just reminders) and the last context-handover file via `spawnSync`. |
+| `session-start.js` | `SessionStart` | — | Surfaces a 'vault due (next 14d)' banner (all note types, not just reminders) via `spawnSync`, plus context-handover lines from one scan of `plans/`: `OPEN handover` (newest open, <= 7 days), `STALE handover` (newest open > 7 days), `open handovers: <O> (<S> stale >7d)` (when 2+ open or any stale), `archived <n> resolved handover(s)`, `archived <n> stale open handover(s)` (open > 30 days are moved to `plans/_archive`), `INVALID handover file(s)` (malformed, unreadable or old-empty files, first 5 named), `handover archive failed` and `handover scan failed`. Header format: `lib/handover.js`. |
 | `workspace-guard.js` | `PreToolUse` | `Edit\|Write` | Rejects edits that would write outside the session's designated workspace; prevents accidental clobbering of other sessions' output. |
 | inline `session.json` updater | `PostToolUse` | `Bash` | Detects `channel.js synthesize` calls by inspecting `CLAUDE_TOOL_INPUT`; extracts `--next` directive and patches `next_action` in `session.json` atomically. |
 | `test-on-edit.js` | `PostToolUse` | `Edit` | Runs the project test suite after any file edit; surfaces test failures inline so the worker sees red/green in the same turn as the edit. |
