@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import {
   register,
+  takeLock,
   safeSweep,
   parseAgentAnswer,
   sanitizeText,
@@ -43,6 +44,7 @@ type Opts = {
   store?: Record<string, unknown>
   dirs?: string[]
   files?: Record<string, string>
+  mtimes?: Record<string, number>
 }
 
 // Stub $ for safeSweep plus the registered hooks. A mkdir on an existing dir fails, like the real one.
@@ -57,6 +59,7 @@ function harness(opts: Opts = {}) {
   const store = new Map<string, unknown>(Object.entries(opts.store ?? {}))
   const dirs = new Set<string>(opts.dirs ?? [])
   const files = new Map<string, string>(Object.entries(opts.files ?? {}))
+  const mtimes = new Map<string, number>(Object.entries(opts.mtimes ?? {}))
   const calls: string[][] = []
   const prompts: string[] = []
   const notices: string[] = []
@@ -87,6 +90,7 @@ function harness(opts: Opts = {}) {
         if (argv[0] === 'mkdir' && argv[1] !== '-p') {
           if (dirs.has(target)) return { exitCode: 1 }
           dirs.add(target)
+          mtimes.set(target, NOW)
         }
         if (argv[0] === 'rm') {
           dirs.delete(target)
@@ -101,6 +105,10 @@ function harness(opts: Opts = {}) {
         return files.get(p)
       },
       write: async (p: string, t: string) => void files.set(p, t),
+      stat: async (p: string) => {
+        if (!dirs.has(p)) throw new Error('ENOENT')
+        return { kind: 'dir', size: 0, mtimeMs: mtimes.get(p) ?? NOW, isLink: false }
+      },
     },
     agent: {
       spawn: async (a: { prompt: string }) => {
@@ -153,6 +161,90 @@ test('F3: a stale day lock with no claim record is reclaimed; a fresh one still 
   expect((await safeSweep(unstamped.$, false)).reason).toBe('locked')
 })
 
+test('F3: an unstamped lock is judged by its directory age', async () => {
+  const old = harness({ dirs: [LOCK], mtimes: { [LOCK]: NOW - 3 * HOUR } })
+  expect((await safeSweep(old.$, false)).ok).toBe(true)
+  expect(old.files.get(LOCK + '/at')).toBe(String(NOW))
+  const fresh = harness({ dirs: [LOCK], mtimes: { [LOCK]: NOW - 60000 } })
+  expect((await safeSweep(fresh.$, false)).reason).toBe('locked')
+})
+
+test('F3: a stranded reclaim guard is taken over once old, honoured while fresh', async () => {
+  const GUARD = LOCK + '.reclaim'
+  const stale = { [LOCK + '/at']: String(NOW - 3 * HOUR) }
+  const old = harness({ dirs: [LOCK, GUARD], files: stale, mtimes: { [GUARD]: NOW - 5 * 60000 } })
+  expect((await safeSweep(old.$, false)).ok).toBe(true)
+  expect(old.dirs.has(GUARD)).toBe(false)
+  const fresh = harness({ dirs: [LOCK, GUARD], files: stale, mtimes: { [GUARD]: NOW - 1000 } })
+  expect((await safeSweep(fresh.$, false)).reason).toBe('locked')
+})
+
+// Shared dirs/files; the first caller (B) is held after `hold` fs/process calls while A runs to completion.
+async function reclaimRace(hold: number) {
+  const dirs = new Set<string>([LOCK])
+  const files = new Map<string, string>([[LOCK + '/at', String(NOW - 3 * HOUR)]])
+  const mtimes = new Map<string, number>([[LOCK, NOW - 3 * HOUR]])
+  const world = (gate?: { n: number; arrive: () => void; wait: Promise<void> }) => {
+    let ops = 0
+    const step = async () => {
+      if (gate && ops++ === gate.n) {
+        gate.arrive()
+        await gate.wait
+      }
+    }
+    return {
+      process: {
+        run: async (argv: string[]) => {
+          await step()
+          const target = argv[argv.length - 1]
+          if (argv[0] === 'mkdir') {
+            if (dirs.has(target)) return { exitCode: 1 }
+            dirs.add(target)
+            mtimes.set(target, NOW)
+          }
+          if (argv[0] === 'rm') {
+            dirs.delete(target)
+            for (const f of [...files.keys()]) if (f.startsWith(target + '/')) files.delete(f)
+          }
+          return { exitCode: 0 }
+        },
+      },
+      fs: {
+        read: async (p: string) => {
+          await step()
+          if (!files.has(p)) throw new Error('none')
+          return files.get(p)
+        },
+        write: async (p: string, t: string) => {
+          await step()
+          files.set(p, t)
+        },
+        stat: async (p: string) => {
+          await step()
+          if (!dirs.has(p)) throw new Error('ENOENT')
+          return { kind: 'dir', size: 0, mtimeMs: mtimes.get(p) ?? NOW, isLink: false }
+        },
+      },
+    }
+  }
+  let arrive = () => {}
+  let release = () => {}
+  const arrived = new Promise<void>(r => (arrive = r))
+  const wait = new Promise<void>(r => (release = r))
+  const b = takeLock(world({ n: hold, arrive, wait }) as any, LOCK, NOW)
+  await Promise.race([arrived, b.then(() => {})])
+  const a = await takeLock(world() as any, LOCK, NOW)
+  release()
+  return [a, await b]
+}
+
+test('F3: two sessions reclaiming the same stale lock never both hold it', async () => {
+  for (let hold = 0; hold < 14; hold++) {
+    const won = (await reclaimRace(hold)).filter(Boolean).length
+    expect({ hold, won }).toEqual({ hold, won: 1 })
+  }
+})
+
 test('F3: taking the lock records its start time', async () => {
   const h = harness()
   expect((await safeSweep(h.$, false)).ok).toBe(true)
@@ -163,7 +255,7 @@ test('F3: taking the lock records its start time', async () => {
 
 test('F6: tag characters, variation selectors and invisible fillers are stripped', () => {
   const tags = String.fromCodePoint(0xe0068, 0xe0069, 0xe007f)
-  const hidden = tags + '⁠⁡⁤؜ㅤ⠀️︀­﻿'
+  const hidden = String.fromCodePoint(0xe0100, 0xe01ef) + tags + '⁠⁡⁤؜ㅤ⠀️︀­﻿'
   expect(sanitizeText('CVE-2026-9' + hidden, 200)).toBe('CVE-2026-9')
   expect(sanitizeText('a' + hidden + 'b', 200)).toBe('ab')
 })

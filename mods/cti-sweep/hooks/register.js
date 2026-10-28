@@ -6,6 +6,7 @@ const AGENT_TYPE = 'cti-sweep:cti-analyst'
 const START_DELAY_MS = 15000
 const AGENT_TIMEOUT_MS = 30 * 60000
 const STALE_MS = 2 * 3600000
+const GUARD_STALE_MS = 60000
 const MAX_ATTEMPTS = 2
 const DEFAULT_HOURS = 36
 const MAX_HOURS = 7 * 24
@@ -120,7 +121,7 @@ export function sanitizeText(value, max) {
     .replace(/\u001b\][^\u0007\u001b]*(\u0007|\u001b\\)/g, '')
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, '')
-    .replace(/[\p{Cf}\u{E0000}-\u{E007F}︀-️⁠-⁤؜ㅤ⠀]/gu, '')
+    .replace(/[\p{Cf}\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}︀-️⁠-⁤؜ㅤ⠀]/gu, '')
     .replace(/\s+/g, ' ')
     .trim()
   return clean.length > max ? clean.slice(0, max - 1) + '…' : clean
@@ -1288,14 +1289,38 @@ async function ctiDirOf($) {
   return home + '/.advisor/cti'
 }
 
-// The lock keeps its start time in `at`: one stranded by a killed session or a deleted claim is reclaimed after STALE_MS.
-async function takeLock($, lock, now) {
+// Age of a lock: its `at` stamp, else the directory's own mtime (killed before the stamp, or written by code that never stamped). NaN when unknown.
+async function lockAge($, lock, now) {
+  const at = Number.parseInt(String(await $.fs.read(lock + '/at').catch(() => '')), 10)
+  if (Number.isFinite(at)) return now - at
+  try {
+    return now - (await $.fs.stat(lock)).mtimeMs
+  } catch {
+    return NaN
+  }
+}
+
+// A stale lock is reclaimed under a `<lock>.reclaim` guard dir (stale itself after GUARD_STALE_MS), re-judged once held,
+// so a session that lost the race cannot remove the winner's fresh lock.
+export async function takeLock($, lock, now) {
   let made = await $.process.run(['mkdir', lock])
   if (made.exitCode !== 0) {
-    const at = Number.parseInt(String(await $.fs.read(lock + '/at').catch(() => '')), 10)
-    if (!(now - at > STALE_MS)) return false
-    await $.process.run(['rm', '-r', '--', lock])
-    made = await $.process.run(['mkdir', lock])
+    if (!((await lockAge($, lock, now)) > STALE_MS)) return false
+    const guard = lock + '.reclaim'
+    let held = await $.process.run(['mkdir', guard])
+    if (held.exitCode !== 0) {
+      if (!((await lockAge($, guard, now)) > GUARD_STALE_MS)) return false
+      await $.process.run(['rm', '-r', '--', guard])
+      held = await $.process.run(['mkdir', guard])
+      if (held.exitCode !== 0) return false
+    }
+    try {
+      if (!((await lockAge($, lock, now)) > STALE_MS)) return false
+      await $.process.run(['rm', '-r', '--', lock])
+      made = await $.process.run(['mkdir', lock])
+    } finally {
+      await $.process.run(['rm', '-r', '--', guard])
+    }
     if (made.exitCode !== 0) return false
   }
   try {
