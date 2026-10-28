@@ -27,6 +27,7 @@ const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 const TYPES_REL = path.join('.claude-plugin', 'types');
 const STAMP = '.sync.json';
 const LIST_CAP = 20;
+const CLAUDE_TIMEOUT_MS = 120000;
 
 const VALUE_FLAGS = new Set(['install-dir', 'repo-root']);
 const BOOL_FLAGS = new Set(['check', 'dry-run', 'skip-tests', 'json', 'help']);
@@ -45,7 +46,8 @@ Usage:
   --repo-root    repo root holding mods/ (default: the repo containing this script)
   --json         one JSON object per mod, one per line
 
-Env: ADVISOR_MODS_SYNC_CLAUDE overrides the claude binary.
+Env: ADVISOR_MODS_SYNC_CLAUDE overrides the claude binary; ADVISOR_MODS_SYNC_TIMEOUT_MS sets the
+     per-call claude timeout in ms (default 120000; a call past it refuses the mod).
 
 Exit codes:
   0  all requested mods in sync (or synced / dry-run ok)
@@ -157,10 +159,15 @@ function uniqueBackupPath(installDir, name, stamp) {
   return p;
 }
 
+function claudeTimeoutMs() {
+  const n = Number(process.env.ADVISOR_MODS_SYNC_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : CLAUDE_TIMEOUT_MS;
+}
+
 function runClaude(claude, args) {
-  const r = spawnSync(claude, args, { encoding: 'utf8' });
+  const r = spawnSync(claude, args, { encoding: 'utf8', timeout: claudeTimeoutMs() });
   const output = `${r.stdout || ''}${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
-  return { ok: r.status === 0 && !r.error, output };
+  return { ok: r.status === 0 && !r.error, timedOut: Boolean(r.error && r.error.code === 'ETIMEDOUT'), output };
 }
 
 function swapIn(installDir, name, installed, repoDir, hadInstall, info) {
@@ -273,7 +280,8 @@ function processMod(name, ctx) {
       const r = runClaude(claude, step);
       if (!r.ok) {
         row.status = 'REFUSED';
-        row.reason = `claude ${step.slice(0, 2).join(' ')} failed`;
+        const what = `claude ${step.slice(0, 2).join(' ')}`;
+        row.reason = r.timedOut ? `${what} timed out after ${claudeTimeoutMs()} ms` : `${what} failed`;
         lines.push(`${name}: REFUSED - ${row.reason}; install left untouched`);
         if (r.output) lines.push(...r.output.split('\n').slice(-15).map((l) => `    ${l}`));
         return { row, lines, ok: false };

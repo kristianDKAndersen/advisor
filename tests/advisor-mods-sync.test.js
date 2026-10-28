@@ -378,3 +378,14 @@ test.skipIf(asRoot)('T25: an unreadable install file gives FAILED, and a sync le
     expect(fs.readdirSync(installDir).filter((n) => /\.(stage|old|bak)-/.test(n))).toEqual([]);
   });
 });
+
+test('T26: a claude call that outlives ADVISOR_MODS_SYNC_TIMEOUT_MS is killed, the mod is REFUSED as timed out, install byte-identical', () => {
+  installStale();
+  const before = snapshot(installDir);
+  const hang = path.join(tmp, 'claude-stub-hang.sh');
+  fs.writeFileSync(hang, '#!/bin/sh\nexec sleep 10\n', { mode: 0o755 });
+  const r = run(['alpha'], { ADVISOR_MODS_SYNC_CLAUDE: hang, ADVISOR_MODS_SYNC_TIMEOUT_MS: '300' });
+  expect(r.status).toBe(1);
+  expect(r.stdout).toMatch(/REFUSED - claude plugin validate timed out/);
+  expect(snapshot(installDir)).toEqual(before);
+});
