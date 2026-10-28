@@ -158,6 +158,32 @@ pass `--plugin-dir` per invocation as above.
 
 Disable all mods with `disableAllHooks` in a settings file.
 
+### Installing a mod
+
+Claude Code loads mods from the install dir (`~/.claude/mods/<name>`, wired via
+`CLAUDE_CODE_PLUGIN_DIRS`), not from this repo, so a committed fix does nothing until the install
+copy is refreshed. `bin/advisor-mods-sync` does that and reports drift:
+
+```bash
+bin/advisor-mods-sync --check              # read-only: IN-SYNC / DRIFT / NOT-INSTALLED per mod; exit 1 on drift
+bin/advisor-mods-sync --dry-run cti-sweep  # show tests, backup path and files a sync would touch; writes nothing
+bin/advisor-mods-sync cti-sweep            # sync one mod (no names: every installed mod that exists in the repo)
+bin/advisor-mods-sync --skip-tests         # skip `claude plugin validate --strict` / `plugin test`
+```
+
+A sync runs both plugin checks on the repo mod first (a failure refuses that mod and leaves the
+install untouched), warns if `mods/<name>` has uncommitted changes, copies the existing install to
+`<install-dir>/.<name>.bak-YYYYMMDD-HHMMSS` (old backups are never deleted), then swaps in a fresh
+copy so a mid-copy failure never leaves a half-installed mod (a failed sync removes its stage and
+backup, restores the install, and exits 1; if the restore also fails, the backup is kept and the
+FAILED line / `--json` `recoverFrom` + `backup` name the surviving old copy). An unreadable file
+makes that mod FAILED (exit 1) without stopping the others. Files deleted in the repo disappear from
+the install; the install's generated `.claude-plugin/types/` is carried over (a first install gets
+none: Claude Code generates it, it is editor typings only), and a `.sync.json`
+stamp (repo, branch, commit, dirty, syncedAt) is written. Restart Claude Code afterwards to load the
+new hooks. Use `--install-dir` / `--repo-root` to point elsewhere and `--json` for one object per
+mod; `ADVISOR_MODS_SYNC_CLAUDE` overrides the `claude` binary.
+
 ### cti-sweep
 
 **What it does.** At most once per local day, an interactive session start runs a background Cyber Threat Intelligence subagent (`cti-sweep:cti-analyst`, model sonnet) that looks for new vulnerabilities, supply-chain attacks, breaches, ransomware and state-actor activity since the last successful run (36h by default, at most 7 days). Sources come from `mods/cti-sweep/sources.json`, read at run time; a missing or invalid file falls back to the agent's own search. A macOS notification is raised once per run, only when a new finding names a product on the watchlist (at any severity) or is critical and exploited in the wild; an already-seen id never alerts again. Watchlist matching is whole-token and case-insensitive on the title and products (`Next.js` matches with its dot, `next` inside `Nextcloud` does not); the default list includes Next.js and React, and you set it with the `watchlist` userConfig option in `/config`. Watchlist matches are listed first, most severe first, then exploited criticals. The text is `CTI: N alert(s) - M on your stack - <top title>`, without the stack clause when M is 0. The agent is told to report one finding per distinct issue or product and to cite only canonical per-item pages; the mod drops source URLs on `api.github.com` or `services.nvd.nist.gov` and paths ending in `.xml`, `.atom`, `/feed` or `/rss`, and a finding left with no source is dropped as invalid.

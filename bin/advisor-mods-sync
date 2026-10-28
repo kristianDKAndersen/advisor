@@ -1,0 +1,372 @@
+#!/usr/bin/env node
+// advisor-mods-sync — install repo mods (mods/<name>/) into the live install dir and report drift
+//
+// Claude Code loads mods from ~/.claude/mods/<name> (via CLAUDE_CODE_PLUGIN_DIRS), not from the
+// repo, so a committed mod fix does nothing until the install copy is refreshed. This copies the
+// repo mod over the install atomically (with a backup) and can report drift read-only.
+//
+// Usage:
+//   advisor-mods-sync [<mod>...]             # sync: validate+test, back up, mirror repo -> install
+//   advisor-mods-sync --check                # read-only drift report; exit 1 on drift/not-installed
+//   advisor-mods-sync --dry-run              # print what a sync would do; write nothing
+//   advisor-mods-sync --skip-tests           # skip `claude plugin validate --strict` / `plugin test`
+//   advisor-mods-sync --install-dir <path>   # default ~/.claude/mods
+//   advisor-mods-sync --repo-root <path>     # default: the repo containing this script
+//   advisor-mods-sync --json                 # one JSON object per line, one per mod
+//
+// With no <mod>, every subdir of the install dir that also exists under <repo-root>/mods/.
+// Drift ignores .claude-plugin/types/ (generated per install; carried over on sync) and .sync.json.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { spawnSync } = require('child_process');
+
+const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+const TYPES_REL = path.join('.claude-plugin', 'types');
+const STAMP = '.sync.json';
+const LIST_CAP = 20;
+
+const VALUE_FLAGS = new Set(['install-dir', 'repo-root']);
+const BOOL_FLAGS = new Set(['check', 'dry-run', 'skip-tests', 'json', 'help']);
+
+function usage() {
+  return `advisor-mods-sync — install repo mods into the live install dir and report drift
+
+Usage:
+  advisor-mods-sync [<mod>...] [--check] [--dry-run] [--skip-tests]
+                    [--install-dir <path>] [--repo-root <path>] [--json] [--help]
+
+  --check        read-only drift report: IN-SYNC / DRIFT / NOT-INSTALLED per mod
+  --dry-run      print what a sync would do (tests, backup path, files); write nothing
+  --skip-tests   skip \`claude plugin validate --strict\` and \`claude plugin test\`
+  --install-dir  install dir (default ~/.claude/mods)
+  --repo-root    repo root holding mods/ (default: the repo containing this script)
+  --json         one JSON object per mod, one per line
+
+Env: ADVISOR_MODS_SYNC_CLAUDE overrides the claude binary.
+
+Exit codes:
+  0  all requested mods in sync (or synced / dry-run ok)
+  1  drift or not-installed (--check), or a mod was refused / failed to sync
+  2  usage error
+`;
+}
+
+function fail2(msg) {
+  process.stderr.write(`advisor-mods-sync: ${msg}\n`);
+  process.exit(2);
+}
+
+function parseArgs(argv) {
+  const out = { mods: [] };
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-h') {
+      out.help = true;
+    } else if (a.startsWith('--')) {
+      const k = a.slice(2);
+      if (VALUE_FLAGS.has(k)) {
+        const v = argv[i + 1];
+        if (v === undefined || v.startsWith('--')) fail2(`--${k} needs a value`);
+        out[k] = v;
+        i++;
+      } else if (BOOL_FLAGS.has(k)) {
+        out[k] = true;
+      } else {
+        fail2(`unknown flag ${a}`);
+      }
+    } else {
+      out.mods.push(a);
+    }
+  }
+  return out;
+}
+
+function ignored(rel) {
+  return rel === STAMP || rel === TYPES_REL || rel.startsWith(TYPES_REL + path.sep);
+}
+
+// relative path -> content fingerprint, for every non-ignored entry under dir
+function fingerprint(dir) {
+  const out = new Map();
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      const rel = path.relative(dir, p);
+      if (ignored(rel)) continue;
+      if (e.isDirectory()) walk(p);
+      else if (e.isSymbolicLink()) out.set(rel, 'link:' + fs.readlinkSync(p));
+      else out.set(rel, crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'));
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+function compare(repoDir, installedDir) {
+  const want = fingerprint(repoDir);
+  const have = fingerprint(installedDir);
+  const changed = [];
+  const added = [];
+  const removed = [];
+  for (const [rel, fp] of want) {
+    if (!have.has(rel)) added.push(rel);
+    else if (have.get(rel) !== fp) changed.push(rel);
+  }
+  for (const rel of have.keys()) if (!want.has(rel)) removed.push(rel);
+  return { changed: changed.sort(), added: added.sort(), removed: removed.sort() };
+}
+
+const isDir = (p) => {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+function capped(list) {
+  const shown = list.slice(0, LIST_CAP);
+  return shown.join(', ') + (list.length > LIST_CAP ? `, ... +${list.length - LIST_CAP} more` : '');
+}
+
+function timestamp(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function git(repoRoot, args) {
+  const r = spawnSync('git', ['-C', repoRoot, ...args], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+function gitInfo(repoRoot, name) {
+  const porcelain = git(repoRoot, ['status', '--porcelain', '--', `mods/${name}`]);
+  return {
+    branch: git(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']),
+    commit: git(repoRoot, ['rev-parse', 'HEAD']),
+    dirty: porcelain !== null && porcelain !== '',
+  };
+}
+
+function uniqueBackupPath(installDir, name, stamp) {
+  let p = path.join(installDir, `.${name}.bak-${stamp}`);
+  for (let n = 1; fs.existsSync(p); n++) p = path.join(installDir, `.${name}.bak-${stamp}-${n}`);
+  return p;
+}
+
+function runClaude(claude, args) {
+  const r = spawnSync(claude, args, { encoding: 'utf8' });
+  const output = `${r.stdout || ''}${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
+  return { ok: r.status === 0 && !r.error, output };
+}
+
+function swapIn(installDir, name, installed, repoDir, hadInstall, info) {
+  const stage = fs.mkdtempSync(path.join(installDir, `.${name}.stage-`));
+  try {
+    fs.cpSync(repoDir, stage, {
+      recursive: true,
+      verbatimSymlinks: true,
+      filter: (src) => !ignored(path.relative(repoDir, src)),
+    });
+    const types = path.join(installed, TYPES_REL);
+    if (hadInstall && isDir(types)) fs.cpSync(types, path.join(stage, TYPES_REL), { recursive: true });
+    fs.writeFileSync(
+      path.join(stage, STAMP),
+      JSON.stringify({ repo: info.repo, branch: info.branch, commit: info.commit, dirty: info.dirty, syncedAt: new Date().toISOString() }, null, 2) + '\n'
+    );
+  } catch (err) {
+    fs.rmSync(stage, { recursive: true, force: true });
+    throw err;
+  }
+  if (!hadInstall) {
+    fs.renameSync(stage, installed);
+    return;
+  }
+  let old = path.join(installDir, `.${name}.old-${process.pid}`);
+  for (let n = 1; fs.existsSync(old); n++) old = path.join(installDir, `.${name}.old-${process.pid}-${n}`);
+  try {
+    fs.renameSync(installed, old);
+  } catch (err) {
+    fs.rmSync(stage, { recursive: true, force: true });
+    throw err;
+  }
+  try {
+    fs.renameSync(stage, installed);
+  } catch (err) {
+    fs.rmSync(stage, { recursive: true, force: true });
+    try {
+      fs.renameSync(old, installed);
+    } catch (restoreErr) {
+      // install path is now empty; the old copy survives at `old`
+      err.recoverFrom = old;
+    }
+    throw err;
+  }
+  fs.rmSync(old, { recursive: true, force: true });
+}
+
+function processMod(name, ctx) {
+  const { args, repoRoot, installDir, claude } = ctx;
+  const repoDir = path.join(repoRoot, 'mods', name);
+  const installed = path.join(installDir, name);
+  const hadInstall = isDir(installed);
+  const row = { mod: name, status: null, changed: [], added: [], removed: [] };
+
+  if (!hadInstall) {
+    row.status = 'NOT-INSTALLED';
+  } else {
+    try {
+      Object.assign(row, compare(repoDir, installed));
+    } catch (err) {
+      row.status = 'FAILED';
+      row.reason = `cannot read files to compare: ${err.message}`;
+      return { row, lines: [`${name}: FAILED - ${row.reason}`], ok: false };
+    }
+    row.status = row.changed.length + row.added.length + row.removed.length ? 'DRIFT' : 'IN-SYNC';
+  }
+
+  const lines = [];
+  const describe = () => {
+    if (row.status === 'DRIFT') {
+      if (row.changed.length) lines.push(`    changed: ${capped(row.changed)}`);
+      if (row.added.length) lines.push(`    added (in repo, missing from install): ${capped(row.added)}`);
+      if (row.removed.length) lines.push(`    removed (in install, gone from repo): ${capped(row.removed)}`);
+    }
+  };
+
+  if (args.check) {
+    lines.unshift(`${name}: ${row.status}`);
+    describe();
+    return { row, lines, ok: row.status === 'IN-SYNC' };
+  }
+
+  const info = { repo: repoRoot, ...gitInfo(repoRoot, name) };
+  const backup = hadInstall ? uniqueBackupPath(installDir, name, timestamp(new Date())) : null;
+
+  if (args['dry-run']) {
+    const was = row.status;
+    row.dryRun = true;
+    if (was === 'IN-SYNC') lines.push(`${name}: IN-SYNC, nothing to do`);
+    else {
+      lines.push(`${name}: would sync (${was})`);
+      if (!args['skip-tests']) {
+        lines.push(`    would run: ${claude} plugin validate --strict ${repoDir}`);
+        lines.push(`    would run: ${claude} plugin test ${repoDir}`);
+      }
+      if (info.dirty) lines.push('    note: mods/' + name + ' has uncommitted changes');
+      lines.push(backup ? `    would back up to: ${backup}` : '    no existing install, no backup');
+      describe();
+    }
+    return { row, lines, ok: true };
+  }
+
+  if (row.status === 'IN-SYNC') {
+    lines.push(`${name}: IN-SYNC, nothing to do`);
+    return { row, lines, ok: true };
+  }
+
+  if (!args['skip-tests']) {
+    for (const step of [['plugin', 'validate', '--strict', repoDir], ['plugin', 'test', repoDir]]) {
+      const r = runClaude(claude, step);
+      if (!r.ok) {
+        row.status = 'REFUSED';
+        row.reason = `claude ${step.slice(0, 2).join(' ')} failed`;
+        lines.push(`${name}: REFUSED - ${row.reason}; install left untouched`);
+        if (r.output) lines.push(...r.output.split('\n').slice(-15).map((l) => `    ${l}`));
+        return { row, lines, ok: false };
+      }
+    }
+  }
+
+  if (info.dirty) lines.push(`${name}: warning: mods/${name} has uncommitted changes; installing uncommitted code`);
+
+  try {
+    if (backup) fs.cpSync(installed, backup, { recursive: true, verbatimSymlinks: true });
+    swapIn(installDir, name, installed, repoDir, hadInstall, info);
+  } catch (err) {
+    row.status = 'FAILED';
+    row.reason = err.message;
+    if (err.recoverFrom) {
+      // keep the backup: the install path is empty and only these copies hold the old mod
+      row.recoverFrom = err.recoverFrom;
+      row.backup = backup;
+      row.reason += `; install is missing, old copy at ${err.recoverFrom}, backup at ${backup} - restore by hand`;
+    } else if (backup) {
+      fs.rmSync(backup, { recursive: true, force: true });
+    }
+    lines.push(`${name}: FAILED - ${row.reason}`);
+    return { row, lines, ok: false };
+  }
+
+  let after;
+  try {
+    after = compare(repoDir, installed);
+  } catch (err) {
+    row.status = 'FAILED';
+    row.synced = true;
+    row.reason = `synced, but cannot read files to verify: ${err.message}`;
+    if (backup) row.backup = backup;
+    lines.push(`${name}: FAILED - ${row.reason}${backup ? ` (backup ${backup})` : ''}`);
+    return { row, lines, ok: false };
+  }
+  const clean = !after.changed.length && !after.added.length && !after.removed.length;
+  row.status = clean ? 'IN-SYNC' : 'DRIFT';
+  row.synced = true;
+  if (backup) row.backup = backup;
+  Object.assign(row, after);
+  lines.push(`${name}: ${row.status}${clean ? ` (synced from ${info.commit ? info.commit.slice(0, 8) : 'unknown commit'}${backup ? `, backup ${backup}` : ''})` : ' after sync'}`);
+  return { row, lines, ok: clean };
+}
+
+function main() {
+  const args = parseArgs(process.argv);
+  if (args.help) {
+    process.stdout.write(usage());
+    process.exit(0);
+  }
+
+  const repoRoot = path.resolve(args['repo-root'] || path.join(__dirname, '..'));
+  const installDir = path.resolve(args['install-dir'] || path.join(os.homedir(), '.claude', 'mods'));
+  const claude = process.env.ADVISOR_MODS_SYNC_CLAUDE || 'claude';
+
+  let names = args.mods;
+  for (const n of names) {
+    if (!NAME_RE.test(n)) fail2(`invalid mod name "${n}" (must match ${NAME_RE})`);
+    if (!isDir(path.join(repoRoot, 'mods', n))) fail2(`unknown mod "${n}": no ${path.join(repoRoot, 'mods', n)}`);
+  }
+  if (names.length === 0) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(installDir, { withFileTypes: true });
+    } catch {}
+    names = entries
+      .filter((e) => e.isDirectory() && NAME_RE.test(e.name) && isDir(path.join(repoRoot, 'mods', e.name)))
+      .map((e) => e.name)
+      .sort();
+    if (names.length === 0) {
+      process.stdout.write(`no installed mods under ${installDir} match a repo mod (name them explicitly to install)\n`);
+      process.exit(0);
+    }
+  }
+
+  const ctx = { args, repoRoot, installDir, claude };
+  if (!args.check && !args['dry-run']) fs.mkdirSync(installDir, { recursive: true });
+
+  let allOk = true;
+  let synced = false;
+  for (const name of names) {
+    const { row, lines, ok } = processMod(name, ctx);
+    if (!ok) allOk = false;
+    if (row.synced) synced = true;
+    if (args.json) process.stdout.write(JSON.stringify(row) + '\n');
+    else process.stdout.write(lines.join('\n') + '\n');
+  }
+
+  if (synced && !args.json) process.stdout.write('Restart Claude Code to load the new hooks.\n');
+  process.exit(allOk ? 0 : 1);
+}
+
+main();
