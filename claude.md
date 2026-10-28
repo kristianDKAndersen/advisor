@@ -228,13 +228,11 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
 
 On a context-window warning (the hook, Claude Code's auto-compact warning, or your own judgement after a long session, many syntheses, or repeated rework), take these steps IN ORDER before issuing `/clear`:
 
-1. Run `node -e "const {readSessionState}=require('./lib/session'); console.log(JSON.stringify(readSessionState('<sid>'),null,2))"` (`readSessionState` is synchronous - it returns the state object directly, not a Promise).
-2. Write the output to `~/.advisor/runs/plans/$(date +%Y%m%d-%H%M%S)-context-handover.md`.
-3. Record: active sid, tier, decomposition[] statuses, next_action, and synthesis_seq for each worker.
-4. Issue `/clear`.
-5. From the successor session, run `bin/handover-resolve <handover-file> --outcome "<final status text>"` to append a `FINAL OUTCOME: <text>` marker (at resolution time, not handover-write time).
+1. Run `bin/handover-write --sid <sid>` with notes on stdin (a heredoc): next_action and synthesis_seq for each worker. It snapshots the session state (sid, tier, decomposition[] statuses) into `~/.advisor/runs/plans/` with a `status: open` header and prints the file path. Exit 2 = no session.json for the sid; nothing is written.
+2. Issue `/clear`.
+3. From the successor session, once the handed-over work is verifiably done, run `bin/handover-resolve <handover-file> --outcome "<final status text>"` (at resolution time, not handover-write time). It sets `status: resolved` in the header; exit 4 = already resolved. An open handover is auto-archived after 30 days.
 
-Do NOT /clear before completing step 2 - the sid is lost after /clear if it is not written to disk. The session-start.js hook surfaces the last handover on the next start, plus a 'vault due (next 14d)' banner.
+Do NOT /clear before step 1 completes - the sid is lost after /clear if it is not written to disk. The session-start.js hook surfaces the last handover on the next start, plus a 'vault due (next 14d)' banner.
 
 The PreCompact hook auto-commits a checkpoint before auto-compaction. It does not fire on manual `/compact` (GH#13572): run `/pre-compact` first to write the handover and checkpoint.
 
