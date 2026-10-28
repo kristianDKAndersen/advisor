@@ -211,3 +211,259 @@ test('INTEGRATION: session-start.js under node flips a stale reminder and drops 
   fs.rmSync(intVault, { recursive: true, force: true });
   fs.rmSync(intRuns, { recursive: true, force: true });
 });
+
+// ── (6) header-aware handover scan, stale-open archive, temp cleanup ─────────
+// Every test below passes an fs.mkdtempSync runs root; ADVISOR_RUNS_ROOT is
+// pointed at a temp dir too so nothing can fall back to the real ~/.advisor/runs.
+import { renderHeader } from '../lib/handover.js';
+
+const NOW = Date.UTC(2026, 9, 28, 12, 0, 0);
+const NOW_S = NOW / 1000;
+const DAY_S = 86_400;
+
+let hvEnvRoot;
+beforeAll(() => {
+  hvEnvRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maint-hvenv-'));
+  process.env.ADVISOR_RUNS_ROOT = hvEnvRoot;
+});
+afterAll(() => {
+  fs.rmSync(hvEnvRoot, { recursive: true, force: true });
+});
+
+function mkPlans(prefix) {
+  const runs = mkRuns(prefix);
+  const plans = path.join(runs, 'plans');
+  fs.mkdirSync(plans, { recursive: true });
+  return { runs, plans };
+}
+// Write a handover file; `ageDays`/`ageSeconds` set its mtime relative to NOW.
+function put(dir, name, content, mtimeAgoS = 0) {
+  const p = path.join(dir, name);
+  fs.writeFileSync(p, content);
+  const t = new Date((NOW_S - mtimeAgoS) * 1000);
+  fs.utimesSync(p, t, t);
+  return p;
+}
+function headered(fields, body = '# Handover\n\nbody text\n') {
+  return renderHeader(fields) + body;
+}
+const openHdr = (createdAgoS, extra = {}) => headered({ status: 'open', created: NOW_S - createdAgoS, sid: 's1', ...extra });
+const resolvedHdr = (resolvedAgoS) =>
+  headered({ status: 'resolved', created: NOW_S - 90 * DAY_S, sid: 's1', resolved: NOW_S - resolvedAgoS, outcome: 'done' });
+
+test('listHandovers classifies header-open, header-resolved, legacy line, legacy heading, legacy mid-line, invalid, empty', () => {
+  const { runs, plans } = mkPlans('maint-hv1-');
+  put(plans, 'a-handover.md', openHdr(DAY_S), 0);
+  put(plans, 'b-handover.md', resolvedHdr(3600), 0);
+  put(plans, 'c-handover.md', '# t\n\nFINAL OUTCOME: shipped\n', 2 * DAY_S);
+  put(plans, 'd-handover.md', '# t\n\n## FINAL OUTCOME\nshipped\n', 2 * DAY_S);
+  put(plans, 'e-handover.md', '# t\n\nPrevious one still lacks FINAL OUTCOME marker.\n', 2 * DAY_S);
+  put(plans, 'f-handover.md', headered({ status: 'maybe', created: NOW_S }), 0);
+  put(plans, 'g-handover.md', '', 3600);
+
+  const maintenance_ = maintenance;
+  const by = Object.fromEntries(maintenance_.listHandovers(runs, NOW).map((h) => [h.name, h]));
+  expect(Object.keys(by).sort()).toEqual(['a-handover.md', 'b-handover.md', 'c-handover.md', 'd-handover.md', 'e-handover.md', 'f-handover.md', 'g-handover.md']);
+
+  expect([by['a-handover.md'].status, by['a-handover.md'].resolved, by['a-handover.md'].kind, by['a-handover.md'].valid]).toEqual(['open', false, 'header', true]);
+  expect(by['a-handover.md'].createdMs).toBe((NOW_S - DAY_S) * 1000);
+  expect([by['b-handover.md'].status, by['b-handover.md'].resolved]).toEqual(['resolved', true]);
+  expect(by['b-handover.md'].resolvedMs).toBe((NOW_S - 3600) * 1000);
+  expect([by['c-handover.md'].status, by['c-handover.md'].resolved, by['c-handover.md'].kind]).toEqual(['resolved', true, 'legacy']);
+  expect([by['d-handover.md'].status, by['d-handover.md'].resolved]).toEqual(['resolved', true]);
+  expect([by['e-handover.md'].status, by['e-handover.md'].resolved, by['e-handover.md'].valid]).toEqual(['open', false, true]);
+  expect([by['f-handover.md'].status, by['f-handover.md'].resolved, by['f-handover.md'].valid, by['f-handover.md'].reason]).toEqual(['invalid', false, false, 'bad-status']);
+  expect([by['g-handover.md'].status, by['g-handover.md'].kind, by['g-handover.md'].valid, by['g-handover.md'].reason]).toEqual(['invalid', 'empty', false, 'empty']);
+  expect(maintenance.RESOLVED_RE.test('x FINAL OUTCOME y')).toBe(false);
+  expect(maintenance.RESOLVED_RE.test('FINAL OUTCOME: y')).toBe(true);
+
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('newestUnresolvedHandover ignores invalid and empty and orders headered by created, legacy by mtime', () => {
+  const { runs, plans } = mkPlans('maint-hv2-');
+  put(plans, 'a-handover.md', openHdr(5 * DAY_S), 0); // old created, fresh mtime
+  put(plans, 'b-handover.md', 'legacy newer\n', 2 * DAY_S);
+  put(plans, 'c-handover.md', 'legacy older\n', 4 * DAY_S);
+  put(plans, 'd-handover.md', headered({ status: 'bogus', created: NOW_S }), 0); // invalid, newest
+  put(plans, 'e-handover.md', '', 0); // empty, newest
+  expect(path.basename(maintenance.newestUnresolvedHandover(runs, NOW))).toBe('b-handover.md');
+
+  put(plans, 'f-handover.md', openHdr(3600), 40 * DAY_S); // recent created, ancient mtime
+  expect(path.basename(maintenance.newestUnresolvedHandover(runs, NOW))).toBe('f-handover.md');
+
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('archiveResolvedHandovers uses header resolved epoch not mtime', () => {
+  const { runs, plans } = mkPlans('maint-hv3-');
+  put(plans, 'old-resolved-handover.md', resolvedHdr(2 * DAY_S), 0); // resolved 2d ago, mtime fresh
+  put(plans, 'new-resolved-handover.md', resolvedHdr(3600), 10 * DAY_S); // resolved 1h ago, mtime ancient
+  expect(maintenance.archiveResolvedHandovers(runs, NOW)).toBe(1);
+  expect(fs.existsSync(path.join(plans, '_archive', 'old-resolved-handover.md'))).toBe(true);
+  expect(fs.existsSync(path.join(plans, 'new-resolved-handover.md'))).toBe(true);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('archiveResolvedHandovers records resolved-24h in archived header', () => {
+  const { runs, plans } = mkPlans('maint-hv4-');
+  const body = '# Handover\n\nbody text\n';
+  put(plans, 'r-handover.md', resolvedHdr(2 * DAY_S), 0);
+  expect(maintenance.archiveResolvedHandovers(runs, NOW)).toBe(1);
+  const archived = fs.readFileSync(path.join(plans, '_archive', 'r-handover.md'), 'utf8');
+  expect(archived).toContain('archive_reason: resolved-24h');
+  expect(archived).toContain(`archived: ${NOW_S}`);
+  expect(archived).toContain('status: resolved');
+  expect(archived.endsWith(body)).toBe(true);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('archiveStaleOpenHandovers moves header-open >30d and legacy-open mtime >30d, keeps exactly 30d, never moves invalid', () => {
+  const { runs, plans } = mkPlans('maint-hv5-');
+  put(plans, 'hdr-old-handover.md', openHdr(31 * DAY_S), 0);
+  put(plans, 'hdr-edge-handover.md', openHdr(30 * DAY_S), 0);
+  put(plans, 'leg-old-handover.md', 'legacy old\n', 31 * DAY_S);
+  put(plans, 'leg-edge-handover.md', 'legacy edge\n', 30 * DAY_S);
+  put(plans, 'bad-handover.md', headered({ status: 'bogus', created: NOW_S - 60 * DAY_S }), 60 * DAY_S);
+  put(plans, 'empty-handover.md', '', 60 * DAY_S);
+
+  const res = maintenance.archiveStaleOpenHandovers(runs, NOW);
+  expect(res).toEqual({ moved: 2, failed: [] });
+  expect(fs.readdirSync(path.join(plans, '_archive')).sort()).toEqual(['hdr-old-handover.md', 'leg-old-handover.md']);
+  for (const keep of ['hdr-edge-handover.md', 'leg-edge-handover.md', 'bad-handover.md', 'empty-handover.md']) {
+    expect(fs.existsSync(path.join(plans, keep))).toBe(true);
+  }
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('archiveStaleOpenHandovers records stale-30d and archived epoch in header and appends ARCHIVED-STALE to legacy copy', () => {
+  const { runs, plans } = mkPlans('maint-hv6-');
+  put(plans, 'hdr-handover.md', openHdr(40 * DAY_S), 0);
+  put(plans, 'leg-handover.md', 'legacy body\n', 40 * DAY_S);
+  expect(maintenance.archiveStaleOpenHandovers(runs, NOW).moved).toBe(2);
+
+  const hdr = fs.readFileSync(path.join(plans, '_archive', 'hdr-handover.md'), 'utf8');
+  expect(hdr).toContain('archive_reason: stale-30d');
+  expect(hdr).toContain(`archived: ${NOW_S}`);
+  expect(hdr).toContain('status: open');
+
+  const leg = fs.readFileSync(path.join(plans, '_archive', 'leg-handover.md'), 'utf8');
+  expect(leg.startsWith('legacy body\n')).toBe(true);
+  expect(leg.trimEnd().split('\n').pop()).toBe('ARCHIVED-STALE: unresolved after 30 days (archived 2026-10-28)');
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('archiveStaleOpenHandovers never overwrites an existing archived name', () => {
+  const { runs, plans } = mkPlans('maint-hv7-');
+  fs.mkdirSync(path.join(plans, '_archive'));
+  fs.writeFileSync(path.join(plans, '_archive', 'x-handover.md'), 'KEEP ME');
+  put(plans, 'x-handover.md', 'stale legacy\n', 40 * DAY_S);
+  expect(maintenance.archiveStaleOpenHandovers(runs, NOW).moved).toBe(1);
+  expect(fs.readFileSync(path.join(plans, '_archive', 'x-handover.md'), 'utf8')).toBe('KEEP ME');
+  expect(fs.readFileSync(path.join(plans, '_archive', 'x-handover.2.md'), 'utf8')).toContain('stale legacy');
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('archiveStaleOpenHandovers skips a file another session already moved and does not count it', () => {
+  const { runs, plans } = mkPlans('maint-hv8-');
+  put(plans, 'y-handover.md', 'stale legacy\n', 40 * DAY_S);
+  expect(maintenance.archiveStaleOpenHandovers(runs, NOW)).toEqual({ moved: 1, failed: [] });
+  expect(maintenance.archiveStaleOpenHandovers(runs, NOW)).toEqual({ moved: 0, failed: [] });
+  expect(fs.readdirSync(path.join(plans, '_archive'))).toEqual(['y-handover.md']);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('archive dir that is a file reports failure and moves nothing', () => {
+  const { runs, plans } = mkPlans('maint-hv9-');
+  fs.writeFileSync(path.join(plans, '_archive'), 'i am a file');
+  put(plans, 'z-handover.md', 'stale legacy\n', 40 * DAY_S);
+  put(plans, 'zr-handover.md', 'FINAL OUTCOME: done\n', 5 * DAY_S);
+  const res = maintenance.archiveStaleOpenHandovers(runs, NOW);
+  expect(res.moved).toBe(0);
+  expect(res.failed).toEqual([{ name: 'z-handover.md', code: 'ENOTDIR' }]);
+  expect(maintenance.archiveResolvedHandovers(runs, NOW)).toBe(0);
+  expect(fs.existsSync(path.join(plans, 'z-handover.md'))).toBe(true);
+  expect(fs.existsSync(path.join(plans, 'zr-handover.md'))).toBe(true);
+  expect(fs.readFileSync(path.join(plans, '_archive'), 'utf8')).toBe('i am a file');
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('scanHandovers returns openCount, staleCount (>7d), newestOpen, invalid reasons', () => {
+  const { runs, plans } = mkPlans('maint-hv10-');
+  put(plans, 'fresh-handover.md', openHdr(DAY_S), 0);
+  put(plans, 'stale-handover.md', openHdr(10 * DAY_S), 0);
+  put(plans, 'legacy-handover.md', 'legacy open\n', 20 * DAY_S);
+  put(plans, 'done-handover.md', resolvedHdr(3600), 0);
+  put(plans, 'bad-handover.md', headered({ status: 'open', created: 'abc' }), 0);
+  put(plans, 'young-empty-handover.md', '', 10); // writer mid-create: silent
+  put(plans, 'old-empty-handover.md', '', 120);
+
+  const scan = maintenance.scanHandovers(runs, NOW);
+  expect(scan.ok).toBe(true);
+  expect(scan.error).toBeNull();
+  expect(scan.items.length).toBe(7);
+  expect(scan.openCount).toBe(3);
+  expect(scan.staleCount).toBe(2);
+  expect(scan.open.length).toBe(3);
+  expect(scan.newestOpen.name).toBe('fresh-handover.md');
+  expect([...scan.invalid].sort((a, b) => a.name.localeCompare(b.name))).toEqual([
+    { name: 'bad-handover.md', reason: 'bad-created' },
+    { name: 'old-empty-handover.md', reason: 'empty' },
+  ]);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('scanHandovers reports error code for unreadable plans dir, silent for missing', () => {
+  const runs = mkRuns('maint-hv11-');
+  const missing = maintenance.scanHandovers(runs, NOW);
+  expect(missing.ok).toBe(true);
+  expect(missing.error).toBeNull();
+  expect(missing.items).toEqual([]);
+
+  fs.writeFileSync(path.join(runs, 'plans'), 'plans is a file');
+  const broken = maintenance.scanHandovers(runs, NOW);
+  expect(broken.ok).toBe(false);
+  expect(broken.error).toBe('ENOTDIR');
+  expect(broken.items).toEqual([]);
+  expect(broken.openCount).toBe(0);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('scanHandovers caps at 500 entries', () => {
+  const { runs, plans } = mkPlans('maint-hv12-');
+  for (let i = 0; i < 600; i++) fs.writeFileSync(path.join(plans, `h${String(i).padStart(3, '0')}-handover.md`), 'open\n');
+  expect(maintenance.scanHandovers(runs, NOW).items.length).toBe(500);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('cleanupHandoverTemps removes .hv-tmp.* older than 60 min and keeps younger', () => {
+  const { runs, plans } = mkPlans('maint-hv13-');
+  put(plans, '.hv-tmp.1.old', 'x', 61 * 60);
+  put(plans, '.hv-tmp.2.young', 'x', 59 * 60);
+  put(plans, 'keep-handover.md', 'open\n', 5 * DAY_S);
+  expect(maintenance.cleanupHandoverTemps(runs, NOW)).toBe(1);
+  expect(fs.readdirSync(plans).sort()).toEqual(['.hv-tmp.2.young', 'keep-handover.md']);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('symlinked handover file is invalid symlink and not moved', () => {
+  const { runs, plans } = mkPlans('maint-hv14-');
+  const target = put(runs, 'outside.md', 'stale legacy\n', 40 * DAY_S);
+  const link = path.join(plans, 'link-handover.md');
+  fs.symlinkSync(target, link);
+  const [h] = maintenance.listHandovers(runs, NOW);
+  expect([h.name, h.status, h.valid, h.reason]).toEqual(['link-handover.md', 'invalid', false, 'symlink']);
+  expect(maintenance.newestUnresolvedHandover(runs, NOW)).toBeNull();
+  expect(maintenance.archiveStaleOpenHandovers(runs, NOW)).toEqual({ moved: 0, failed: [] });
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+  expect(fs.existsSync(path.join(plans, '_archive', 'link-handover.md'))).toBe(false);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('uppercase HANDOVER filename is scanned', () => {
+  const { runs, plans } = mkPlans('maint-hv15-');
+  put(plans, 'X-HANDOVER.md', 'open\n', DAY_S);
+  expect(maintenance.listHandovers(runs, NOW).map((h) => h.name)).toEqual(['X-HANDOVER.md']);
+  expect(path.basename(maintenance.newestUnresolvedHandover(runs, NOW))).toBe('X-HANDOVER.md');
+  fs.rmSync(runs, { recursive: true, force: true });
+});
