@@ -39,19 +39,44 @@ try {
   }
 } catch (_) {}
 
-// surface the newest UNRESOLVED handover, if any (graceful no-op). See maintenance (B).
+// handovers: lib/maintenance.js runHandoverMaintenance cleans temps, archives, and
+// reports from the pre-scan, rescanned whenever any archive was due. A failure prints
+// the scan-failed line and the hook carries on.
 try {
   const maintenance = require(path.join(ROOT, 'lib', 'maintenance.js'));
-  const open = maintenance.newestUnresolvedHandover(runsRoot);
-  if (open) process.stdout.write(`[advisor] OPEN handover: ${open}\n`);
-} catch (_) {}
-
-// auto-archive resolved handovers older than 24h (graceful no-op). See maintenance (C).
-try {
-  const maintenance = require(path.join(ROOT, 'lib', 'maintenance.js'));
-  const n = maintenance.archiveResolvedHandovers(runsRoot);
-  if (n > 0) process.stdout.write(`[advisor] archived ${n} resolved handover(s)\n`);
-} catch (_) {}
+  const now = Date.now();
+  const { scan, resolved, stale } = maintenance.runHandoverMaintenance(runsRoot, now);
+  if (scan.error && scan.error !== 'ENOENT') {
+    process.stdout.write(`[advisor] handover scan failed: ${scan.error}\n`);
+  } else {
+    const top = scan.newestOpen;
+    if (top) {
+      const ageMs = now - top.createdMs;
+      const ageDays = Math.floor(ageMs / 86400000);
+      process.stdout.write(ageMs > maintenance.STALE_WARN_S * 1000
+        ? `[advisor] STALE handover (${ageDays}d old): ${top.path} - resolve with bin/handover-resolve (auto-archives 30d after its last edit)\n`
+        : `[advisor] OPEN handover: ${top.path}\n`);
+    }
+    if (scan.openCount >= 2 || scan.staleCount >= 1) {
+      process.stdout.write(`[advisor] open handovers: ${scan.openCount} (${scan.staleCount} stale >7d)\n`);
+    }
+    if (resolved.moved > 0) process.stdout.write(`[advisor] archived ${resolved.moved} resolved handover(s)\n`);
+    if (stale.moved > 0) {
+      process.stdout.write(`[advisor] archived ${stale.moved} stale open handover(s) (unresolved >30d) to plans/_archive\n`);
+    }
+    if (scan.invalid.length > 0) {
+      const shown = scan.invalid.slice(0, 5).map((i) => `${i.name} (${i.reason})`);
+      const more = scan.invalid.length > 5 ? `, +${scan.invalid.length - 5} more` : '';
+      process.stdout.write(`[advisor] INVALID handover file(s) (${scan.invalid.length}): ${shown.join(', ')}${more} - fix or remove by hand\n`);
+    }
+    const failed = resolved.failed.concat(stale.failed);
+    if (failed.length > 0) {
+      process.stdout.write(`[advisor] handover archive failed (${failed.length}): ${failed.map((f) => `${f.name}: ${f.code}`).join(', ')}\n`);
+    }
+  }
+} catch (e) {
+  process.stdout.write(`[advisor] handover scan failed: ${(e && e.code) || (e && e.message) || 'unknown'}\n`);
+}
 
 // auto-archive vault reminders >30d past due (status flip + index update; graceful
 // no-op). vault.js loads bun:sqlite, which throws under node — so run it under bun,
