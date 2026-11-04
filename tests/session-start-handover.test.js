@@ -80,7 +80,7 @@ test('prints STALE line with day count when newest open is older than 7d', () =>
   const r = runHook(runs);
   expect(r.status).toBe(0);
   expect(hv(r.lines)).toContain(
-    `[advisor] STALE handover (10d old): ${p} - resolve with bin/handover-resolve (auto-archives after 30d)`
+    `[advisor] STALE handover (10d old): ${p} - resolve with bin/handover-resolve (auto-archives 30d after its last edit)`
   );
   expect(r.out).not.toContain('OPEN handover:');
   expect(hv(r.lines)).toContain('[advisor] open handovers: 1 (1 stale >7d)');
@@ -190,7 +190,7 @@ test('exact line texts match the contract', () => {
   fs.writeFileSync(path.join(plans, 'bad-handover.md'), '---\nstatus: nope\ncreated: 1\n---\n');
   const r = runHook(runs);
   expect(hv(r.lines)).toEqual([
-    `[advisor] STALE handover (8d old): ${stale} - resolve with bin/handover-resolve (auto-archives after 30d)`,
+    `[advisor] STALE handover (8d old): ${stale} - resolve with bin/handover-resolve (auto-archives 30d after its last edit)`,
     '[advisor] open handovers: 1 (1 stale >7d)',
     '[advisor] archived 1 resolved handover(s)',
     '[advisor] archived 1 stale open handover(s) (unresolved >30d) to plans/_archive',
@@ -225,7 +225,7 @@ test('7-day STALE boundary: 7d-60s is OPEN, 7d+60s is STALE (headered and legacy
     const ro = runHook(old.runs);
     expect(ro.status, kind).toBe(0);
     expect(hv(ro.lines), kind).toEqual([
-      `[advisor] STALE handover (7d old): ${po} - resolve with bin/handover-resolve (auto-archives after 30d)`,
+      `[advisor] STALE handover (7d old): ${po} - resolve with bin/handover-resolve (auto-archives 30d after its last edit)`,
       '[advisor] open handovers: 1 (1 stale >7d)',
     ]);
   }

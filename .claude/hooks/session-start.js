@@ -39,18 +39,13 @@ try {
   }
 } catch (_) {}
 
-// handovers: clean orphan temps, archive resolved (>24h) and stale open (>30d), then
-// report from one post-archive scan. A failure prints the scan-failed line and the
-// hook carries on. See lib/maintenance.js (B, C, C2) and lib/handover.js.
+// handovers: lib/maintenance.js runHandoverMaintenance cleans temps, archives, and
+// reports from the pre-scan, rescanned whenever any archive was due. A failure prints
+// the scan-failed line and the hook carries on.
 try {
   const maintenance = require(path.join(ROOT, 'lib', 'maintenance.js'));
   const now = Date.now();
-  maintenance.cleanupHandoverTemps(runsRoot, now);
-  let pre = maintenance.scanItems(runsRoot, now);
-  const resolved = maintenance.archiveResolvedHandovers(runsRoot, now, { items: pre.items });
-  const stale = maintenance.archiveStaleOpenHandovers(runsRoot, now, { items: pre.items });
-  if (resolved.moved + stale.moved > 0) pre = maintenance.scanItems(runsRoot, now);
-  const scan = maintenance.scanHandovers(runsRoot, now, pre);
+  const { scan, resolved, stale } = maintenance.runHandoverMaintenance(runsRoot, now);
   if (scan.error && scan.error !== 'ENOENT') {
     process.stdout.write(`[advisor] handover scan failed: ${scan.error}\n`);
   } else {
@@ -59,7 +54,7 @@ try {
       const ageMs = now - top.createdMs;
       const ageDays = Math.floor(ageMs / 86400000);
       process.stdout.write(ageMs > maintenance.STALE_WARN_S * 1000
-        ? `[advisor] STALE handover (${ageDays}d old): ${top.path} - resolve with bin/handover-resolve (auto-archives after 30d)\n`
+        ? `[advisor] STALE handover (${ageDays}d old): ${top.path} - resolve with bin/handover-resolve (auto-archives 30d after its last edit)\n`
         : `[advisor] OPEN handover: ${top.path}\n`);
     }
     if (scan.openCount >= 2 || scan.staleCount >= 1) {

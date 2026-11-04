@@ -622,3 +622,36 @@ test('600 entries: archiver drains the oldest 100 stale-open; newestUnresolvedHa
   expect(fs.existsSync(path.join(plans, nm(100)))).toBe(true);
   fs.rmSync(runs, { recursive: true, force: true });
 });
+
+test('runHandoverMaintenance: a file another session archives between scan and archive is not reported', async () => {
+  const { runs, plans } = mkPlans('maint-hv28-');
+  const H = await import('../lib/handover.js');
+  const p = put(plans, 'w-handover.md', '# t\n\nopen legacy body\n', 40 * DAY_S);
+  const r = maintenance.runHandoverMaintenance(runs, NOW, {
+    beforeArchive: () => { expect(H.moveToArchive(p, path.join(plans, '_archive'), null, null).ok).toBe(true); },
+  });
+  expect(r.stale.moved).toBe(0);
+  expect(r.scan.openCount).toBe(0);
+  expect(r.scan.newestOpen).toBeNull();
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('runHandoverMaintenance: nothing due returns the plain scan', () => {
+  const { runs, plans } = mkPlans('maint-hv29-');
+  put(plans, 'a-handover.md', openHdr(DAY_S), DAY_S);
+  put(plans, 'b-handover.md', resolvedHdr(3600), 0);
+  const r = maintenance.runHandoverMaintenance(runs, NOW);
+  expect(r.scan).toEqual(maintenance.scanHandovers(runs, NOW));
+  expect([r.resolved.moved, r.stale.moved]).toEqual([0, 0]);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('runHandoverMaintenance: one stale file is archived and the scan no longer lists it', () => {
+  const { runs, plans } = mkPlans('maint-hv30-');
+  put(plans, 's-handover.md', '# t\n\nopen legacy body\n', 40 * DAY_S);
+  const r = maintenance.runHandoverMaintenance(runs, NOW);
+  expect(r.stale.moved).toBe(1);
+  expect(r.scan.openCount).toBe(0);
+  expect(fs.existsSync(path.join(plans, '_archive', 's-handover.md'))).toBe(true);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
