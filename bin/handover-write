@@ -1,13 +1,7 @@
 #!/usr/bin/env bun
-// bin/handover-write — create a headered context-handover file under
-// <runs>/plans from the session.json snapshot plus optional stdin notes.
-// Replaces the inline `node -e` snippet in .claude/skills/pre-compact/SKILL.md.
-//
-// Usage:
-//   handover-write [--sid <sid>] [--slug <slug>] [--no-session] [-h|--help]
-//
-// sid precedence: --sid > $ADVISOR_SID > newest valid run dir. stdout is the
-// absolute path of the new file; diagnostics go to stderr.
+// handover-write [--sid <sid>] [--slug <slug>] [--no-session] [-h|--help]
+// Creates a headered handover under <runs>/plans from session.json plus stdin notes.
+// sid: --sid > $ADVISOR_SID > newest valid run dir. stdout is the new file path.
 // Exit: 0 ok, 1 IO/collision, 2 usage or no session, 3 symlinked plans/_archive.
 
 import fs from 'fs';

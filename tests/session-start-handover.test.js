@@ -207,3 +207,53 @@ test('archive failure prints the failed line and the hook still exits 0', () => 
   expect(hv(r.lines).some((l) => /^\[advisor\] handover archive failed \(1\): ancient-handover\.md: \w+/.test(l))).toBe(true);
   expect(fs.existsSync(path.join(plans, 'ancient-handover.md'))).toBe(true);
 });
+
+test('7-day STALE boundary: 7d-60s is OPEN, 7d+60s is STALE (headered and legacy)', () => {
+  const cases = [
+    ['headered', (plans, ageDays) => writeHeadered(plans, 'edge-handover.md', { ageDays })],
+    ['legacy', (plans, ageDays) => writeLegacy(plans, 'edge-handover.md', '# h\nnotes\n', ageDays)],
+  ];
+  for (const [kind, write] of cases) {
+    const young = setup();
+    const py = write(young.plans, 7 - 60 / DAY);
+    const ry = runHook(young.runs);
+    expect(ry.status, kind).toBe(0);
+    expect(hv(ry.lines), kind).toEqual([`[advisor] OPEN handover: ${py}`]);
+
+    const old = setup();
+    const po = write(old.plans, 7 + 60 / DAY);
+    const ro = runHook(old.runs);
+    expect(ro.status, kind).toBe(0);
+    expect(hv(ro.lines), kind).toEqual([
+      `[advisor] STALE handover (7d old): ${po} - resolve with bin/handover-resolve (auto-archives after 30d)`,
+      '[advisor] open handovers: 1 (1 stale >7d)',
+    ]);
+  }
+});
+
+test('resolved-archive failure prints the failed line even with no stale-open failures', () => {
+  const { runs, plans } = setup();
+  writeHeadered(plans, 'done-handover.md', { status: 'resolved', ageDays: 3, resolvedAgeDays: 25 / 24 });
+  fs.writeFileSync(path.join(plans, '_archive'), 'not a dir');
+  const r = runHook(runs);
+  expect(r.status).toBe(0);
+  expect(hv(r.lines)).toContain('[advisor] handover archive failed (1): done-handover.md: ENOTDIR');
+  expect(fs.existsSync(path.join(plans, 'done-handover.md'))).toBe(true);
+});
+
+test('symlinked plans dir prints ELOOP scan-failed line and leaves the target untouched', () => {
+  const runs = mk('ss-hv-runs-');
+  const target = mk('ss-hv-target-');
+  fs.symlinkSync(target, path.join(runs, 'plans'));
+  const hvFile = writeHeadered(target, 'ancient-handover.md', { ageDays: 40 });
+  const tmp = path.join(target, '.hv-tmp.x');
+  fs.writeFileSync(tmp, 'x');
+  const t = new Date(Date.now() - 2 * 3600 * 1000);
+  fs.utimesSync(tmp, t, t);
+  const r = runHook(runs);
+  expect(r.status).toBe(0);
+  expect(hv(r.lines)).toContain('[advisor] handover scan failed: ELOOP');
+  expect(fs.existsSync(hvFile)).toBe(true);
+  expect(fs.existsSync(tmp)).toBe(true);
+  expect(fs.existsSync(path.join(target, '_archive'))).toBe(false);
+});
