@@ -38,6 +38,8 @@ function writeHeadered(plans, name, { status = 'open', ageDays = 0, resolvedAgeD
   const content = `---\nstatus: ${status}\ncreated: ${created}\nsid: s1\nresolved: ${resolved}\noutcome:\narchived:\narchive_reason:\n---\n${body}`;
   const p = path.join(plans, name);
   fs.writeFileSync(p, content);
+  const t = new Date(created * 1000);
+  fs.utimesSync(p, t, t);
   return p;
 }
 

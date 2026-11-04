@@ -44,25 +44,28 @@ try {
 // hook carries on. See lib/maintenance.js (B, C, C2) and lib/handover.js.
 try {
   const maintenance = require(path.join(ROOT, 'lib', 'maintenance.js'));
-  maintenance.cleanupHandoverTemps(runsRoot);
-  const resolvedN = maintenance.archiveResolvedHandovers(runsRoot);
-  const stale = maintenance.archiveStaleOpenHandovers(runsRoot);
-  const scan = maintenance.scanHandovers(runsRoot);
+  const now = Date.now();
+  maintenance.cleanupHandoverTemps(runsRoot, now);
+  let pre = maintenance.scanItems(runsRoot, now);
+  const resolved = maintenance.archiveResolvedHandovers(runsRoot, now, { items: pre.items });
+  const stale = maintenance.archiveStaleOpenHandovers(runsRoot, now, { items: pre.items });
+  if (resolved.moved + stale.moved > 0) pre = maintenance.scanItems(runsRoot, now);
+  const scan = maintenance.scanHandovers(runsRoot, now, pre);
   if (scan.error && scan.error !== 'ENOENT') {
     process.stdout.write(`[advisor] handover scan failed: ${scan.error}\n`);
   } else {
     const top = scan.newestOpen;
     if (top) {
-      const ageMs = Date.now() - top.createdMs;
+      const ageMs = now - top.createdMs;
       const ageDays = Math.floor(ageMs / 86400000);
-      process.stdout.write(ageMs > 7 * 86400000
+      process.stdout.write(ageMs > maintenance.STALE_WARN_S * 1000
         ? `[advisor] STALE handover (${ageDays}d old): ${top.path} - resolve with bin/handover-resolve (auto-archives after 30d)\n`
         : `[advisor] OPEN handover: ${top.path}\n`);
     }
     if (scan.openCount >= 2 || scan.staleCount >= 1) {
       process.stdout.write(`[advisor] open handovers: ${scan.openCount} (${scan.staleCount} stale >7d)\n`);
     }
-    if (resolvedN > 0) process.stdout.write(`[advisor] archived ${resolvedN} resolved handover(s)\n`);
+    if (resolved.moved > 0) process.stdout.write(`[advisor] archived ${resolved.moved} resolved handover(s)\n`);
     if (stale.moved > 0) {
       process.stdout.write(`[advisor] archived ${stale.moved} stale open handover(s) (unresolved >30d) to plans/_archive\n`);
     }
@@ -71,8 +74,9 @@ try {
       const more = scan.invalid.length > 5 ? `, +${scan.invalid.length - 5} more` : '';
       process.stdout.write(`[advisor] INVALID handover file(s) (${scan.invalid.length}): ${shown.join(', ')}${more} - fix or remove by hand\n`);
     }
-    if (stale.failed.length > 0) {
-      process.stdout.write(`[advisor] handover archive failed (${stale.failed.length}): ${stale.failed.map((f) => `${f.name}: ${f.code}`).join(', ')}\n`);
+    const failed = resolved.failed.concat(stale.failed);
+    if (failed.length > 0) {
+      process.stdout.write(`[advisor] handover archive failed (${failed.length}): ${failed.map((f) => `${f.name}: ${f.code}`).join(', ')}\n`);
     }
   }
 } catch (e) {

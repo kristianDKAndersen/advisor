@@ -1,7 +1,7 @@
 ---
-scope: "lib/ — core advisor library modules: channel, summon, doc-queue, and related utilities"
-last_updated_by: "sid:1793109249-9768ee seq:1"
-last_updated_ts: "2026-10-27T13:54:30Z"
+scope: "lib/ — core advisor library modules: channel, summon, doc-queue, handover, maintenance and related utilities"
+last_updated_by: "sid:1793786322-693675 seq:1"
+last_updated_ts: "2026-11-04T09:59:10Z"
 ---
 
 # lib/
@@ -60,3 +60,28 @@ Markdown-aware sentence splitter shared by `bin/advisor-claims-check` and `bin/a
 - takes `[{line, text}]` entries and returns `[{sentence, line, endLine}]`
 - skips code fences (`opts.fences`, default true); strips list/quote/heading markers; joins wrapped paragraph lines; splits on `.` `!` `?` except after `e.g.` / `i.e.` / `vs.`
 - a table yields one sentence per body row (`opts.tableRows`, default true)
+
+## handover.js
+
+Shared handover-file module: header parser, legacy resolved rule, header rewrite and atomic file helpers. CommonJS, `fs` + `path` only, so the node-run SessionStart hook can load it through `lib/maintenance.js`.
+
+- Header: a `---` fenced block within the first 40 lines with keys `status`, `created`, `sid`, `resolved`, `outcome`, `archived`, `archive_reason` (`HEADER_KEYS`). `classifyContent()` returns `kind` (`header`, `legacy`, `invalid`, `empty`), `status` (`open`/`resolved`) and, for invalid files, `reason` (e.g. `unclosed-header`, `bad-status`, `bad-created`, `future-created`).
+- Legacy files (no leading `---`) resolve only on an anchored `FINAL OUTCOME` line (`LEGACY_RESOLVED_RE`); a mid-line mention stays open. Header files never resolve from the body.
+- `applyHeaderUpdates()` rewrites only the named keys and keeps body bytes identical; `renderHeader()` writes keys in fixed order.
+- `atomicReplace()` and `createExclusive()` write a same-directory `.hv-tmp.*` file and rename it into place. They never use `link()` (hard links fail on exFAT/SMB). Reads never follow symlinks.
+- `moveToArchive()` moves a file into `plans/_archive/`. `resolveHandover()` sets a header file to resolved, or appends a legacy `FINAL OUTCOME:` line; it is check-then-act, so an archive or body edit landing between recheck and rename can race (accepted residual, plan D6).
+- Thresholds: `STALE_OPEN_S` 30d, `STALE_WARN_S` 7d, `RESOLVED_ARCHIVE_S` 24h, `EMPTY_GRACE_S` 60s, `FUTURE_SKEW_S` 300s, `MAX_BYTES` 1 MiB.
+- consumed by `lib/maintenance.js` (`require('./handover')`), `bin/handover-resolve` (`resolveHandover`) and `bin/handover-write` (`createExclusive`, `renderHeader`)
+
+## maintenance.js
+
+Testable selection and archiving logic for the SessionStart hook (`.claude/hooks/session-start.js`, which loads it with `require`). Every function is defensive: filesystem errors degrade to an empty list, `null` or 0 moved, so the hook never throws.
+
+- `pickLastSession()` — newest run dir with a parseable `session.json`, skipping `plans` and `_archive`
+- `listHandovers()` / `scanHandovers()` — classify `plans/` entries; `scanHandovers()` returns `openCount`, `staleCount` (open >7d), `newestOpen` and invalid reasons, capped at the newest 500 names (`SCAN_CAP`); a symlinked `plans/` is refused (`error: 'ELOOP'`). `scanItems()` is exported so the hook scans once and passes `items` to the archivers
+- `newestUnresolvedHandover()` — path of the newest open handover, or `null`
+- `archiveResolvedHandovers()` — moves resolved handovers older than 24h into `plans/_archive/` (header gets `archive_reason: resolved-24h`); returns `{ moved, failed }`
+- `archiveStaleOpenHandovers()` — moves open handovers idle more than 30d, measured from the later of `created` and mtime (header gets `archive_reason: stale-30d`; legacy files get an `ARCHIVED-STALE:` line); invalid, unreadable and empty files never move; returns `{ moved, failed }`
+- `cleanupHandoverTemps()` — removes `.hv-tmp.*` files older than 60 min in `plans/` and `plans/_archive/` (orphans from killed writers); skips a symlinked `plans/` or `_archive/`
+- `archiveStaleReminders(vault, today, maxAgeDays = 30)` — sets vault reminders due more than 30 days before `today` to archived via `vault.setStatus` (a status change, not a file move). The vault is injected because `lib/vault.js` loads `bun:sqlite` at module top and would throw under node; the hook calls it via `bun -e`
+- consumed by `.claude/hooks/session-start.js` and `bin/handover-write` (`pickLastSession`)
