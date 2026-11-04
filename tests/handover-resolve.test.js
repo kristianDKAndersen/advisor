@@ -302,3 +302,43 @@ test('target removed before rename is not recreated', async () => {
   expect(fs.readdirSync(plans)).toEqual([]);
   fs.rmSync(runs, { recursive: true, force: true });
 });
+
+test('symlinked plans dir exits 3 and changes nothing', async () => {
+  const { runs, plans } = mkPlans();
+  const real = await headered(plans, 'real-handover.md', 'body\n');
+  const orig = fs.readFileSync(real, 'utf8');
+  const linkDir = path.join(runs, 'plans-link');
+  fs.symlinkSync(plans, linkDir);
+  const r = run(runs, [path.join(linkDir, 'real-handover.md'), '--outcome', 'x'], runs);
+  expect(r.status).toBe(3);
+  expect(r.stderr).toMatch(/refusing symlinked directory/);
+  expect(fs.readFileSync(real, 'utf8')).toBe(orig);
+  expect(noTmp(plans)).toEqual([]);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test.skipIf(process.getuid && process.getuid() === 0)('unreadable handover exits 2', async () => {
+  const { runs, plans } = mkPlans();
+  const f = await headered(plans, 'locked-handover.md', 'body\n');
+  fs.chmodSync(f, 0o000);
+  const r = run(runs, [f, '--outcome', 'x'], plans);
+  fs.chmodSync(f, 0o600);
+  expect(r.status).toBe(2);
+  expect(r.stderr).toMatch(/unreadable/);
+  fs.rmSync(runs, { recursive: true, force: true });
+});
+
+test('resolve works on a file whose closing fence has a trailing space', async () => {
+  const { runs, plans } = mkPlans();
+  const f = path.join(plans, 'ws-handover.md');
+  const created = Math.floor(Date.now() / 1000) - 100;
+  fs.writeFileSync(f, `--- \nstatus: open\ncreated: ${created}\nsid: s1\n--- \nbody\n`);
+  const r = run(runs, [f, '--outcome', 'done'], plans);
+  expect(r.status).toBe(0);
+  const out = fs.readFileSync(f, 'utf8');
+  expect(out.startsWith('--- \n')).toBe(true);
+  expect(out).toMatch(/^status: resolved$/m);
+  expect(out).toMatch(/^outcome: done$/m);
+  expect(out).toMatch(/\n--- \nbody\n$/);
+  fs.rmSync(runs, { recursive: true, force: true });
+});

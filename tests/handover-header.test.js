@@ -235,3 +235,17 @@ test('corpus-shaped fixtures: mid-line sentence "still lacks FINAL OUTCOME marke
   expect(r.kind).toBe('legacy');
   expect(r.status).toBe('open');
 });
+
+test('classifyContent: opening fence with trailing space or tab still classifies the header', () => {
+  for (const ws of [' ', '\t']) {
+    const c = hdr({ status: 'resolved', resolved: String(CREATED + 60) }).replace(/^---\n/, `---${ws}\n`);
+    const r = classifyContent(c, opts);
+    expect(r.kind).toBe('header');
+    expect(r.status).toBe('resolved');
+  }
+});
+
+test('applyHeaderUpdates: trailing-space fences are found and their bytes kept', () => {
+  const c = '--- \nstatus: open\ncreated: 5\n---\t\nbody\n';
+  expect(applyHeaderUpdates(c, { status: 'resolved' })).toBe('--- \nstatus: resolved\ncreated: 5\n---\t\nbody\n');
+});

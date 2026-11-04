@@ -12,8 +12,8 @@
 // Usage:
 //   handover-resolve <file> --outcome "<status text>" [-h|--help]
 //
-// Exit codes: 0 resolved, 1 IO error, 2 usage / not a handover / invalid,
-// 3 refused symlink, 4 already resolved.
+// Exit codes: 0 resolved, 1 IO error, 2 usage / not a handover / invalid or unreadable,
+// 3 refused symlink (file or its directory), 4 already resolved.
 
 import { resolveHandover } from '../lib/handover.js';
 
