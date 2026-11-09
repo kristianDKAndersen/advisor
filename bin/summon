@@ -127,6 +127,31 @@ extract() { echo "$META" | node -e "console.log(JSON.parse(require('fs').readFil
 SID=$(extract sid)
 LAUNCH_SH=$(extract launchScript)
 
+# herdr backend: both flags required; the runner allocates panes and detaches one --run child per sid.
+if [[ "${ADVISOR_HERDR:-}" == "1" && "${HERDR_ENV:-}" == "1" ]]; then
+  TIMELINE_PORT="${ADVISOR_TIMELINE_PORT:-7878}"
+  if [[ -z "$NO_TIMELINE" ]]; then
+    if ! curl -sf --connect-timeout 1 "http://127.0.0.1:$TIMELINE_PORT/health" >/dev/null 2>&1; then
+      mkdir -p "$HOME/.advisor"
+      nohup node "$ROOT/bin/advisor-timeline" --port "$TIMELINE_PORT" >>"$HOME/.advisor/timeline.log" 2>&1 &
+      disown
+    fi
+    TIMELINE_URL="http://127.0.0.1:$TIMELINE_PORT/session/$SID"
+    echo "$TIMELINE_URL"
+    if [[ "$(uname)" == "Darwin" ]]; then
+      open "$TIMELINE_URL" 2>/dev/null || true
+    else
+      xdg-open "$TIMELINE_URL" 2>/dev/null || true
+    fi
+  fi
+  if ! printf '%s' "$META" | node "${ADVISOR_HERDR_RUNNER:-$ROOT/lib/herdr-runner.js}" --launch-from-meta --agent "$AGENT" --timeout-ms $((TIMEOUT_SEC * 1000)) ${TUI:+--tui}; then
+    echo "[summon] herdr launch failed for sid=$SID" >&2
+    exit 1
+  fi
+  echo "$META"
+  exit 0
+fi
+
 if [[ -n "$TUI" ]]; then
   if [[ "${ADVISOR_TMUX_MULTIPLEX:-}" == "1" ]]; then
     # --tui tiled: all workers share one 'tui' window in the advisor session.
