@@ -128,7 +128,8 @@ d('herdr backend live (isolated session advisor-itest)', () => {
 
   test('1+2: --launch-from-meta tags a pane in tab "advisor", writes runner.json, logs the readiness path', async () => {
     const nonce = `NONCE-${Math.random().toString(36).slice(2, 10)}`;
-    const run = claudeRun(nonce);
+    // --launch-from-meta children never type the prompt (D9), so it goes in claude's argv like summon's launch.sh.
+    const run = mkRun('cd "$(dirname "$0")" || exit 1\nexec claude --model haiku -- "$(cat prompt.txt)"', `Reply with exactly: ${nonce}`);
     const meta = { sessions: [{ sid: run.sid, launchScript: run.launchScript, promptFile: run.promptFile }] };
     const res = await runCli(['--launch-from-meta', '--agent', 'coder', '--timeout-ms', '240000'], {
       input: JSON.stringify(meta), env: { HERDR_SOCKET_PATH: sock, HERDR_WORKSPACE_ID: workspaceId, ADVISOR_CAPTURE_TIMEOUT_MS: '45000' },
@@ -141,11 +142,10 @@ d('herdr backend live (isolated session advisor-itest)', () => {
     const tabs = (await client.request('tab.list', { workspace_id: workspaceId })).tabs;
     expect(tabs.find((t) => t.tab_id === pane.tab_id).label).toBe('advisor');
     const log = path.join(run.runDir, 'herdr-runner.log');
-    const text = await waitFor(() => { const t = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : ''; return /readiness=/.test(t) ? t : null; }, 90000);
-    console.log(`READINESS (launch-from-meta child): ${(/\[herdr-runner\] readiness=\S+/.exec(text) || ['none'])[0]}`);
-    expect(text).toMatch(/readiness=(agent|footer-fallback)/);
     await waitFor(() => !readRecord(run), 200000);
-    expect(fs.readFileSync(log, 'utf8')).not.toContain('Command failed');
+    const text = fs.readFileSync(log, 'utf8');
+    expect(text).not.toContain('readiness='); // D9: the prompt is in argv, so the child never waits for readiness
+    expect(text).not.toContain('Command failed');
   }, 360000);
 
   test('3: agent.prompt delivers the nonce prompt and claude reply is read back', async () => {
@@ -218,4 +218,26 @@ d('herdr backend live (isolated session advisor-itest)', () => {
     expect(res.status).toBe(3);
     expect(exit).toMatchObject({ type: 'observe_exit', code: 3, reason: 'dead' });
   }, 100000);
+
+  test('8: a launch-from-meta worker with its prompt in argv that works ~20 s is not closed early and ends cleanly', async () => {
+    // Stands in for claude busy on its argv prompt: never idle, writes its result after 20 s, then exits.
+    const result = JSON.stringify({ seq: 1, type: 'result', body: 'worker done', from: 'worker' });
+    const run = mkRun(`sleep 20\nprintf '%s\\n' '${result}' >> "$(dirname "$0")/channel/outbox.jsonl"\nexit 0`);
+    const meta = { sessions: [{ sid: run.sid, launchScript: run.launchScript, promptFile: run.promptFile }] };
+    const res = await runCli(['--launch-from-meta', '--agent', 'coder', '--timeout-ms', '240000'], {
+      input: JSON.stringify(meta), env: { HERDR_SOCKET_PATH: sock, HERDR_WORKSPACE_ID: workspaceId, ADVISOR_CAPTURE_TIMEOUT_MS: '3000' },
+    });
+    expect(res.code).toBe(0);
+    const rec = await waitFor(() => readRecord(run), 30000);
+    expect(rec).toMatchObject({ backend: 'herdr' });
+    await sleep(10000); // well past 2x the readiness timeout
+    expect((await client.request('pane.get', { pane_id: rec.pane_id })).pane.tokens.advisor_sid).toBe(run.sid);
+    await waitFor(() => !readRecord(run), 60000);
+    const text = fs.readFileSync(path.join(run.runDir, 'herdr-runner.log'), 'utf8');
+    console.log(`CHECK 8 runner log:\n${text}`);
+    expect(text).toContain('result_in_outbox=true');
+    expect(text).not.toContain('Command failed');
+    expect(text).not.toMatch(/readiness=|reason=unexpected/);
+    expect(outboxLines(run)).toHaveLength(1);
+  }, 120000);
 });

@@ -876,17 +876,6 @@ describe('fix round 3 D8: verifyToken before every input call', () => {
     expect(s.tokens).toEqual({ advisor_sid: 'someone-else' });
   });
 
-  test('(3) readiness timeout: nothing typed after the launch, sealed unexpected with readiness=timeout', async () => {
-    const run = mkRun();
-    const s = makeStub({ text: 'user@host ~ % ', agent: '' });
-    const res = await runSpawn(run, s, fastWait);
-    expect(res.log).toContain('readiness=timeout');
-    expect(res.log).toMatch(/worker ended reason=unexpected .*readiness=timeout/);
-    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=unexpected');
-    expect(res.err).toBeDefined();
-    expect(inputs(s)).toEqual(['pane.send_text', 'pane.send_keys']);
-  });
-
   test('(4) happy path sends launch, Enter, then the prompt in order, each right after a pane.get', async () => {
     const run = mkRun();
     const s = makeStub();
@@ -899,6 +888,131 @@ describe('fix round 3 D8: verifyToken before every input call', () => {
     expect(s.calls.find((c) => c.method === 'pane.send_keys').params.keys).toEqual(['enter']);
     expect(s.calls.find((c) => c.method === 'agent.prompt').params.text).toBe('do the thing');
   });
+});
+
+describe('D9: a long-running worker is never killed by the readiness wait', () => {
+  const inputs = (s) => methods(s).filter((m) => ['pane.send_text', 'pane.send_keys', 'agent.prompt'].includes(m));
+  const shortWait = { env: { HERDR_BIN_PATH: '/x/herdr', HERDR_SOCKET_PATH: '/x/sock', ADVISOR_CAPTURE_TIMEOUT_MS: '100' } };
+  // The stub shell never shows claude's idle footer, like a worker busy on its argv prompt.
+  const busy = () => makeStub({ text: 'working on the task', agent: '' });
+  const sentinelLater = (s, run, ms, state) => {
+    s.hooks['pane.send_keys'] = () => { setTimeout(() => { state.written = true; writeSentinel(s, run); }, ms); return undefined; };
+    s.hooks['pane.close'] = () => { state.closedBeforeDone = state.closedBeforeDone || !state.written; return undefined; };
+  };
+
+  test('(1) promptInArgv: a worker running past 2x the readiness timeout is never closed and gets no agent.prompt', async () => {
+    const run = mkRun();
+    const s = busy();
+    const state = {};
+    sentinelLater(s, run, 700, state);
+    const res = await runSpawn(run, s, { ...shortWait, promptInArgv: true });
+    expect(res.err).toBeUndefined();
+    expect(res.value).toBe('final answer');
+    expect(state.closedBeforeDone).toBeFalsy();
+    expect(inputs(s)).toEqual(['pane.send_text', 'pane.send_keys']);
+    for (const m of ['agent.get', 'pane.read', 'agent.prompt']) expect(methods(s)).not.toContain(m);
+    expect(res.log).not.toContain('readiness=');
+  });
+
+  test('(2) promptInArgv: verifyToken still runs right before the launch send_text and send_keys', async () => {
+    const run = mkRun();
+    const s = busy();
+    sentinelLater(s, run, 50, {});
+    await runSpawn(run, s, { ...shortWait, promptInArgv: true });
+    const ms = methods(s);
+    for (const m of ['pane.send_text', 'pane.send_keys']) expect(ms[ms.indexOf(m) - 1]).toBe('pane.get');
+  });
+
+  test('(2b) promptInArgv: a foreign token before the launch sends nothing and closes nothing', async () => {
+    const run = mkRun();
+    const s = busy();
+    s.tokens = { advisor_sid: 'someone-else' };
+    const res = await runSpawn(run, s, { ...shortWait, promptInArgv: true });
+    expect(String(res.err && res.err.message)).toContain('reason=herdr-restart');
+    expect(inputs(s)).toEqual([]);
+    expect(closes(s)).toHaveLength(0);
+  });
+
+  test('(3) no promptInArgv: readiness timeout is not fatal, types nothing, never closes, keeps supervising', async () => {
+    const run = mkRun();
+    const s = busy();
+    const state = {};
+    sentinelLater(s, run, 700, state);
+    const res = await runSpawn(run, s, shortWait);
+    expect(res.log).toContain('readiness=timeout, continuing');
+    expect(res.log).not.toMatch(/worker ended reason=unexpected/);
+    expect(res.err).toBeUndefined();
+    expect(res.value).toBe('final answer');
+    expect(state.closedBeforeDone).toBeFalsy();
+    expect(inputs(s)).toEqual(['pane.send_text', 'pane.send_keys']);
+    expect(methods(s)).not.toContain('agent.prompt');
+  });
+
+  test('(4) pane_closed ends supervision: result_in_outbox=true, value returned, no synthetic line', async () => {
+    const run = mkRun();
+    const s = busy();
+    fs.writeFileSync(run.outbox, JSON.stringify({ seq: 1, type: 'result', body: 'worker done', from: 'worker' }) + '\n');
+    s.hooks['pane.send_keys'] = () => { setTimeout(() => s.handlers.onEvent({ event: 'pane_closed', paneId: 'w1:p1', raw: {} }), 100); return undefined; };
+    const res = await runSpawn(run, s, { promptInArgv: true });
+    expect(res.err).toBeUndefined();
+    expect(res.value).toBe('worker done');
+    expect(res.log).toContain('result_in_outbox=true');
+    expect(outboxLines(run)).toHaveLength(1);
+    expect(closes(s)).toHaveLength(0);
+  });
+
+  test('(4b) pane_closed without a result seals pane-died; the subscription covers pane.exited and pane.closed', async () => {
+    const run = mkRun();
+    const s = busy();
+    s.hooks['pane.send_keys'] = () => { setTimeout(() => s.handlers.onEvent({ event: 'pane_closed', paneId: 'w1:p1', raw: {} }), 100); return undefined; };
+    const res = await runSpawn(run, s, { promptInArgv: true });
+    expect(String(res.err && res.err.message)).toContain('reason=pane-died');
+    expect(outboxLines(run)).toHaveLength(1);
+    const sub = s.calls.find((c) => c.method === 'events.subscribe').params.subscriptions;
+    expect(sub.map((x) => x.type).sort()).toEqual(['pane.closed', 'pane.exited']);
+  });
+
+  test('(4c) a pane_closed for another pane is ignored', async () => {
+    const run = mkRun();
+    const s = busy();
+    const state = {};
+    sentinelLater(s, run, 300, state);
+    const prev = s.hooks['pane.send_keys'];
+    s.hooks['pane.send_keys'] = (p) => { setTimeout(() => s.handlers.onEvent({ event: 'pane_closed', paneId: 'w1:p9', raw: {} }), 50); return prev(p); };
+    const res = await runSpawn(run, s, { promptInArgv: true });
+    expect(res.value).toBe('final answer');
+  });
+
+  test('(5) pane_not_found during the readiness polling counts as the pane being gone', async () => {
+    const run = mkRun();
+    const s = busy();
+    s.hooks['pane.send_keys'] = () => { setTimeout(() => { s.gone = true; }, 30); return undefined; };
+    const res = await runSpawn(run, s, { env: { HERDR_BIN_PATH: '/x/herdr', HERDR_SOCKET_PATH: '/x/sock', ADVISOR_CAPTURE_TIMEOUT_MS: '10000' } });
+    expect(String(res.err && res.err.message)).toContain('reason=pane-died');
+    expect(closes(s)).toHaveLength(0);
+    expect(outboxLines(run)).toHaveLength(1);
+  });
+
+  test('(6) CLI --run passes the prompt in argv: a worker running past 2x the readiness timeout is not closed', async () => {
+    const run = mkRun();
+    const fake = await startFakeHerdr({ panes: [{ pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: run.sid } }], tabs: [{ tab_id: 'w1:t1', label: 'advisor', number: 1 }] });
+    try {
+      const child = spawn(process.execPath, [SCRIPT, '--sid', run.sid, '--run', '--agent', 'coder', '--launch-script', run.launchScript, '--prompt-file', run.promptFile, '--timeout-ms', '60000', '--pane-id', 'w1:p1', '--tab-id', 'w1:t1', '--workspace-id', 'w1'], {
+        env: { ...process.env, HOME: path.join(tmp, 'home'), ADVISOR_NO_REAPER: '1', HERDR_SOCKET_PATH: fake.socketPath, ADVISOR_CAPTURE_TIMEOUT_MS: '300' },
+        stdio: 'ignore',
+      });
+      const exited = new Promise((resolve) => child.on('close', (code) => resolve(code)));
+      await waitFor(() => fake.calls.some((c) => c.method === 'pane.send_keys'));
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(fake.calls.filter((c) => c.method === 'pane.close')).toHaveLength(0);
+      expect(fake.calls.filter((c) => c.method === 'agent.prompt')).toHaveLength(0);
+      expect(fs.existsSync(path.join(run.runDir, 'runner.json'))).toBe(true);
+      child.kill('SIGTERM');
+      await exited;
+    } finally {
+      await fake.stop();
+    }
+  }, 20000);
 });
 
 describe('CLAUDE_READY_RE', () => {
