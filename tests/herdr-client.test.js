@@ -187,7 +187,12 @@ test('fake server throws on tab.close, workspace.close, server.stop and session.
     const errors = [];
     const handler = (e) => errors.push(e);
     process.on('uncaughtException', handler);
-    await createClient({ socketPath: f.socketPath, timeoutMs: 100 }).request(method, {}).catch(() => {});
+    await new Promise((res) => {
+      const raw = net.connect(f.socketPath, () => raw.write(JSON.stringify({ id: 'x', method, params: {} }) + '\n'));
+      setTimeout(() => { raw.destroy(); res(); }, 100);
+      raw.on('error', () => res());
+      raw.on('close', () => res());
+    });
     await sleep(20);
     process.off('uncaughtException', handler);
     await expect(f.stop()).rejects.toThrow(method);
@@ -198,4 +203,31 @@ test('fake server throws on tab.close, workspace.close, server.stop and session.
 test('lib/herdr-client.js never names a destructive method', () => {
   const src = fs.readFileSync(new URL('../lib/herdr-client.js', import.meta.url), 'utf8');
   for (const m of ['tab.close', 'workspace.close', 'server.stop', 'session.stop']) expect(src.includes(m)).toBe(false);
+});
+
+test('request rejects methods outside the allow-list without touching the socket', async () => {
+  let connects = 0;
+  const c = createClient({ socketPath: fake.socketPath, connect: (p) => { connects += 1; return net.connect(p); } });
+  for (const m of ['tab.close', 'workspace.close', 'server.stop', 'session.stop', 'pane.delete', 'agent.kill', '']) {
+    const err = await c.request(m, {}).catch((e) => e);
+    expect(err).toBeInstanceOf(HerdrError);
+    expect(err.code).toBe('method_not_allowed');
+  }
+  expect(connects).toBe(0);
+  expect(fake.calls.length).toBe(0);
+});
+
+test('every allow-listed method is sent to the socket', async () => {
+  const allowed = ['pane.get', 'pane.list', 'tab.list', 'tab.create', 'pane.split', 'pane.close', 'pane.report_metadata', 'pane.read', 'pane.send_text', 'pane.send_keys', 'workspace.list', 'ping', 'agent.get', 'agent.prompt'];
+  const c = createClient({ socketPath: fake.socketPath, timeoutMs: 200 });
+  for (const m of allowed) {
+    const err = await c.request(m, {}).catch((e) => e);
+    expect(err && err.code).not.toBe('method_not_allowed');
+  }
+  expect(fake.calls.map((x) => x.method)).toEqual(allowed);
+});
+
+test('the preload scrubs ADVISOR_WORKER_BACKEND and HERDR_BIN_PATH', () => {
+  expect(process.env.ADVISOR_WORKER_BACKEND).toBeUndefined();
+  expect(process.env.HERDR_BIN_PATH).toBeUndefined();
 });

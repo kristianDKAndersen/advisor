@@ -12,6 +12,6 @@ if (process.env.ADVISOR_NO_REAPER == null || process.env.ADVISOR_NO_REAPER === '
 // A developer running bun test inside herdr with the gate exported must still get
 // tmux defaults, and no test may reach the live herdr socket by inheritance.
 // Tests that need herdr mode set these themselves.
-for (const k of ['ADVISOR_HERDR', 'HERDR_ENV', 'HERDR_SOCKET_PATH', 'HERDR_PANE_ID', 'HERDR_TAB_ID', 'HERDR_WORKSPACE_ID']) {
+for (const k of ['ADVISOR_HERDR', 'HERDR_ENV', 'HERDR_SOCKET_PATH', 'HERDR_PANE_ID', 'HERDR_TAB_ID', 'HERDR_WORKSPACE_ID', 'ADVISOR_WORKER_BACKEND', 'HERDR_BIN_PATH']) {
   delete process.env[k];
 }
