@@ -94,6 +94,37 @@ describe('readRunnerBackend', () => {
     expect(readRunnerBackend(tmpDir)).toBe('tmux');
   });
 
+  describe('persistent backend marker', () => {
+    const writeMarker = (text) => fs.writeFileSync(path.join(tmpDir, 'backend'), text);
+
+    test('"herdr" from the marker alone (runner.json deleted by a clean exit)', () => {
+      writeMarker('herdr\n');
+      expect(readRunnerBackend(tmpDir)).toBe('herdr');
+    });
+
+    test('marker "herdr" wins over a runner.json that says tmux', () => {
+      writeMarker('herdr\n');
+      writeRunner(JSON.stringify({ pid: 1, backend: 'tmux' }));
+      expect(readRunnerBackend(tmpDir)).toBe('herdr');
+    });
+
+    test('a non-herdr marker falls through to runner.json', () => {
+      writeMarker('tmux\n');
+      writeRunner(JSON.stringify({ pid: 1, backend: 'herdr' }));
+      expect(readRunnerBackend(tmpDir)).toBe('herdr');
+    });
+
+    test('"tmux" for a junk marker with no runner.json', () => {
+      writeMarker('Herdr');
+      expect(readRunnerBackend(tmpDir)).toBe('tmux');
+    });
+
+    test('"tmux" when the marker path is a directory, without throwing', () => {
+      fs.mkdirSync(path.join(tmpDir, 'backend'));
+      expect(readRunnerBackend(tmpDir)).toBe('tmux');
+    });
+  });
+
   test('"tmux" when runner.json is unreadable as a file, without throwing', () => {
     fs.mkdirSync(path.join(tmpDir, 'runner.json'));
     expect(readRunnerBackend(tmpDir)).toBe('tmux');

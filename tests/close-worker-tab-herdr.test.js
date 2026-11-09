@@ -93,12 +93,37 @@ test('herdr runner.json: env HERDR_SOCKET_PATH is used when set', async () => {
   });
 });
 
-test('runner.json gone + ADVISOR_HERDR=1 HERDR_ENV=1: closes by token scan, foreign pane untouched', async () => {
+test('backend marker survives a clean exit: runner.json gone, flags unset -> herdr token close, no tmux', async () => {
+  const sid = `cwt-h-marker-${Date.now()}`;
+  await withFake(sid, [
+    { pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: sid } },
+    { pane_id: 'w1:p2', tab_id: 'w1:t1', tokens: { advisor_sid: 'other' } },
+  ], async (fake, s) => {
+    fs.writeFileSync(path.join(s.runDir, 'backend'), 'herdr\n');
+    const r = await run(CLOSE_WORKER_TAB, [sid], scrubbedEnv(s, { HERDR_SOCKET_PATH: fake.socketPath }));
+    expect(r.status).toBe(0);
+    expect(closes(fake)).toEqual(['w1:p1']);
+    expect(tmuxCalled(s)).toBe(false);
+  });
+});
+
+test('run dir exists without marker or runner.json + herdr flags set: tmux path, herdr not contacted', async () => {
+  const sid = `cwt-h-tmuxdir-${Date.now()}`;
+  await withFake(sid, [{ pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: sid } }], async (fake, s) => {
+    const r = await run(CLOSE_WORKER_TAB, [sid], scrubbedEnv(s, { ADVISOR_HERDR: '1', HERDR_ENV: '1', HERDR_SOCKET_PATH: fake.socketPath }));
+    expect(r.status).toBe(0);
+    expect(fake.calls.length).toBe(0);
+    expect(tmuxCalled(s)).toBe(true);
+  });
+});
+
+test('run dir missing + ADVISOR_HERDR=1 HERDR_ENV=1: env gate closes by token scan, foreign pane untouched', async () => {
   const sid = `cwt-h-scan-${Date.now()}`;
   await withFake(sid, [
     { pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: sid } },
     { pane_id: 'w1:p2', tab_id: 'w1:t1', tokens: { advisor_sid: 'other' } },
   ], async (fake, s) => {
+    fs.rmSync(s.runDir, { recursive: true });
     const r = await run(CLOSE_WORKER_TAB, [sid], scrubbedEnv(s, { ADVISOR_HERDR: '1', HERDR_ENV: '1', HERDR_SOCKET_PATH: fake.socketPath }));
     expect(r.status).toBe(0);
     expect(closes(fake)).toEqual(['w1:p1']);
@@ -106,13 +131,13 @@ test('runner.json gone + ADVISOR_HERDR=1 HERDR_ENV=1: closes by token scan, fore
   });
 });
 
-test('runner.json gone + flags unset: herdr is not contacted, tmux path runs', async () => {
-  const sid = `cwt-h-off-${Date.now()}`;
+test('run dir missing + flags unset: nothing is contacted', async () => {
+  const sid = `cwt-h-gone-${Date.now()}`;
   await withFake(sid, [{ pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: sid } }], async (fake, s) => {
+    fs.rmSync(s.runDir, { recursive: true });
     const r = await run(CLOSE_WORKER_TAB, [sid], scrubbedEnv(s, { HERDR_SOCKET_PATH: fake.socketPath }));
     expect(r.status).toBe(0);
     expect(fake.calls.length).toBe(0);
-    expect(tmuxCalled(s)).toBe(true);
   });
 });
 
