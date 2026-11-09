@@ -375,6 +375,7 @@ A run keeps the backend it started with: teardown reads the run's `backend` mark
 
 **Safety rules.**
 - Every worker pane is tagged with an `advisor_sid` token. A pane is closed only when its token matches the worker's sid; pane ids are reused across herdr sessions, so an id alone is never enough.
+- The tag is set once, when the pane is placed (inside the placement lock). The worker's runner only checks it before typing anything; if the tag is missing or belongs to another sid (the id was reused after a herdr restart), the runner stops as `herdr-restart` without typing or closing anything.
 - Teardown closes panes only. It never closes a tab or a workspace and never stops the herdr server.
 - Every herdr summon first reaps orphans: a tagged worker pane is closed only when its token matches, its run's `session.json` has not changed for 24 h, its sid timestamp is at least 2 h old, and no process mentions the sid. A pane you keep open for reading past 24 h can be closed this way.
 - A worker's `bin/close-tab` closes only its own pane.

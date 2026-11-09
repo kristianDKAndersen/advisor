@@ -677,7 +677,11 @@ describe('fix round 1: D6 orphan panes, m2 sid validation, m4 usage, m5 live soc
         lockDir: path.join(tmp, 'lock-d7a'), client: createClient({ socketPath: fake.socketPath }),
         spawner: () => ({ unref() {} }),
       });
-      expect(fake.calls.filter((c) => c.method === 'pane.report_metadata')).toHaveLength(0);
+      // Placement tags each pane once (D7); a second report would mean the runner re-tagged.
+      const tags = fake.calls.filter((c) => c.method === 'pane.report_metadata');
+      expect(tags).toHaveLength(runs.length);
+      expect(new Set(tags.map((c) => c.params.pane_id)).size).toBe(runs.length);
+      expect(tags.map((c) => c.params.tokens.advisor_sid).sort()).toEqual(runs.map((r) => r.sid).sort());
     } finally {
       await fake.stop();
     }

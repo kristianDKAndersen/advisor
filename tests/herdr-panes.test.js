@@ -470,6 +470,92 @@ describe('allocateEnsemblePanes', () => {
   });
 });
 
+// ── tagging inside the placement lock (D7) ────────────────────────────────────
+
+describe('placement tags every pane inside the lock', () => {
+  const flaky = (f, failIds) => {
+    f.st.hooks['pane.report_metadata'] = (params) => {
+      if (failIds.includes(params.pane_id)) throw new FakeHerdrError('socket_error', 'report failed');
+      return undefined;
+    };
+  };
+  const ens = (f, sids, extra = {}) => allocateEnsemblePanes({
+    client: f.client, env: { HERDR_WORKSPACE_ID: 'w1' }, sids, lockDir: path.join(tmp, 'l.lock'), cwd: '/w', dateStamp: '20261109', ...extra,
+  });
+
+  test('ensureWorkerPane tags the new tab root and every split pane, inside the lock', async () => {
+    const f = fake();
+    const lockDir = path.join(tmp, 'locks', 'herdr-placement.lock');
+    const heldAtTag = [];
+    f.st.hooks['pane.report_metadata'] = () => { heldAtTag.push(fs.existsSync(lockDir)); return undefined; };
+    const a = await ensureWorkerPane(baseArgs(f, { sid: 'sid-a' }));
+    const b = await ensureWorkerPane(baseArgs(f, { sid: 'sid-b' }));
+    expect(a.tagged).toBe(true);
+    expect(b.tagged).toBe(true);
+    expect(f.find(a.paneId).tokens.advisor_sid).toBe('sid-a');
+    expect(f.find(b.paneId).tokens.advisor_sid).toBe('sid-b');
+    expect(heldAtTag).toEqual([true, true]);
+    expect(fs.existsSync(lockDir)).toBe(false);
+  });
+
+  test('ensureWorkerPane: a tag failure still returns the pane with tagged:false and tagError', async () => {
+    const f = fake();
+    flaky(f, ['w1:p10']);
+    const r = await ensureWorkerPane(baseArgs(f));
+    expect(r.paneId).toBe('w1:p10');
+    expect(r.tagged).toBe(false);
+    expect(r.tagError).toBeInstanceOf(Error);
+    expect(r.tagError.message).toBe('tag-verify-failed');
+    expect(r.tagError.cause.code).toBe('socket_error');
+  });
+
+  test('allocateEnsemblePanes tags each pane with its own sid right after its create/split, inside the lock', async () => {
+    const f = fake();
+    const lockDir = path.join(tmp, 'l.lock');
+    const heldAtTag = [];
+    f.st.hooks['pane.report_metadata'] = () => { heldAtTag.push(fs.existsSync(lockDir)); return undefined; };
+    const out = await ens(f, ['s1', 's2', 's3']);
+    expect(out.map((o) => o.tagged)).toEqual([true, true, true]);
+    for (const o of out) expect(f.find(o.paneId).tokens.advisor_sid).toBe(o.sid);
+    expect(heldAtTag).toEqual([true, true, true]);
+    const seq = f.methods().filter((m) => ['tab.create', 'pane.split', 'pane.report_metadata'].includes(m));
+    expect(seq).toEqual(['tab.create', 'pane.report_metadata', 'pane.split', 'pane.report_metadata', 'pane.split', 'pane.report_metadata']);
+  });
+
+  test('allocateEnsemblePanes: a tag failure on session 2 of 3 does not stop sessions 1 and 3', async () => {
+    const f = fake();
+    flaky(f, ['w1:p11']);
+    const out = await ens(f, ['s1', 's2', 's3']);
+    expect(out.map((o) => o.tagged)).toEqual([true, false, true]);
+    expect(out[1].tagError.message).toBe('tag-verify-failed');
+    expect(out[0].tagError).toBeUndefined();
+    expect(f.find(out[0].paneId).tokens.advisor_sid).toBe('s1');
+    expect(f.find(out[1].paneId).tokens).toEqual({});
+    expect(f.find(out[2].paneId).tokens.advisor_sid).toBe('s3');
+    expect(out.map((o) => o.sid)).toEqual(['s1', 's2', 's3']);
+  });
+
+  test('allocateEnsemblePanes: a split failing partway tags the panes already created, then rethrows', async () => {
+    const f = fake();
+    let splits = 0;
+    f.st.hooks['pane.split'] = () => { if (++splits === 2) throw new FakeHerdrError('socket_error', 'split failed'); return undefined; };
+    const err = await ens(f, ['s1', 's2', 's3', 's4']).catch((e) => e);
+    expect(err.code).toBe('socket_error');
+    expect(f.st.panes.length).toBe(2);
+    expect(f.st.panes.map((p) => p.tokens.advisor_sid)).toEqual(['s1', 's2']);
+    expect(fs.existsSync(path.join(tmp, 'l.lock'))).toBe(false);
+  });
+
+  test('allocateEnsemblePanes: a tag failure while unwinding a partial allocation does not mask the split error', async () => {
+    const f = fake();
+    flaky(f, ['w1:p10']);
+    f.st.hooks['pane.split'] = () => { throw new FakeHerdrError('socket_error', 'split failed'); };
+    const err = await ens(f, ['s1', 's2']).catch((e) => e);
+    expect(err.message).toBe('split failed');
+    expect(f.st.panes.length).toBe(1);
+  });
+});
+
 // ── closePaneChecked ──────────────────────────────────────────────────────────
 
 describe('closePaneChecked', () => {

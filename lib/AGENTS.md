@@ -116,7 +116,7 @@ Worker pane placement, tagging and token-checked close in the user's live herdr 
 - every call goes through an allow-list (`ALLOWED_METHODS`); any other method, tab, workspace, server and session teardown included, throws `herdr-method-not-allowed`
 - `ensureWorkerPane()` - finds or creates the tab labelled `advisor` (`advisor-2`, `advisor-3`, ... once a tab holds `TAB_PANE_CAP` = 6 panes), splits the last pane at ratio 0.5, odd pane count goes right and even goes down; all create and split calls pass `focus:false`; a lock directory serialises concurrent summons
 - `allocateEnsemblePanes()` - one tab `ensemble-<N>-<YYYYMMDD>` with N panes
-- `tagPane()` - sets and reads back the `advisor_sid` token (cut to 80 chars)
+- `tagPane()` - sets and reads back the `advisor_sid` token (cut to 80 chars); called only by `ensureWorkerPane()` / `allocateEnsemblePanes()` inside the lock, right after each create or split; each allocation reports `tagged` (and `tagError`), and `lib/herdr-runner.js` starts a worker only for a tagged pane and never re-tags
 - `closePaneChecked()`, `closeWorkerBySid()`, `closeSelf()` - close a pane only on a matching token; `reapOrphanHerdrPanes()` sweeps tagged orphans on every herdr summon (run's `session.json` unchanged for 24 h, sid timestamp at least 2 h old, no process mentions the sid; token-checked close); `probeRunnerPane()` reports pane state for observe
 - no equalise step: panes end up unequal in size
 - consumed by `lib/herdr-runner.js`; tests in `tests/herdr-panes.test.js`
