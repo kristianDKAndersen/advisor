@@ -1,7 +1,7 @@
 ---
 scope: "lib/ — core advisor library modules: channel, summon, doc-queue, handover, maintenance, the herdr worker backend and related utilities"
-last_updated_by: "sid:1794231866-469924 seq:1"
-last_updated_ts: "2026-11-09T13:45:06Z"
+last_updated_by: "sid:1794235517-c19d4b seq:1"
+last_updated_ts: "2026-11-09T14:46:30Z"
 ---
 
 # lib/
@@ -94,7 +94,7 @@ Testable selection and archiving logic for the SessionStart hook (`.claude/hooks
 Backend selection for worker panes (tmux or herdr). The gate is read only at spawn time.
 
 - `isHerdrMode(env)` - true only when `ADVISOR_HERDR` is exactly `'1'` and `HERDR_ENV` is exactly `'1'`
-- `readRunnerBackend(runDir)` - reads `runner.json` `backend`; returns `'herdr'` or else `'tmux'` (also on a missing or malformed file), so teardown and observe follow the backend a run started with
+- `readRunnerBackend(runDir)` - reads the `runs/<sid>/backend` marker first, then `runner.json` `backend`; returns `'herdr'` or else `'tmux'` (also when both are missing or malformed); teardown uses it, observe reads `runner.json` for `pane_id`
 - `resolveSocketPath(env)` - `HERDR_SOCKET_PATH`, else throws with code `HERDR_NO_SOCKET`
 - `resolveHerdrBin(env)` - the one place the herdr binary is chosen: `HERDR_BIN_PATH`, else `herdr` on PATH
 - consumed by `lib/herdr-runner.js`; tests in `tests/worker-backend.test.js`
@@ -104,6 +104,7 @@ Backend selection for worker panes (tmux or herdr). The gate is read only at spa
 JSON-lines client for the herdr unix socket (`{id,method,params}` per line, `{id,result|error}` back).
 
 - `createClient({socketPath, timeoutMs})` - request/response client; `timeoutMs` defaults to 10000
+- `request()` rejects any method outside its `ALLOWED_METHODS` set with `HerdrError` code `method_not_allowed` before anything is written to the socket; tab, workspace, server and session teardown methods are not in the set
 - `HerdrError` - herdr answered with an error; carries `code` (e.g. `pane_not_found`)
 - `HerdrUnavailableError` - the socket could not be reached or dropped
 - consumed by `lib/herdr-runner.js` and `lib/herdr-panes.js`; tests in `tests/herdr-client.test.js`
@@ -116,7 +117,7 @@ Worker pane placement, tagging and token-checked close in the user's live herdr 
 - `ensureWorkerPane()` - finds or creates the tab labelled `advisor` (`advisor-2`, `advisor-3`, ... once a tab holds `TAB_PANE_CAP` = 6 panes), splits the last pane at ratio 0.5, odd pane count goes right and even goes down; all create and split calls pass `focus:false`; a lock directory serialises concurrent summons
 - `allocateEnsemblePanes()` - one tab `ensemble-<N>-<YYYYMMDD>` with N panes
 - `tagPane()` - sets and reads back the `advisor_sid` token (cut to 80 chars)
-- `closePaneChecked()`, `closeWorkerBySid()`, `closeSelf()` - close a pane only on a matching token; `reapOrphanHerdrPanes()` sweeps tagged orphans; `probeRunnerPane()` reports pane state for observe
+- `closePaneChecked()`, `closeWorkerBySid()`, `closeSelf()` - close a pane only on a matching token; `reapOrphanHerdrPanes()` sweeps tagged orphans on every herdr summon (run's `session.json` unchanged for 24 h, sid timestamp at least 2 h old, no process mentions the sid; token-checked close); `probeRunnerPane()` reports pane state for observe
 - no equalise step: panes end up unequal in size
 - consumed by `lib/herdr-runner.js`; tests in `tests/herdr-panes.test.js`
 
