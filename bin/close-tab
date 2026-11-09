@@ -18,7 +18,9 @@ set -u
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/tab-trace.sh"
 
 # ── herdr path: close only this worker's own pane (token-checked) ─────────────
-if [[ "${ADVISOR_WORKER_BACKEND:-}" == "herdr" && "${HERDR_ENV:-}" == "1" && -n "${HERDR_PANE_ID:-}" ]]; then
+# Gate on the persistent per-sid marker, not on inheritable env vars.
+_herdr_marker="${ADVISOR_RUNS_ROOT:-$HOME/.advisor/runs}/${ADVISOR_SID:-}/backend"
+if [[ -n "${HERDR_PANE_ID:-}" && -n "${ADVISOR_SID:-}" && -f "$_herdr_marker" && "$(cat "$_herdr_marker" 2>/dev/null)" == "herdr" ]]; then
   _parent_name=$(ps -o comm= -p $PPID 2>/dev/null | awk -F'/' '{print $NF}')
   if [[ "$_parent_name" == "claude" || "$_parent_name" == "node" ]]; then
     kill -TERM $PPID 2>/dev/null || true

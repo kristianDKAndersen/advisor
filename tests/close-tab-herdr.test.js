@@ -32,12 +32,17 @@ function baseEnv() {
   return env;
 }
 
+function writeMarker(content = 'herdr\n', sid = SID) {
+  const dir = path.join(tmpDir, 'runs', sid);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'backend'), content);
+}
+
 function herdrEnv(extra = {}) {
+  writeMarker();
   return {
     ...baseEnv(),
-    HERDR_ENV: '1',
     HERDR_PANE_ID: PANE,
-    ADVISOR_WORKER_BACKEND: 'herdr',
     ADVISOR_SID: SID,
     HERDR_SOCKET_PATH: fake.socketPath,
     ...extra,
@@ -98,27 +103,57 @@ test('herdr branch never reaches tmux or osascript', async () => {
   expect(closes()).toHaveLength(1);
 });
 
-test('without ADVISOR_WORKER_BACKEND the herdr branch is skipped', async () => {
+test('marker alone gates the herdr branch: ADVISOR_WORKER_BACKEND and HERDR_ENV are not needed', async () => {
+  fake = await startFakeHerdr({ panes: [{ pane_id: PANE, tab_id: 'w1:t1', tokens: { advisor_sid: SID } }] });
+  const env = herdrEnv();
+  expect(env.ADVISOR_WORKER_BACKEND).toBeUndefined();
+  expect(env.HERDR_ENV).toBeUndefined();
+  await runCloseTab(env);
+  expect(closes()).toHaveLength(1);
+});
+
+test('inherited ADVISOR_WORKER_BACKEND without a marker skips the herdr branch (M3)', async () => {
   fake = await startFakeHerdr({ panes: [{ pane_id: PANE, tab_id: 'w1:t1', tokens: { advisor_sid: SID } }] });
   const binDir = path.join(tmpDir, 'bin');
   fs.mkdirSync(binDir);
   fs.writeFileSync(path.join(binDir, 'tmux'), '#!/usr/bin/env bash\nexit 0\n');
   fs.chmodSync(path.join(binDir, 'tmux'), 0o755);
-  const env = herdrEnv({ PATH: `${binDir}:${process.env.PATH}`, ADVISOR_TMUX: '1' });
-  delete env.ADVISOR_WORKER_BACKEND;
+  const env = { ...baseEnv(), HERDR_ENV: '1', HERDR_PANE_ID: PANE, ADVISOR_WORKER_BACKEND: 'herdr', ADVISOR_SID: SID,
+    HERDR_SOCKET_PATH: fake.socketPath, PATH: `${binDir}:${process.env.PATH}`, ADVISOR_TMUX: '1' };
   const r = await runCloseTab(env);
   expect(r.status).toBe(0);
   expect(fake.calls).toHaveLength(0);
 });
 
-test('missing HERDR_PANE_ID or HERDR_ENV skips the herdr branch', async () => {
+test('marker of another sid or non-herdr content skips the herdr branch', async () => {
   fake = await startFakeHerdr({ panes: [{ pane_id: PANE, tab_id: 'w1:t1', tokens: { advisor_sid: SID } }] });
-  for (const drop of ['HERDR_PANE_ID', 'HERDR_ENV']) {
+  for (const [content, sid] of [['herdr\n', 'other-sid'], ['tmux\n', SID], ['', SID]]) {
+    const env = herdrEnv({ ADVISOR_TMUX: '1', PATH: `${path.join(tmpDir, 'nobin')}:${process.env.PATH}` });
+    fs.rmSync(path.join(tmpDir, 'runs'), { recursive: true, force: true });
+    writeMarker(content, sid);
+    await runCloseTab(env);
+  }
+  expect(fake.calls).toHaveLength(0);
+});
+
+test('missing HERDR_PANE_ID or ADVISOR_SID skips the herdr branch', async () => {
+  fake = await startFakeHerdr({ panes: [{ pane_id: PANE, tab_id: 'w1:t1', tokens: { advisor_sid: SID } }] });
+  for (const drop of ['HERDR_PANE_ID', 'ADVISOR_SID']) {
     const env = herdrEnv({ ADVISOR_TMUX: '1', PATH: `${path.join(tmpDir, 'nobin')}:${process.env.PATH}` });
     delete env[drop];
     await runCloseTab(env);
   }
   expect(fake.calls).toHaveLength(0);
+});
+
+test('runs root defaults to $HOME/.advisor/runs when ADVISOR_RUNS_ROOT is unset', async () => {
+  fake = await startFakeHerdr({ panes: [{ pane_id: PANE, tab_id: 'w1:t1', tokens: { advisor_sid: SID } }] });
+  const env = herdrEnv();
+  delete env.ADVISOR_RUNS_ROOT;
+  fs.mkdirSync(path.join(tmpDir, '.advisor', 'runs', SID), { recursive: true });
+  fs.writeFileSync(path.join(tmpDir, '.advisor', 'runs', SID, 'backend'), 'herdr\n');
+  await runCloseTab(env);
+  expect(closes()).toHaveLength(1);
 });
 
 test('unreachable socket still exits 0 and sends nothing', async () => {
