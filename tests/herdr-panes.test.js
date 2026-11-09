@@ -553,17 +553,44 @@ describe('placement tags every pane inside the lock', () => {
     expect(seq).toEqual(['tab.create', 'pane.report_metadata', 'pane.split', 'pane.report_metadata', 'pane.split', 'pane.report_metadata']);
   });
 
-  test('allocateEnsemblePanes: a tag failure on session 2 of 3 does not stop sessions 1 and 3', async () => {
+  test('allocateEnsemblePanes: a tag failure on session 2 of 3 stops the loop; session 3 stays unallocated', async () => {
     const f = fake();
     flaky(f, ['w1:p11']);
     const out = await ens(f, ['s1', 's2', 's3']);
-    expect(out.map((o) => o.tagged)).toEqual([true, false, true]);
+    expect(out.map((o) => o.tagged)).toEqual([true, false]);
     expect(out[1].tagError.message).toBe('tag-verify-failed');
     expect(out[0].tagError).toBeUndefined();
     expect(f.find(out[0].paneId).tokens.advisor_sid).toBe('s1');
     expect(f.find(out[1].paneId).tokens).toEqual({});
-    expect(f.find(out[2].paneId).tokens.advisor_sid).toBe('s3');
-    expect(out.map((o) => o.sid)).toEqual(['s1', 's2', 's3']);
+    expect(out.map((o) => o.sid)).toEqual(['s1', 's2']);
+    expect(f.callsOf('pane.split').length).toBe(1);
+  });
+
+  test('allocateEnsemblePanes: a failed tag on pane k makes no pane.split targeting pane k', async () => {
+    const f = fake();
+    f.st.hooks['pane.report_metadata'] = (params) => {
+      if (params.pane_id === 'w1:p10') throw new FakeUnavailable();
+      return undefined;
+    };
+    const out = await ens(f, ['a', 'b']);
+    expect(out.map((o) => [o.sid, o.paneId, o.tagged])).toEqual([['a', 'w1:p10', false]]);
+    expect(f.callsOf('pane.split').filter((c) => c.params.target_pane_id === 'w1:p10')).toEqual([]);
+    expect(f.callsOf('pane.split').length).toBe(0);
+  });
+
+  test('tagPane: a timeout on the first report_metadata makes no second report_metadata (tryTag -> tagged:false)', async () => {
+    const f = fake();
+    f.st.hooks['pane.report_metadata'] = () => { throw new FakeUnavailable(); };
+    const r = await ensureWorkerPane(baseArgs(f));
+    expect(r.tagged).toBe(false);
+    expect(f.callsOf('pane.report_metadata').length).toBe(1);
+  });
+
+  test('tagPane: an unavailable pane.get read-back is not retried', async () => {
+    const f = fake({ panes: [{ pane_id: 'w1:p1', tab_id: 'w1:t1' }] });
+    f.st.hooks['pane.get'] = () => { throw new FakeUnavailable(); };
+    await expect(tagPane(f.client, 'w1:p1', 'sid-x')).rejects.toThrow('tag-verify-failed');
+    expect(f.callsOf('pane.report_metadata').length).toBe(1);
   });
 
   test('allocateEnsemblePanes: a split failing partway tags the panes already created, then rethrows', async () => {
@@ -577,12 +604,13 @@ describe('placement tags every pane inside the lock', () => {
     expect(fs.existsSync(path.join(tmp, 'l.lock'))).toBe(false);
   });
 
-  test('allocateEnsemblePanes: a tag failure while unwinding a partial allocation does not mask the split error', async () => {
+  test('allocateEnsemblePanes: a tag failure on the root pane makes no split at all', async () => {
     const f = fake();
     flaky(f, ['w1:p10']);
     f.st.hooks['pane.split'] = () => { throw new FakeHerdrError('socket_error', 'split failed'); };
-    const err = await ens(f, ['s1', 's2']).catch((e) => e);
-    expect(err.message).toBe('split failed');
+    const out = await ens(f, ['s1', 's2']);
+    expect(out.map((o) => o.tagged)).toEqual([false]);
+    expect(f.callsOf('pane.split').length).toBe(0);
     expect(f.st.panes.length).toBe(1);
   });
 });
