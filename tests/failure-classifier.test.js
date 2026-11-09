@@ -359,3 +359,67 @@ describe('classifyPaneDeath adapter (lib/loop-termination.js options.classifyPan
     expect(classifyPaneDeath(null)).toBe('deterministic');
   });
 });
+
+describe('classifySessionDir - herdr-runner.log', () => {
+  function writeHerdrLog(dir, content) {
+    fs.writeFileSync(path.join(dir, 'herdr-runner.log'), content);
+  }
+  const paneDied = { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=pane-died', verdict: 'blocked', paths: [] }) };
+
+  test('hit-timeout: herdr-runner.log timeout marker, no outbox result', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, '[herdr-runner] spawn sid=abc pane=w1:p2 tab=w1:t1 ws=w1\nspawnHeadless timed out after 300000ms (sid=abc, pane=w1:p2, reason=timeout)\n');
+    writeOutbox(dir, [{ seq: 1, type: 'progress', from: 'coder', body: 'working on it' }]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('hit-timeout');
+    expect(v.transient).toBe(false);
+    expect(v.evidence).toMatch(/spawnHeadless timed out after/);
+  });
+
+  test('hit-timeout: herdr-runner.log timeout marker with a synthetic pane-died result', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'spawnHeadless timed out after 300000ms (sid=abc, pane=w1:p2, reason=timeout)\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('hit-timeout');
+    expect(v.transient).toBe(false);
+  });
+
+  test('TRANSIENT pane-death: Command failed: herdr in herdr-runner.log with synthetic result', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'boot\nCommand failed: herdr pane.get unavailable\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.transient).toBe(true);
+    expect(v.evidence).toMatch(/Command failed: herdr pane\.get/);
+  });
+
+  test('TRANSIENT launch-death: Command failed: herdr with no outbox at all', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'Command failed: herdr ping unavailable\n');
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('launch-death');
+    expect(v.transient).toBe(true);
+    expect(v.evidence).toMatch(/Command failed: herdr ping/);
+  });
+
+  test('both runner logs present still classify', () => {
+    const dir = makeSessionDir();
+    writeTmuxLog(dir, 'unrelated tmux line\n');
+    writeHerdrLog(dir, 'Command failed: herdr pane.split pane_not_found\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.transient).toBe(true);
+  });
+
+  test('herdr-runner.log without failure markers stays deterministic', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, '[herdr-runner] spawn sid=abc pane=w1:p2 tab=w1:t1 ws=w1\n[herdr-runner] subscriber down 1200ms, reconciling\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.transient).toBe(false);
+  });
+});
