@@ -14,13 +14,15 @@ import {
   closeSelf,
   reapOrphanHerdrPanes,
   probeRunnerPane,
+  ALLOWED_METHODS,
+  pidAlive,
 } from '../lib/herdr-panes.js';
 
 const FORBIDDEN = ['tab.close', 'workspace.close', 'server.stop', 'session.stop'];
 const ALLOWED = [
   'pane.get', 'pane.list', 'tab.list', 'tab.create', 'pane.split', 'pane.close',
   'pane.report_metadata', 'pane.read', 'pane.send_text', 'pane.send_keys',
-  'events.subscribe', 'workspace.list', 'ping',
+  'events.subscribe', 'workspace.list', 'ping', 'agent.get', 'agent.prompt',
 ];
 const HOUR = 3600 * 1000;
 
@@ -154,6 +156,12 @@ describe('forbidden-method assertion', () => {
     expect(f.st.calls).toEqual([]);
   });
 
+  test('allow-list is exactly the contract list, agent.get and agent.prompt included', () => {
+    fake();
+    expect([...ALLOWED_METHODS].sort()).toEqual([...ALLOWED].sort());
+    for (const m of FORBIDDEN) expect(ALLOWED_METHODS.has(m)).toBe(false);
+  });
+
   test('module source never names a forbidden method', () => {
     fake();
     const src = fs.readFileSync(path.join(import.meta.dir, '..', 'lib', 'herdr-panes.js'), 'utf8');
@@ -210,6 +218,16 @@ describe('tagPane', () => {
     await tagPane(f.client, 'w1:p1', SID);
     expect(f.callsOf('pane.report_metadata').length).toBe(2);
     expect(f.find('w1:p1').tokens.advisor_sid).toBe(SID);
+  });
+
+  test('a HerdrError on every attempt still surfaces as Error("tag-verify-failed") with the cause kept', async () => {
+    const f = fake({ panes: [{ pane_id: 'w1:p1', tab_id: 'w1:t1' }] });
+    f.st.hooks['pane.report_metadata'] = () => { throw new FakeHerdrError('internal_error'); };
+    const err = await tagPane(f.client, 'w1:p1', SID).catch((e) => e);
+    expect(err.message).toBe('tag-verify-failed');
+    expect(err.code).toBeUndefined();
+    expect(err.cause.code).toBe('internal_error');
+    expect(f.callsOf('pane.report_metadata').length).toBe(2);
   });
 
   test('throws tag-verify-failed after the single retry', async () => {
@@ -342,15 +360,85 @@ describe('ensureWorkerPane', () => {
     expect(fs.existsSync(lockDir)).toBe(false);
   });
 
-  test('a lock older than 30 s is stale and reclaimed', async () => {
+  test('a lock older than the worst-case critical section is stale and reclaimed', async () => {
     const f = fake();
     const lockDir = path.join(tmp, 'locks', 'stale.lock');
     fs.mkdirSync(lockDir, { recursive: true });
-    const old = new Date(Date.now() - 60_000);
+    const old = new Date(Date.now() - 10 * 60_000);
     fs.utimesSync(lockDir, old, old);
     const r = await ensureWorkerPane(baseArgs(f, { lockDir }));
     expect(r.paneId).toBeTruthy();
     expect(fs.existsSync(lockDir)).toBe(false);
+  });
+
+  test('a 60 s old lock is not stale: a slow holder (6 requests at a 10 s timeout) keeps it', async () => {
+    const f = fake();
+    const lockDir = path.join(tmp, 'locks', 'slow.lock');
+    fs.mkdirSync(lockDir, { recursive: true });
+    const aged = new Date(Date.now() - 60_000);
+    fs.utimesSync(lockDir, aged, aged);
+    const p = ensureWorkerPane(baseArgs(f, { lockDir }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(f.st.calls.length).toBe(0);
+    const old = new Date(Date.now() - 10 * 60_000);
+    fs.utimesSync(lockDir, old, old);
+    expect((await p).paneId).toBeTruthy();
+  });
+
+  test('a holder whose lock was taken over as stale never removes the new holder\'s lock', async () => {
+    const f = fake({ delay: true });
+    const lockDir = path.join(tmp, 'locks', 'owner.lock');
+    const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+    const a = gate();
+    const b = gate();
+    let n = 0;
+    f.st.hooks['tab.list'] = (_params, st) => {
+      const i = n++;
+      if (i > 1) return undefined;
+      return (i === 0 ? a : b).p.then(() => ({ type: 'tab_list', tabs: structuredClone(st.tabs) }));
+    };
+    const waitFor = async (cond) => { for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10)); expect(cond()).toBe(true); };
+    const pa = ensureWorkerPane(baseArgs(f, { lockDir }));
+    await waitFor(() => f.callsOf('tab.list').length === 1);
+    const old = new Date(Date.now() - 10 * 60_000);
+    fs.utimesSync(lockDir, old, old);
+    const pb = ensureWorkerPane(baseArgs(f, { lockDir }));
+    await waitFor(() => f.callsOf('tab.list').length === 2);
+    a.open();
+    await pa;
+    expect(fs.existsSync(lockDir)).toBe(true);
+    const pc = ensureWorkerPane(baseArgs(f, { lockDir }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(f.callsOf('tab.list').length).toBe(2);
+    b.open();
+    await Promise.all([pb, pc]);
+    expect(fs.existsSync(lockDir)).toBe(false);
+  });
+
+  test('an existing advisor tab with no panes is never recreated under the same label', async () => {
+    const f = fake({ tabs: [{ tab_id: 'w1:t1', label: 'advisor' }] });
+    const r = await ensureWorkerPane(baseArgs(f));
+    expect(f.callsOf('tab.create').map((c) => c.params.label)).toEqual(['advisor-2']);
+    expect(f.st.tabs.filter((t) => t.label === 'advisor').length).toBe(1);
+    expect(r.tabId).not.toBe('w1:t1');
+  });
+});
+
+describe('pidAlive', () => {
+  test('EPERM (a process owned by another user) is NOT alive; ESRCH is not alive; own pid is alive', () => {
+    fake();
+    const real = process.kill;
+    try {
+      process.kill = () => { const e = new Error('operation not permitted'); e.code = 'EPERM'; throw e; };
+      expect(pidAlive(4242)).toBe(false);
+      process.kill = () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e; };
+      expect(pidAlive(4242)).toBe(false);
+    } finally {
+      process.kill = real;
+    }
+    expect(pidAlive(process.pid)).toBe(true);
+    expect(pidAlive(0)).toBe(false);
+    expect(pidAlive('1')).toBe(false);
   });
 });
 
@@ -403,12 +491,19 @@ describe('closePaneChecked', () => {
     expect(f.callsOf('pane.close').length).toBe(0);
   });
 
-  test('token absent + runner.json pane matches + runnerAlive:true -> closed', async () => {
+  test('token absent + runner.json pane matches + runnerAlive:true -> still untokened-refused', async () => {
     const f = mk({});
     writeRunner(runDir(), { pane_id: 'w1:p2', pid: process.pid });
     const r = await closePaneChecked({ client: f.client, sid: SID, paneId: 'w1:p2', runDir: runDir(), runnerAlive: true });
-    expect(r).toEqual({ closed: true, reason: 'closed' });
-    expect(f.callsOf('pane.close').length).toBe(1);
+    expect(r).toEqual({ closed: false, reason: 'untokened-refused' });
+    expect(f.callsOf('pane.close').length).toBe(0);
+  });
+
+  test('token absent, runnerAlive:true, no runDir at all -> untokened-refused', async () => {
+    const f = mk({});
+    const r = await closePaneChecked({ client: f.client, sid: SID, paneId: 'w1:p2', runnerAlive: true });
+    expect(r).toEqual({ closed: false, reason: 'untokened-refused' });
+    expect(f.callsOf('pane.close').length).toBe(0);
   });
 
   test('token absent + runnerAlive:false -> untokened-refused', async () => {
@@ -526,11 +621,21 @@ describe('closeWorkerBySid', () => {
     expect(f.callsOf('pane.close').length).toBe(0);
   });
 
-  test('untokened runner.json pane + live runner pid -> closed', async () => {
+  test('untokened runner.json pane + live runner pid -> refused, never closed', async () => {
     const f = fake({ panes: [{ pane_id: 'w1:p2', tab_id: 'w1:t1', tokens: {} }] });
     writeRunner(runDir(), { pane_id: 'w1:p2', pid: process.pid });
     const r = await closeWorkerBySid({ client: f.client, sid: SID, runDir: runDir() });
-    expect(r.closed).toEqual(['w1:p2']);
+    expect(r.closed).toEqual([]);
+    expect(r.refused).toEqual([{ paneId: 'w1:p2', reason: 'untokened-refused' }]);
+    expect(f.callsOf('pane.close').length).toBe(0);
+  });
+
+  test('stale runner.json with a foreign-owned pid (pid 1) and a reused untokened pane id is not closed', async () => {
+    const f = fake({ panes: [{ pane_id: 'p_3', tab_id: 'w1:t1', tokens: {} }] });
+    writeRunner(runDir(), { pid: 1, backend: 'herdr', pane_id: 'p_3' });
+    const r = await closeWorkerBySid({ client: f.client, sid: SID, runDir: runDir() });
+    expect(r).toEqual({ closed: [], refused: [{ paneId: 'p_3', reason: 'untokened-refused' }] });
+    expect(f.callsOf('pane.close').length).toBe(0);
   });
 
   test('no runner.json: token scan alone finds the pane; a pane listed twice is closed once', async () => {
@@ -591,7 +696,7 @@ describe('closeSelf', () => {
     expect(f.st.calls.length).toBe(0);
   });
 
-  test('untokened pane: refused unless runner.json names this pane and the runner pid is alive', async () => {
+  test('untokened pane is refused whatever runner.json says, even a matching pane and a live pid', async () => {
     const f = fake({ panes: [{ pane_id: 'w1:p2', tab_id: 'w1:t1', tokens: {} }] });
     const dir = path.join(tmp, 'runs', SID);
     expect((await closeSelf({ client: f.client, env: env() })).reason).toBe('untokened-refused');
@@ -599,9 +704,9 @@ describe('closeSelf', () => {
     expect((await closeSelf({ client: f.client, env: env() })).reason).toBe('untokened-refused');
     writeRunner(dir, { pane_id: 'w1:p9', pid: process.pid });
     expect((await closeSelf({ client: f.client, env: env() })).reason).toBe('untokened-refused');
-    expect(f.callsOf('pane.close').length).toBe(0);
     writeRunner(dir, { pane_id: 'w1:p2', pid: process.pid });
-    expect((await closeSelf({ client: f.client, env: env() })).closed).toBe(true);
+    expect(await closeSelf({ client: f.client, env: env() })).toEqual({ closed: false, reason: 'untokened-refused' });
+    expect(f.callsOf('pane.close').length).toBe(0);
   });
 
   test('pane already gone -> not closed, reason gone', async () => {
