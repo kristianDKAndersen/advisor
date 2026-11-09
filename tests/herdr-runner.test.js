@@ -193,9 +193,9 @@ describe('spawnHeadlessHerdr', () => {
     expect(seq).not.toContain('pane.report_metadata');
     const launch = idx('pane.send_text');
     expect(tag).toBeLessThan(launch);
-    expect(seq[launch + 1]).toBe('pane.send_keys');
+    expect(seq.slice(launch + 1, launch + 3)).toEqual(['pane.get', 'pane.send_keys']);
     const ready = idx('agent.get', launch);
-    expect(ready).toBeGreaterThan(launch + 1);
+    expect(ready).toBeGreaterThan(launch + 2);
     const prompt = idx('agent.prompt', ready);
     expect(prompt).toBeGreaterThan(ready);
     expect(seq).not.toContain('pane.read');
@@ -841,6 +841,63 @@ describe('D7: the --run child verifies its pane token and never stamps one', () 
     const res = await runSpawn(run, s, { sid: long });
     expect(res.err).toBeUndefined();
     expect(methods(s)).not.toContain('pane.report_metadata');
+  });
+});
+
+describe('fix round 3 D8: verifyToken before every input call', () => {
+  const inputs = (s) => methods(s).filter((m) => ['pane.send_text', 'pane.send_keys', 'agent.prompt'].includes(m));
+  const fastWait = { env: { HERDR_BIN_PATH: '/x/herdr', HERDR_SOCKET_PATH: '/x/sock', ADVISOR_CAPTURE_TIMEOUT_MS: '200' } };
+
+  test('(1) token cleared and herdr down during the readiness wait: agent.prompt is never sent', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    let down = false;
+    let agentGets = 0;
+    s.hooks['pane.get'] = () => { if (down) throw new HerdrUnavailableError('down'); return undefined; };
+    s.agentStatus = 'working';
+    s.hooks['agent.get'] = () => { if (++agentGets === 2) { s.tokens = {}; down = true; s.agentStatus = 'idle'; } return undefined; };
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeDefined();
+    expect(methods(s)).not.toContain('agent.prompt');
+    expect(inputs(s)).toEqual(['pane.send_text', 'pane.send_keys']);
+    expect(closes(s)).toHaveLength(0);
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=');
+  });
+
+  test('(2) a foreign token appearing before agent.prompt: not sent, herdr-restart, nothing closed', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['agent.get'] = () => { s.tokens = { advisor_sid: 'someone-else' }; return undefined; };
+    const res = await runSpawn(run, s);
+    expect(String(res.err && res.err.message)).toContain('reason=herdr-restart');
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=herdr-restart');
+    expect(methods(s)).not.toContain('agent.prompt');
+    expect(closes(s)).toHaveLength(0);
+    expect(s.tokens).toEqual({ advisor_sid: 'someone-else' });
+  });
+
+  test('(3) readiness timeout: nothing typed after the launch, sealed unexpected with readiness=timeout', async () => {
+    const run = mkRun();
+    const s = makeStub({ text: 'user@host ~ % ', agent: '' });
+    const res = await runSpawn(run, s, fastWait);
+    expect(res.log).toContain('readiness=timeout');
+    expect(res.log).toMatch(/worker ended reason=unexpected .*readiness=timeout/);
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=unexpected');
+    expect(res.err).toBeDefined();
+    expect(inputs(s)).toEqual(['pane.send_text', 'pane.send_keys']);
+  });
+
+  test('(4) happy path sends launch, Enter, then the prompt in order, each right after a pane.get', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => writeSentinel(s, run));
+    const res = await runSpawn(run, s);
+    expect(res.value).toBe('final answer');
+    expect(inputs(s)).toEqual(['pane.send_text', 'pane.send_keys', 'agent.prompt']);
+    const ms = methods(s);
+    for (const m of ['pane.send_text', 'pane.send_keys', 'agent.prompt']) expect(ms[ms.indexOf(m) - 1]).toBe('pane.get');
+    expect(s.calls.find((c) => c.method === 'pane.send_keys').params.keys).toEqual(['enter']);
+    expect(s.calls.find((c) => c.method === 'agent.prompt').params.text).toBe('do the thing');
   });
 });
 

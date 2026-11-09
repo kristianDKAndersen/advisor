@@ -385,6 +385,37 @@ describe('ensureWorkerPane', () => {
     expect((await p).paneId).toBeTruthy();
   });
 
+  test('W1: a live holder refreshes the lock after each herdr call, so a slow holder is never reclaimed', async () => {
+    const f = fake({ delay: true });
+    const lockDir = path.join(tmp, 'locks', 'refresh.lock');
+    const ageMs = () => Date.now() - fs.statSync(lockDir).mtimeMs;
+    let contender;
+    let ageAfterSlowCall;
+    let tabListsWhileSlow;
+    // tab.create "takes" longer than LOCK_STALE_MS: the lock dir looks 10 minutes old when it returns.
+    f.st.hooks['tab.create'] = () => { const old = new Date(Date.now() - 10 * 60_000); fs.utimesSync(lockDir, old, old); return undefined; };
+    f.st.hooks['pane.list'] = () => {
+      if (contender) return undefined;
+      ageAfterSlowCall = ageMs();
+      contender = ensureWorkerPane(baseArgs(f, { lockDir }));
+      return undefined;
+    };
+    f.st.hooks['pane.report_metadata'] = async (params) => {
+      Object.assign(f.find(params.pane_id).tokens, params.tokens);
+      if (tabListsWhileSlow !== undefined) return { type: 'ok' };
+      tabListsWhileSlow = -1;
+      await new Promise((r) => setTimeout(r, 150));
+      tabListsWhileSlow = f.callsOf('tab.list').length;
+      return { type: 'ok' };
+    };
+    const first = await ensureWorkerPane(baseArgs(f, { lockDir }));
+    await contender;
+    expect(first.tagged).toBe(true);
+    expect(ageAfterSlowCall).toBeLessThan(5000);
+    expect(tabListsWhileSlow).toBe(1);
+    expect(fs.existsSync(lockDir)).toBe(false);
+  });
+
   test('a holder whose lock was taken over as stale never removes the new holder\'s lock', async () => {
     const f = fake({ delay: true });
     const lockDir = path.join(tmp, 'locks', 'owner.lock');
