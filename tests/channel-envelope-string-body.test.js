@@ -59,12 +59,17 @@ function seedStringBodyResults(sid, verdicts) {
 }
 
 test('synthesize emits LESSON EXTRACTION on 2nd blocked STRING-body verdict', () => {
-  const sid = `envstr-2blk-${Date.now()}`;
-  seedStringBodyResults(sid, ['blocked', 'blocked']);
+  const t = Math.floor(Date.now() / 1000);
+  const sid = `${t}-3c1c1c`;
+  const other = `${t}-3c2c2c`;
+  for (const s of [sid, other]) {
+    seedStringBodyResults(s, ['blocked']);
+    fs.writeFileSync(path.join(tmpRuns, s, 'meta.json'), JSON.stringify({ sid: s, advisor_session: 'adv-envstr-2blk' }));
+  }
   const result = runSynthesize([], sid);
   expect(result.status).toBe(0);
   expect(result.stdout).toContain('LESSON EXTRACTION REQUIRED');
-  expect(result.stdout).toContain('/extract-lesson');
+  expect(result.stdout).toContain('advisor-vault lessons approve');
   expect(result.stdout).toContain(sid);
 }, TEST_TIMEOUT);
 

@@ -106,12 +106,17 @@ test('synthesize --verdict blocked produces no LESSON EXTRACTION output', () => 
 
 // Repaired guard: a 2nd persisted blocked result envelope DOES emit the nudge.
 test('synthesize emits LESSON EXTRACTION on 2nd blocked worker verdict', () => {
-  const sid = `verdict-2blk-${Date.now()}`;
-  seedBlockedResults(sid, 2);
+  const t = Math.floor(Date.now() / 1000);
+  const sid = `${t}-2b1b1b`;
+  const other = `${t}-2b2b2b`;
+  for (const s of [sid, other]) {
+    seedBlockedResults(s, 1);
+    fs.writeFileSync(path.join(tmpRuns, s, 'meta.json'), JSON.stringify({ sid: s, advisor_session: 'adv-verdict-2blk' }));
+  }
   const result = runSynthesize([], sid);
   expect(result.status).toBe(0);
   expect(result.stdout).toContain('LESSON EXTRACTION REQUIRED');
-  expect(result.stdout).toContain('/extract-lesson');
+  expect(result.stdout).toContain('advisor-vault lessons approve');
   expect(result.stdout).toContain(sid);
 }, TEST_TIMEOUT);
 
