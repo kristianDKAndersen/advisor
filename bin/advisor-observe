@@ -27,7 +27,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync, execFileSync } = require('child_process');
+const { spawnSync, execFileSync, execFile } = require('child_process');
 const { Tail, append } = require(path.join(__dirname, '..', 'lib', 'channel.js'));
 const { loadTerminal } = require(path.join(__dirname, '..', 'lib', 'terminal-persist.js'));
 const { paneAlive } = require(path.join(__dirname, '..', 'lib', 'tmux-runner.js'));
@@ -71,15 +71,19 @@ function isRunnerAlive(info) {
 const PROBE_INTERVAL_MS = 5000;
 const HERDR_RUNNER = path.join(__dirname, '..', 'lib', 'herdr-runner.js');
 
-// Out-of-process pane probe for herdr workers. Returns alive|gone|unknown|no-record;
-// any failure is 'unknown' so an outage never produces 'dead'.
+// Async out-of-process pane probe for herdr workers (never blocks the poll loop).
+// Resolves alive|gone|unknown|no-record; any failure is 'unknown', never 'dead'.
 function probeHerdrPane(sid) {
-  try {
-    const out = execFileSync(process.execPath, [HERDR_RUNNER, '--pane-state', '--sid', sid],
-      { timeout: PROBE_INTERVAL_MS, encoding: 'utf8', env: process.env, stdio: ['ignore', 'pipe', 'ignore'] });
-    const st = JSON.parse(out || '{}').state;
-    return ['alive', 'gone', 'no-record'].includes(st) ? st : 'unknown';
-  } catch (_) { return 'unknown'; }
+  return new Promise((resolve) => {
+    execFile(process.execPath, [HERDR_RUNNER, '--pane-state', '--sid', sid],
+      { timeout: PROBE_INTERVAL_MS, encoding: 'utf8', env: process.env }, (err, out) => {
+        if (err) return resolve('unknown');
+        try {
+          const st = JSON.parse(out || '{}').state;
+          resolve(['alive', 'gone', 'no-record'].includes(st) ? st : 'unknown');
+        } catch (_) { resolve('unknown'); }
+      });
+  });
 }
 
 // Flags that never consume the following token (so `--verbose A B` keeps A as a sid).
@@ -263,14 +267,17 @@ async function main() {
       } catch (_) {} // absent or malformed heartbeat.jsonl = silent
 
       // ── herdr pane probe: gone + still no result -> dead (at most once per 5 s) ──
+      if (rec.probeState === 'gone') {
+        rec.probeState = null;
+        const hasResult = new Tail().read(rec.outboxPath).some(m => m.type === 'result');
+        if (!hasResult) emitExit(3, rec.sid, 'dead');
+      }
       if (Date.now() >= rec.nextProbeAt) {
+        rec.nextProbeAt = Date.now() + PROBE_INTERVAL_MS;
         const info = readRunnerRecord(rec.sid);
-        if (info && info.backend === 'herdr') {
-          rec.nextProbeAt = Date.now() + PROBE_INTERVAL_MS;
-          if (probeHerdrPane(rec.sid) === 'gone') {
-            const hasResult = new Tail().read(rec.outboxPath).some(m => m.type === 'result');
-            if (!hasResult) emitExit(3, rec.sid, 'dead');
-          }
+        if (info && info.backend === 'herdr' && !rec.probing) {
+          rec.probing = true;
+          probeHerdrPane(rec.sid).then((st) => { rec.probing = false; rec.probeState = st; });
         }
       }
 

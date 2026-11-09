@@ -117,3 +117,29 @@ test('herdr runner with dead pid -> dead on stall-exit', async () => {
   const r = await runObs(root, 'sid-deadpid', ['--max-wait', '4', '--stall-exit', '1'], { HERDR_SOCKET_PATH: f.socketPath });
   expect(r.exit).toMatchObject({ code: 3, reason: 'dead' });
 }, 15000);
+
+test('non-herdr runner.json is read at most once per probe interval (throttled before backend check)', async () => {
+  const root = setup('sid-thr', { runner: { backend: 'tmux', mode: 'headless' } });
+  const f = await fake([]);
+  const rj = path.join(root, 'sid-thr', 'runner.json');
+  setTimeout(() => fs.writeFileSync(rj, JSON.stringify({ mode: 'herdr', backend: 'herdr', pid: process.pid, pane_id: 'w1:p1' })), 600);
+  const r = await runObs(root, 'sid-thr', ['--max-wait', '12', '--poll', '200'], { HERDR_SOCKET_PATH: f.socketPath });
+  expect(r.exit).toMatchObject({ code: 3, reason: 'dead' });
+  expect(r.ms).toBeGreaterThanOrEqual(4000);
+}, 20000);
+
+test('a hanging herdr socket does not delay another sid result detection', async () => {
+  const net = require('net');
+  const root = setup('sid-hang', { runner: { pane_id: 'w1:p1' } });
+  const sock = path.join(root, 'hang.sock');
+  const srv = net.createServer((c) => { c.on('error', () => {}); });
+  await new Promise((res) => srv.listen(sock, res));
+  stops.push(() => new Promise((res) => { srv.close(res); }));
+  const other = path.join(root, 'sid-fast', 'channel');
+  fs.mkdirSync(other, { recursive: true });
+  fs.writeFileSync(path.join(other, 'inbox.jsonl'), '');
+  fs.writeFileSync(path.join(other, 'outbox.jsonl'), JSON.stringify({ seq: 1, type: 'result', body: '{"verdict":"complete"}', from: 'w' }) + '\n');
+  const r = await runObs(root, 'sid-hang sid-fast'.split(' ')[0], ['sid-fast', '--max-wait', '12', '--poll', '200'], { HERDR_SOCKET_PATH: sock });
+  expect(r.exit).toMatchObject({ code: 0, reason: 'result', sid: 'sid-fast' });
+  expect(r.ms).toBeLessThan(2500);
+}, 20000);
