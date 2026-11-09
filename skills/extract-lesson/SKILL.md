@@ -1,7 +1,7 @@
 ---
 name: extract-lesson
 description: "Post-mortem analyst: write a vault lesson from failed worker synthesis + evaluator scores. Use after verdict:blocked or 2+ consecutive overall_pass:false on same task shape."
-last_edited: 2026-10-06
+last_edited: 2026-11-09
 ---
 
 # Extract Lesson
@@ -24,7 +24,7 @@ You are a **post-mortem analyst**. Your job is to read a failed task's synthesis
 
 ## Process (execute in order)
 
-0. The Gate at the end of this file overrides every step below: check each Gate condition as soon as its input is known (verdict now; evaluator scores after step 3; first-time failure against `${ADVISOR_VAULT:-~/.advisor/vault}/.cache/lessons.jsonl` after step 5; root cause and polarity after step 6). If any condition holds, stop, write no lesson and report why.
+0. The Gate at the end of this file overrides every step below. Check each Gate condition as soon as its input is known (verdict now; evaluator scores after step 3; root cause and polarity after step 6). If any condition holds, stop, write no lesson and report why.
 1. Read `--synthesis-log`. Find the record where `seq == --synthesis-seq`. If not found, report "synthesis record not found" and stop.
 2. Extract: `established`, `gap`, `material`, `next_action`, `key_quotes` from the record.
 3. If `--evaluator-scores` provided, read `scores.json`. Find the lowest-scoring dimension (the one ≤ 0.6 or lowest absolute value). This is `evaluator_dim`.
@@ -55,6 +55,27 @@ writeLesson({
 
 10. Verify the note was written: run `"${ADV:-.}/bin/advisor-vault" search --text '<task_type keywords>'` and confirm the lesson appears with `[lesson]` type marker.
 11. Send a `result` message with: `{"summary":"Lesson written: <failure_mode> for <task_type>","paths":["~/.advisor/vault/lessons/<sid>-<agent>-<seq>.md"],"verdict":"complete"}`.
+
+`writeLesson` writes `status: proposed`. A proposed lesson is never recalled until approved (see Fill mode).
+
+## Fill mode — given `lessons/proposed-*.md`
+
+Use this mode when handed a drafted proposed lesson (the LESSON EXTRACTION banner names its path) instead of a synthesis log.
+
+1. Read the note and its evidence. The Gate still applies: if the root cause is indeterminate, write nothing and say so.
+2. Write `## Root cause` (the named action, not the symptom) and `## Heuristic` (the "do NOT ... because ... Instead" pattern) in the note.
+3. Choose `audience`:
+   - `advisor`: rules for orchestrating, briefing, model choice or diagnosing workers.
+   - `worker`: rules a worker can act on while executing.
+   - `both`: only when both readers need the rule.
+4. Preview, then apply:
+
+```bash
+bun bin/advisor-vault lessons approve <path> --audience <a> --dry-run
+bun bin/advisor-vault lessons approve <path> --audience <a>
+```
+
+`approve` sets `status: active` and the audience. Later states are `promoted` and `retired`; lessons are never set to done or archived.
 
 ## Output schema
 
@@ -122,6 +143,5 @@ Why bad: `task_type: research` matches every research brief and poisons unrelate
 
 - `verdict: complete` — lessons are for failures only
 - `verdict: partial` with all evaluator dimensions > 0.6 — acceptable partial result is not a failure
-- First-time failure for this task_type — check `${ADVISOR_VAULT:-~/.advisor/vault}/.cache/lessons.jsonl` for prior entries with same `task_type` tags; if none found, do not write (one failure = noise)
 - Root cause is unclear — write no lesson rather than a vague one; say "root cause indeterminate" in your result message
 - Polarity would be positive — do not write positive-constraint lessons

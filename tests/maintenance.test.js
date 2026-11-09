@@ -179,6 +179,40 @@ test('archiveStaleReminders archives >30d-past-due reminder; recent untouched; l
   expect(vault.readNote('reminders/recent.md').fm.status).not.toBe('archived');
 });
 
+test('archiveStaleReminders clears due_date on overdue lesson instead of archiving', () => {
+  const today = '2026-06-10';
+  vault.writeNote('lessons/overdue-a.md', { type: 'lesson', status: 'active', due_date: daysBefore(today, 40), created_at: '2026-01-01T00:00:00Z' }, 'overdue lesson alpha');
+  expect(vault.listDue(today).map((n) => n.path)).toContain('lessons/overdue-a.md');
+
+  maintenance.archiveStaleReminders(vault, today);
+
+  const note = vault.readNote('lessons/overdue-a.md');
+  expect(note.fm.due_date).toBeUndefined();
+  expect(note.fm.status).toBe('active');
+  expect(vault.listDue(today).map((n) => n.path)).not.toContain('lessons/overdue-a.md');
+});
+
+test('overdue lesson keeps its status and stays searchable', () => {
+  const today = '2026-06-10';
+  vault.writeNote('lessons/overdue-b.md', { type: 'lesson', status: 'proposed', due_date: daysBefore(today, 60), created_at: '2026-01-01T00:00:00Z' }, 'zymurgyquux heuristic');
+
+  maintenance.archiveStaleReminders(vault, today);
+
+  expect(vault.readNote('lessons/overdue-b.md').fm.status).toBe('proposed');
+  expect(vault.searchNotes('zymurgyquux').map((r) => r.path)).toContain('lessons/overdue-b.md');
+});
+
+test('overdue reminder is still archived', () => {
+  const today = '2026-06-10';
+  vault.writeNote('reminders/overdue-c.md', { type: 'reminder', due_date: daysBefore(today, 50), created_at: '2026-01-01T00:00:00Z' }, 'old reminder c');
+  vault.writeNote('lessons/overdue-d.md', { type: 'lesson', status: 'active', due_date: daysBefore(today, 50), created_at: '2026-01-01T00:00:00Z' }, 'lesson d');
+
+  const n = maintenance.archiveStaleReminders(vault, today);
+
+  expect(n).toBe(1);
+  expect(vault.readNote('reminders/overdue-c.md').fm.status).toBe('archived');
+});
+
 // ── (5) integration: hook runs under node and D actually executes under bun ───
 test('INTEGRATION: session-start.js under node flips a stale reminder and drops it from listDue', () => {
   const intVault = fs.mkdtempSync(path.join(os.tmpdir(), 'maint-intvault-'));

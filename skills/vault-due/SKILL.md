@@ -1,7 +1,7 @@
 ---
 name: vault-due
 description: Act on the SessionStart vault-due banner. Subcommands: done <note>, snooze <note> <days>, archive <note>.
-last_edited: 2026-10-06
+last_edited: 2026-11-09
 ---
 
 # vault-due
@@ -12,10 +12,18 @@ Act on notes that appear in the SessionStart vault-due banner. Run each command 
 
 ### `done <note>`
 
-Mark a note as done - it leaves the due-date banner.
+Mark a note as done - it leaves the due-date banner. Check the note's `type` first.
+
+Other types:
 
 ```bash
 bun -e "const {setStatus} = await import('./lib/vault.js'); setStatus('<note>', 'done')"
+```
+
+`type: lesson`: `setStatus` refuses done, so clear the due date instead:
+
+```bash
+bun -e "const {clearDueDate} = await import('./lib/vault.js'); clearDueDate('<note>')"
 ```
 
 ### `snooze <note> <days>`
@@ -28,10 +36,14 @@ bun -e "const {readNote, setDueDate} = await import('./lib/vault.js'); const n =
 
 ### `archive <note>`
 
-Mark a note as archived - it leaves the due-date banner permanently.
+Mark a note as archived - it leaves the due-date banner permanently. Check the note's `type` first.
+
+Other types:
 
 ```bash
 bun -e "const {setStatus} = await import('./lib/vault.js'); setStatus('<note>', 'archived')"
 ```
+
+`type: lesson`: do not archive (`setStatus` refuses it, and archiving would hide the lesson from recall). Clear the due date as under `done`. To remove a lesson from recall, the Advisor runs `bun bin/advisor-vault lessons retire <note> --reason TEXT`.
 
 Example: `/vault-due snooze lessons/1779957923-5750c3-researcher-1.md 7`
