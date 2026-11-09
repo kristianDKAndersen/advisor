@@ -50,6 +50,8 @@ function readRunnerRecord(sid) {
 }
 
 // True only if BOTH the runner process and its backing pane/session are alive.
+// A herdr runner is never judged by tmux paneAlive; its pane is probed separately.
+// execFileSync on purpose: multi-sid-observe pins the spawn-call count in this file.
 function isRunnerAlive(info) {
   if (!info || !info.pid) return false;
   try {
@@ -61,8 +63,23 @@ function isRunnerAlive(info) {
     try { tmuxExec('tmux', ['has-session', '-t', info.tmux_session]); return true; }
     catch (_) { return false; }
   }
+  if (info.backend === 'herdr') return true;
   if (info.pane_id) return paneAlive(tmuxExec, info.pane_id);
   return true;
+}
+
+const PROBE_INTERVAL_MS = 5000;
+const HERDR_RUNNER = path.join(__dirname, '..', 'lib', 'herdr-runner.js');
+
+// Out-of-process pane probe for herdr workers. Returns alive|gone|unknown|no-record;
+// any failure is 'unknown' so an outage never produces 'dead'.
+function probeHerdrPane(sid) {
+  try {
+    const out = execFileSync(process.execPath, [HERDR_RUNNER, '--pane-state', '--sid', sid],
+      { timeout: PROBE_INTERVAL_MS, encoding: 'utf8', env: process.env, stdio: ['ignore', 'pipe', 'ignore'] });
+    const st = JSON.parse(out || '{}').state;
+    return ['alive', 'gone', 'no-record'].includes(st) ? st : 'unknown';
+  } catch (_) { return 'unknown'; }
 }
 
 // Flags that never consume the following token (so `--verbose A B` keeps A as a sid).
@@ -177,6 +194,7 @@ async function main() {
       stalledEmitted: false,
       nudged: false,
       busyEmitted: false,
+      nextProbeAt: 0,
       live: true,
     });
   }
@@ -243,6 +261,18 @@ async function main() {
           }
         }
       } catch (_) {} // absent or malformed heartbeat.jsonl = silent
+
+      // ── herdr pane probe: gone + still no result -> dead (at most once per 5 s) ──
+      if (Date.now() >= rec.nextProbeAt) {
+        const info = readRunnerRecord(rec.sid);
+        if (info && info.backend === 'herdr') {
+          rec.nextProbeAt = Date.now() + PROBE_INTERVAL_MS;
+          if (probeHerdrPane(rec.sid) === 'gone') {
+            const hasResult = new Tail().read(rec.outboxPath).some(m => m.type === 'result');
+            if (!hasResult) emitExit(3, rec.sid, 'dead');
+          }
+        }
+      }
 
       // ── True silence: neither outbox activity NOR a heartbeat ───────────────
       const trueSilenceMs = Date.now() - Math.max(rec.lastActivityAt, rec.lastHeartbeatAt);
