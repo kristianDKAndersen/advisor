@@ -379,7 +379,7 @@ A run keeps the backend it started with: teardown reads the run's `backend` mark
 - Teardown closes panes only. It never closes a tab or a workspace and never stops the herdr server.
 - Every herdr summon first reaps orphans: a tagged worker pane is closed only when its token matches, its run's `session.json` has not changed for 24 h, its sid timestamp is at least 2 h old, and no process mentions the sid. A pane you keep open for reading past 24 h can be closed this way.
 - A worker's `bin/close-tab` closes only its own pane.
-- Readiness and prompt submission are handled by `lib/herdr-runner.js` using herdr's agent state.
+- The worker's task travels in claude's launch command, so the runner types nothing but that command (after checking the tag) and then only watches the worker; a slow or busy worker is never closed for not looking ready.
 
 **Accepted risk.** Workers live inside the herdr server. A herdr crash, restart or update kills every running herdr worker: the panes and their claude processes die. The advisor does not prevent this, it detects it. `bin/advisor-observe` reports a worker whose pane is gone and that has no result as dead (exit 3, reason `dead`); if the runner is still alive it instead writes a synthetic result with `reason=herdr-restart` (server lost) or `reason=pane-died`. `herdr update --handoff` may preserve running workers, but that is untested here. tmux mode does not have this coupling.
 

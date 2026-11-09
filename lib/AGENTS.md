@@ -126,7 +126,8 @@ Worker pane placement, tagging and token-checked close in the user's live herdr 
 Per-worker supervising process for the herdr backend. Sets `ADVISOR_NO_REAPER=1` before loading `lib/tmux-runner.js` (reuses its sentinel, hook and `runner.json` helpers).
 
 - launches the worker in its pane with `ADVISOR_WORKER_BACKEND=herdr` and `HERDR_STRIP_ENV` removed via `exec env -u`
-- readiness and prompt submission are handled here using herdr's agent state
+- `--run` (every summon worker) passes `promptInArgv`: the prompt rides in claude's argv from `launch.sh`, so there is no readiness wait and nothing is typed except the launch command; the readiness wait (herdr agent idle, footer fallback) and `agent.prompt` run only without `promptInArgv`, and a readiness timeout never closes the pane
+- supervision ends on `pane_exited` or `pane_closed` (both subscribed), the sentinel, a lost token (`herdr-restart`) or the hard timeout
 - supervises until the outbox result, pane exit, subscriber outage or hard timeout; a worker that exits with no result gets a synthetic result line with `reason=pane-died`, or `reason=herdr-restart` when the herdr server was lost
 - CLI modes: `--launch-from-meta` (called by `bin/summon`), `--run`, `--close --sid`, `--close-self`, `--pane-state --sid`
 - consumed by the herdr branches of `bin/summon`, `bin/close-tab`, `bin/close-worker-tab` and `bin/advisor-observe`; tests in `tests/herdr-runner.test.js`
