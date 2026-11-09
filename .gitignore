@@ -62,3 +62,6 @@ test/*.txt
 
 # ── graphify generated code-knowledge graph (regenerated via graphify update) ─
 graphify-out/
+
+# herdr live test temp run dirs (removed on teardown; left only by a crashed run)
+.herdr-itest-*/

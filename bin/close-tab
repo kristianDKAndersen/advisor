@@ -17,6 +17,21 @@ set -u
 # shellcheck source=../lib/tab-trace.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/tab-trace.sh"
 
+# ── herdr path: close only this worker's own pane (token-checked) ─────────────
+# Gate on the persistent per-sid marker, not on inheritable env vars.
+_herdr_marker="${ADVISOR_RUNS_ROOT:-$HOME/.advisor/runs}/${ADVISOR_SID:-}/backend"
+if [[ -n "${HERDR_PANE_ID:-}" && -n "${ADVISOR_SID:-}" && -f "$_herdr_marker" && "$(cat "$_herdr_marker" 2>/dev/null)" == "herdr" ]]; then
+  _parent_name=$(ps -o comm= -p $PPID 2>/dev/null | awk -F'/' '{print $NF}')
+  if [[ "$_parent_name" == "claude" || "$_parent_name" == "node" ]]; then
+    kill -TERM $PPID 2>/dev/null || true
+    sleep 0.5
+    kill -0 $PPID 2>/dev/null && kill -KILL $PPID 2>/dev/null || true
+  fi
+  node "$(dirname "${BASH_SOURCE[0]}")/../lib/herdr-runner.js" --close-self >/dev/null 2>&1 || true
+  _tab_trace herdr-close-self -
+  exit 0
+fi
+
 # ── Headless tmux path ────────────────────────────────────────────────────────
 _is_tmux=0
 if [[ "${ADVISOR_TMUX:-}" == "1" ]]; then

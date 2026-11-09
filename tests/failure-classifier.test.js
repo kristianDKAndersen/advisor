@@ -359,3 +359,122 @@ describe('classifyPaneDeath adapter (lib/loop-termination.js options.classifyPan
     expect(classifyPaneDeath(null)).toBe('deterministic');
   });
 });
+
+describe('classifySessionDir - herdr-runner.log', () => {
+  function writeHerdrLog(dir, content) {
+    fs.writeFileSync(path.join(dir, 'herdr-runner.log'), content);
+  }
+  const paneDied = { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=pane-died', verdict: 'blocked', paths: [] }) };
+
+  test('hit-timeout: herdr-runner.log timeout marker, no outbox result', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, '[herdr-runner] spawn sid=abc pane=w1:p2 tab=w1:t1 ws=w1\nspawnHeadless timed out after 300000ms (sid=abc, pane=w1:p2, reason=timeout)\n');
+    writeOutbox(dir, [{ seq: 1, type: 'progress', from: 'coder', body: 'working on it' }]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('hit-timeout');
+    expect(v.transient).toBe(false);
+    expect(v.evidence).toMatch(/spawnHeadless timed out after/);
+  });
+
+  test('hit-timeout: herdr-runner.log timeout marker with a synthetic pane-died result', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'spawnHeadless timed out after 300000ms (sid=abc, pane=w1:p2, reason=timeout)\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('hit-timeout');
+    expect(v.transient).toBe(false);
+  });
+
+  test('TRANSIENT pane-death: Command failed: herdr in herdr-runner.log with synthetic result', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'boot\nCommand failed: herdr pane.get unavailable\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.transient).toBe(true);
+    expect(v.evidence).toMatch(/Command failed: herdr pane\.get/);
+  });
+
+  test('TRANSIENT launch-death: Command failed: herdr with no outbox at all', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'Command failed: herdr ping unavailable\n');
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('launch-death');
+    expect(v.transient).toBe(true);
+    expect(v.evidence).toMatch(/Command failed: herdr ping/);
+  });
+
+  test('both runner logs present still classify', () => {
+    const dir = makeSessionDir();
+    writeTmuxLog(dir, 'unrelated tmux line\n');
+    writeHerdrLog(dir, 'Command failed: herdr pane.split pane_not_found\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.transient).toBe(true);
+  });
+
+  test('herdr-runner.log without failure markers stays deterministic', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, '[herdr-runner] spawn sid=abc pane=w1:p2 tab=w1:t1 ws=w1\n[herdr-runner] subscriber down 1200ms, reconciling\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.transient).toBe(false);
+  });
+});
+
+describe('classifySessionDir - herdr pane-died / restart logs (D4)', () => {
+  const paneDied = { seq: 1, type: 'result', from: 'wrapper', body: JSON.stringify({ summary: 'worker exited without result (exit_code=unknown); reason=pane-died', verdict: 'blocked', paths: [] }) };
+  const writeHerdrLog = (dir, c) => fs.writeFileSync(path.join(dir, 'herdr-runner.log'), c);
+
+  test('legacy-grammar pane-died log is pane-death, not hit-timeout', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, '[herdr-runner] spawn sid=abc pane=w1:p2 tab=w1:t1 ws=w1\nspawnHeadless timed out after 812ms (sid=abc, pane=w1:p2, reason=pane-died)\n[herdr-runner] exit error: spawnHeadless timed out after 812ms (sid=abc, pane=w1:p2, reason=pane-died)\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.transient).toBe(false);
+  });
+
+  test('legacy-grammar herdr-restart log with no result is not hit-timeout', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'spawnHeadless timed out after 40ms (sid=abc, pane=w1:p2, reason=herdr-restart)\n');
+    writeOutbox(dir, [{ seq: 1, type: 'progress', from: 'coder', body: 'x' }]);
+    expect(classifySessionDir(dir).category).toBe('api-stall');
+  });
+
+  test('new-grammar worker-ended pane-died log is pane-death', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, '[herdr-runner] worker ended reason=pane-died sid=abc pane=w1:p2\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('pane-death');
+    expect(v.evidence).not.toMatch(/timed out/);
+  });
+
+  test('hit-timeout evidence names herdr-runner.log when that log matched', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'spawnHeadless timed out after 300000ms (sid=abc, pane=w1:p2, reason=timeout)\n');
+    writeOutbox(dir, [paneDied]);
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('hit-timeout');
+    expect(v.evidence).toMatch(/herdr-runner\.log/);
+    expect(v.evidence).not.toMatch(/tmux-runner\.log/);
+  });
+
+  test('no-result hit-timeout evidence names herdr-runner.log', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'spawnHeadless timed out after 300000ms (sid=abc, pane=w1:p2, reason=timeout)\n');
+    const v = classifySessionDir(dir);
+    expect(v.category).toBe('hit-timeout');
+    expect(v.evidence).toMatch(/herdr-runner\.log/);
+  });
+
+  test('infra-race evidence names the log it matched', () => {
+    const dir = makeSessionDir();
+    writeHerdrLog(dir, 'Command failed: herdr pane.get unavailable\n');
+    writeOutbox(dir, [paneDied]);
+    expect(classifySessionDir(dir).evidence).toMatch(/herdr-runner\.log/);
+  });
+});

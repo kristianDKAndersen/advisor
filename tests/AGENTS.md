@@ -1,7 +1,7 @@
 ---
-scope: "tests/ — automated test suite for the advisor library modules, binaries and hooks, including the handover and maintenance tests"
-last_updated_by: "sid:1793787710-da09d0 seq:1"
-last_updated_ts: "2026-11-04T10:22:45Z"
+scope: "tests/ — automated test suite for the advisor library modules, binaries and hooks, including the handover, maintenance and herdr backend tests"
+last_updated_by: "sid:1794231866-469924 seq:1"
+last_updated_ts: "2026-11-09T13:45:06Z"
 ---
 
 # tests/
@@ -113,3 +113,15 @@ CLI tests for `bin/handover-resolve`: appends `FINAL OUTCOME` for a legacy file 
 ## maintenance.test.js
 
 Tests for `lib/maintenance.js`: `pickLastSession()` selection and null case; `newestUnresolvedHandover()` ordering (headered by `created`, legacy by mtime) and skipping of invalid and empty files; `archiveResolvedHandovers()` (24h floor, header `resolved` epoch over mtime, `resolved-24h` reason, failure reporting when `_archive` is a file); `archiveStaleOpenHandovers()` (30-day boundary, `stale-30d` header and `ARCHIVED-STALE` legacy line, no overwrite of archived names, skip of files another session already moved, failure reporting when `_archive` is a file; age is max(created, mtime), so an edited handover resets its clock; a future mtime is clamped to now; `isArchiveDue()` boundaries at 24h and 30d; a 600-entry run where the archiver drains the oldest 100 while `newestUnresolvedHandover()` still returns the newest); `runHandoverMaintenance()` (plain scan when nothing is due, archive then rescan, a file another session moves between the scan and the archive step is not reported as open); pre-scanned `items` honoured by the archivers and `scanHandovers()`; `cleanupHandoverTemps()` in `_archive/`, keeping young tmp files and empty reservations and skipping a symlinked `_archive/`; a symlinked `plans/` gives ELOOP with the archivers and temp cleanup touching nothing; `archiveStaleReminders()` plus an integration run of `session-start.js` under node; `listHandovers()` classification; `scanItems()` newest-plus-oldest cap; `scanHandovers()` counts, reasons, unreadable-vs-missing `plans/`, and the 7d `staleCount` boundary (exactly 7d is not stale, 7d+1s is).
+
+## herdr backend tests
+
+Unit tests against a fake herdr socket server that throws on tab, workspace, server and session teardown methods. None of them needs a real herdr.
+
+- `worker-backend.test.js` - the `ADVISOR_HERDR` / `HERDR_ENV` gate, `readRunnerBackend()`, `resolveHerdrBin()`
+- `herdr-client.test.js` - `lib/herdr-client.js` transport and errors
+- `herdr-panes.test.js` - placement, tagging and token-checked close for `lib/herdr-panes.js`
+- `herdr-runner.test.js` - supervision, `exec env -u` stripping and the `pane-died` / `herdr-restart` outcomes of `lib/herdr-runner.js`
+- `summon-herdr.test.js`, `close-tab-herdr.test.js`, `close-worker-tab-herdr.test.js`, `observe-herdr.test.js` - the herdr branches of `bin/summon`, `bin/close-tab`, `bin/close-worker-tab` and `bin/advisor-observe` (pane gone with no result gives exit 3 reason `dead`)
+- `setup-herdr-env.test.js` - keeps the full suite independent of a developer's herdr environment
+- `herdr-live.test.js` - live test against an isolated herdr session, skipped unless `ADVISOR_HERDR_ITEST=1`
