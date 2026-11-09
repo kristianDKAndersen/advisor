@@ -41,8 +41,8 @@ const outboxLines = (run) => fs.readFileSync(run.outbox, 'utf8').split('\n').fil
 const methods = (s) => s.calls.map((c) => c.method);
 const closes = (s) => s.calls.filter((c) => c.method === 'pane.close');
 
-function makeStub({ text = '  ? for shortcuts' } = {}) {
-  const s = { calls: [], gone: false, tokens: {}, text, handlers: null, hooks: {}, subClosed: false, sendTexts: 0, snapshots: {} };
+function makeStub({ text = '  ? for shortcuts', agent = 'claude', agentStatus = 'idle' } = {}) {
+  const s = { calls: [], gone: false, tokens: {}, text, agent, agentStatus, handlers: null, hooks: {}, subClosed: false, sendTexts: 0, snapshots: {} };
   s.request = async (method, params = {}) => {
     s.calls.push({ method, params });
     if (s.hooks[method]) {
@@ -57,6 +57,8 @@ function makeStub({ text = '  ? for shortcuts' } = {}) {
       case 'pane.read': return { type: 'pane_read', read: { text: s.text } };
       case 'pane.close': s.gone = true; return { type: 'ok' };
       case 'pane.send_text': s.sendTexts += 1; return { type: 'ok' };
+      case 'agent.get': return { type: 'agent_info', agent: { pane_id: params.target, agent: s.agent, agent_status: s.agentStatus, interactive_ready: true } };
+      case 'agent.prompt': s.sendTexts += 1; return { type: 'agent_prompted', agent: { pane_id: params.target, agent: s.agent, agent_status: 'working' } };
       default: return { type: 'ok' };
     }
   };
@@ -77,12 +79,14 @@ function writeSentinel(s, run, text = 'final answer') {
   fs.writeFileSync(sentinel + '.json', JSON.stringify({ transcript_path: transcript }));
   fs.writeFileSync(sentinel, '');
 }
-// Runs fn on the Nth pane.send_text (1 = launch command, 2 = prompt).
+// Runs fn on the Nth submission (1 = launch command via pane.send_text, 2 = prompt via agent.prompt).
 const onSend = (s, nth, fn) => {
-  s.hooks['pane.send_text'] = (params) => {
+  const hook = (params) => {
     if (s.sendTexts + 1 === nth) setTimeout(() => fn(params), 20);
     return undefined;
   };
+  s.hooks['pane.send_text'] = hook;
+  s.hooks['agent.prompt'] = hook;
 };
 
 async function runSpawn(run, s, extra = {}) {
@@ -148,11 +152,11 @@ describe('spawnHeadlessHerdr', () => {
   test('spawn order and sentinel path: returns transcript text and closes through the checked close', async () => {
     const run = mkRun();
     const s = makeStub();
-    s.hooks['pane.send_text'] = (params) => {
-      if (s.sendTexts === 0) s.snapshots.launch = JSON.parse(fs.readFileSync(path.join(run.runDir, 'runner.json'), 'utf8'));
-      if (s.sendTexts === 1) setTimeout(() => writeSentinel(s, run), 20);
+    s.hooks['pane.send_text'] = () => {
+      s.snapshots.launch = JSON.parse(fs.readFileSync(path.join(run.runDir, 'runner.json'), 'utf8'));
       return undefined;
     };
+    s.hooks['agent.prompt'] = () => { setTimeout(() => writeSentinel(s, run), 20); return undefined; };
     const res = await runSpawn(run, s);
     expect(res.err).toBeUndefined();
     expect(res.value).toBe('final answer');
@@ -165,16 +169,16 @@ describe('spawnHeadlessHerdr', () => {
     const launch = idx('pane.send_text');
     expect(tag).toBeLessThan(launch);
     expect(seq[launch + 1]).toBe('pane.send_keys');
-    const read = idx('pane.read');
-    expect(read).toBeGreaterThan(launch);
-    const prompt = idx('pane.send_text', launch + 1);
-    expect(prompt).toBeGreaterThan(read);
-    expect(seq[prompt + 1]).toBe('pane.send_keys');
-    const textCalls = s.calls.filter((c) => c.method === 'pane.send_text');
-    expect(textCalls[0].params.text).toContain('exec env -u');
-    expect(textCalls[1].params.text).toBe('do the thing');
+    const ready = idx('agent.get', launch);
+    expect(ready).toBeGreaterThan(launch + 1);
+    const prompt = idx('agent.prompt', ready);
+    expect(prompt).toBeGreaterThan(ready);
+    expect(seq).not.toContain('pane.read');
+    expect(seq.filter((m) => m === 'pane.send_text')).toHaveLength(1);
+    expect(s.calls.find((c) => c.method === 'pane.send_text').params.text).toContain('exec env -u');
+    expect(s.calls[prompt].params).toEqual({ target: 'w1:p1', text: 'do the thing' });
     const keys = s.calls.filter((c) => c.method === 'pane.send_keys');
-    expect(keys).toHaveLength(2);
+    expect(keys).toHaveLength(1);
     expect(keys[0].params).toEqual({ pane_id: 'w1:p1', keys: [R().ENTER_KEY] });
     expect(s.calls[tag].params).toMatchObject({ pane_id: 'w1:p1', source: 'advisor', tokens: { advisor_sid: run.sid } });
     expect(s.snapshots.launch).toMatchObject({ pid: process.pid, mode: 'herdr', backend: 'herdr', pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1', socket_path: '/x/sock', herdr_bin: '/x/herdr' });
@@ -184,7 +188,47 @@ describe('spawnHeadlessHerdr', () => {
     expect(fs.existsSync(sentinelOf(s))).toBe(false);
     expect(res.log).toContain(`[herdr-runner] spawn sid=${run.sid} pane=w1:p1 tab=w1:t1 ws=w1`);
     expect(res.log).toContain('[herdr-runner] herdr_bin=/x/herdr protocol=22');
+    expect(res.log).toContain('[herdr-runner] readiness=agent');
     expect(s.subClosed).toBe(true);
+  });
+
+  test('readiness waits through unknown and working agent states until idle', async () => {
+    const run = mkRun();
+    const s = makeStub({ agentStatus: 'unknown' });
+    let polls = 0;
+    s.hooks['agent.get'] = (params) => {
+      polls += 1;
+      const status = polls < 2 ? 'unknown' : polls < 3 ? 'working' : 'idle';
+      return { type: 'agent_info', agent: { pane_id: params.target, agent: 'claude', agent_status: status, interactive_ready: true } };
+    };
+    s.hooks['agent.prompt'] = () => { setTimeout(() => writeSentinel(s, run), 20); return undefined; };
+    const res = await runSpawn(run, s);
+    expect(res.value).toBe('final answer');
+    expect(polls).toBeGreaterThanOrEqual(3);
+    expect(res.log).toContain('[herdr-runner] readiness=agent');
+  });
+
+  test('agent never idle: falls back to the footer check, logs the path and still submits via agent.prompt', async () => {
+    const run = mkRun();
+    const s = makeStub({ agentStatus: 'unknown', agent: null });
+    s.hooks['agent.prompt'] = () => { setTimeout(() => writeSentinel(s, run), 20); return undefined; };
+    const res = await runSpawn(run, s, { env: { HERDR_BIN_PATH: '/x/herdr', HERDR_SOCKET_PATH: '/x/sock', ADVISOR_CAPTURE_TIMEOUT_MS: '300' } });
+    expect(res.value).toBe('final answer');
+    expect(res.log).toContain('[herdr-runner] readiness=footer-fallback');
+    expect(methods(s)).toContain('pane.read');
+    expect(methods(s).indexOf('pane.read')).toBeLessThan(methods(s).indexOf('agent.prompt'));
+  });
+
+  test.each(['agent_blocked', 'agent_prompt_stalled'])('agent.prompt %s logs the failure, seals unexpected and never resubmits', async (code) => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['agent.prompt'] = () => { throw new HerdrError(code, 'x'); };
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeDefined();
+    expect(res.log).toContain(`Command failed: herdr agent.prompt ${code}`);
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=unexpected');
+    expect(s.calls.filter((c) => c.method === 'agent.prompt')).toHaveLength(1);
+    expect(s.calls.filter((c) => c.method === 'pane.send_text')).toHaveLength(1);
   });
 
   test('pane_exited with a result already in the outbox resolves without a synthetic line', async () => {
