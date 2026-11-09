@@ -56,6 +56,8 @@ d('herdr backend live (isolated session advisor-itest)', () => {
   const readRecord = (run) => { try { return JSON.parse(fs.readFileSync(path.join(run.runDir, 'runner.json'), 'utf8')); } catch (_) { return null; } };
 
   async function runSpawn(run, paneId, extra = {}) {
+    // Placement tags the pane in real runs (D7); the runner only verifies, so tag here first.
+    await panes.tagPane(client, paneId, run.sid);
     const chunks = [];
     const orig = process.stderr.write;
     process.stderr.write = (c) => { chunks.push(String(c)); return true; };
