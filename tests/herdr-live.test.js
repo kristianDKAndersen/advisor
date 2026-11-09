@@ -13,7 +13,7 @@ const RUNNER = path.join(ROOT, 'lib', 'herdr-runner.js');
 const OBSERVE = path.join(ROOT, 'bin', 'advisor-observe');
 // Per-process suffix: concurrent runs must not share (or stop) each other's isolated server.
 const SESS = `advisor-itest-${process.pid}`;
-const DEFAULT_SOCK = '/Users/awesome/.config/herdr/herdr.sock';
+const DEFAULT_SOCK = path.join(process.env.HOME || os.homedir(), '.config', 'herdr', 'herdr.sock');
 const d = process.env.ADVISOR_HERDR_ITEST === '1' ? describe : describe.skip;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

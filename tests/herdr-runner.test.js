@@ -250,7 +250,7 @@ describe('spawnHeadlessHerdr', () => {
     const s = makeStub();
     onSend(s, 2, () => s.emitExit());
     const res = await runSpawn(run, s);
-    expect(String(res.err && res.err.message)).toMatch(/spawnHeadless timed out after \d+ms \(sid=.*, pane=w1:p1, reason=pane-died\)/);
+    expect(String(res.err && res.err.message)).toBe(`[herdr-runner] worker ended reason=pane-died sid=${run.sid} pane=w1:p1`);
     const lines = outboxLines(run);
     expect(lines).toHaveLength(1);
     expect(lines[0].type).toBe('result');
@@ -285,7 +285,7 @@ describe('spawnHeadlessHerdr', () => {
     const res = await runSpawn(run, s);
     expect(String(res.err && res.err.message)).toContain('reason=pane-died');
     expect(res.log).toMatch(/\[herdr-runner\] subscriber down \d+ms, reconciling/);
-    expect(res.log).toContain('Command failed: herdr pane.get pane_not_found');
+    expect(res.log).not.toContain('Command failed: herdr pane.get pane_not_found');
     expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=pane-died');
   });
 
@@ -539,6 +539,204 @@ describe('CLI --close, --close-self, --pane-state', () => {
       await fake.stop();
     }
   }, 30000);
+});
+
+describe('fix round 1: D2 marker, D4 log grammar, M1 untokened close, m3 guard', () => {
+  test('D2: writes runs/<sid>/backend "herdr\\n" before runner.json and keeps it after the run', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    const marker = path.join(run.runDir, 'backend');
+    const rec = path.join(run.runDir, 'runner.json');
+    let atPing = null;
+    s.hooks.ping = () => { atPing = { marker: fs.existsSync(marker), rec: fs.existsSync(rec) }; return undefined; };
+    onSend(s, 2, () => writeSentinel(s, run));
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeUndefined();
+    expect(atPing).toEqual({ marker: true, rec: false });
+    expect(fs.existsSync(rec)).toBe(false);
+    expect(fs.readFileSync(marker, 'utf8')).toBe('herdr\n');
+  });
+
+  test('D4: pane-died ends with the worker-ended line, never the timeout prefix', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => s.emitExit());
+    const res = await runSpawn(run, s);
+    expect(String(res.err && res.err.message)).not.toContain('timed out after');
+    expect(res.log).not.toContain('timed out after');
+    expect(res.log).toContain(`[herdr-runner] worker ended reason=pane-died sid=${run.sid} pane=w1:p1`);
+  });
+
+  test('D4: herdr-restart ends with the worker-ended line, never the timeout prefix', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => { s.tokens = {}; s.handlers.onClose(); });
+    const res = await runSpawn(run, s);
+    expect(res.log).not.toContain('timed out after');
+    expect(res.log).toContain(`[herdr-runner] worker ended reason=herdr-restart sid=${run.sid} pane=w1:p1`);
+  });
+
+  test('D4: an unexpected failure logs the worker-ended line', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['pane.send_text'] = () => { throw new HerdrError('boom_code', 'x'); };
+    const res = await runSpawn(run, s);
+    expect(res.log).toContain(`[herdr-runner] worker ended reason=unexpected sid=${run.sid} pane=w1:p1`);
+  });
+
+  test('D4: a hard timeout still logs the timeout prefix', async () => {
+    const run = mkRun();
+    const res = await runSpawn(run, makeStub(), { timeoutMs: 400 });
+    expect(res.log).toContain('spawnHeadless timed out after');
+    expect(res.log).toContain('reason=timeout');
+  });
+
+  test('D4: an expected pane_not_found in reconcile and readiness is not logged as Command failed', async () => {
+    const run = mkRun();
+    const s = makeStub({ agentStatus: 'working' });
+    let reads = 0;
+    s.hooks['pane.read'] = () => { if (reads++ === 0) throw new HerdrError('pane_not_found', 'gone'); return undefined; };
+    onSend(s, 2, () => { s.gone = true; s.handlers.onClose(); });
+    const res = await runSpawn(run, s, { env: { HERDR_BIN_PATH: '/x/herdr', HERDR_SOCKET_PATH: '/x/sock', ADVISOR_CAPTURE_TIMEOUT_MS: '300' } });
+    expect(res.err).toBeDefined();
+    expect(res.log).not.toContain('Command failed: herdr pane.get pane_not_found');
+    expect(res.log).not.toContain('Command failed: herdr pane.read pane_not_found');
+  });
+
+  test('M1: a hard timeout never closes a pane whose token is gone', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['agent.prompt'] = () => { setTimeout(() => { s.tokens = {}; }, 200); return undefined; };
+    const res = await runSpawn(run, s, { timeoutMs: 600 });
+    expect(res.err).toBeDefined();
+    expect(closes(s)).toHaveLength(0);
+  });
+
+  test('M1: an unexpected failure never closes a pane whose token is gone', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['pane.send_text'] = () => { s.tokens = {}; throw new HerdrError('boom_code', 'x'); };
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeDefined();
+    expect(closes(s)).toHaveLength(0);
+  });
+
+  test('m3: a pane_exited during the launch send stops before the Enter key', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['pane.send_text'] = () => { s.emitExit(); return undefined; };
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeDefined();
+    expect(methods(s)).toContain('pane.send_text');
+    expect(methods(s)).not.toContain('pane.send_keys');
+  });
+});
+
+describe('fix round 1: D6 orphan panes, m2 sid validation, m4 usage, m5 live socket', () => {
+  const metaFor = (runs) => ({ sessions: runs.map((r) => ({ sid: r.sid, launchScript: r.launchScript, promptFile: r.promptFile })) });
+  const launchEnv = (fake) => ({ HERDR_SOCKET_PATH: fake.socketPath, HERDR_WORKSPACE_ID: 'w1', PATH: process.env.PATH, ADVISOR_RUNS_ROOT: path.join(tmp, 'runs') });
+
+  test('D6: every allocated pane is tagged before the first child spawns', async () => {
+    const fake = await startFakeHerdr();
+    try {
+      const runs = [mkRun(), mkRun(), mkRun()];
+      let taggedAtFirstSpawn = null;
+      await R().runLaunchFromMeta({
+        meta: metaFor(runs), agent: 'coder', timeoutMs: 1500, env: launchEnv(fake),
+        lockDir: path.join(tmp, 'lock-d6a'), client: createClient({ socketPath: fake.socketPath }),
+        spawner: () => {
+          if (taggedAtFirstSpawn === null) taggedAtFirstSpawn = fake.calls.filter((c) => c.method === 'pane.report_metadata').map((c) => c.params.tokens.advisor_sid);
+          return { unref() {} };
+        },
+      });
+      expect(taggedAtFirstSpawn.sort()).toEqual(runs.map((r) => r.sid).sort());
+    } finally {
+      await fake.stop();
+    }
+  });
+
+  test('D6: a spawner failure for session 2 of 3 still leaves all 3 panes tagged', async () => {
+    const fake = await startFakeHerdr();
+    try {
+      const runs = [mkRun(), mkRun(), mkRun()];
+      let n = 0;
+      await expect(R().runLaunchFromMeta({
+        meta: metaFor(runs), agent: 'coder', timeoutMs: 1500, env: launchEnv(fake),
+        lockDir: path.join(tmp, 'lock-d6b'), client: createClient({ socketPath: fake.socketPath }),
+        spawner: () => { if (++n === 2) throw new Error('spawn boom'); return { unref() {} }; },
+      })).rejects.toThrow('spawn boom');
+      expect(fake.calls.filter((c) => c.method === 'pane.report_metadata')).toHaveLength(3);
+    } finally {
+      await fake.stop();
+    }
+  });
+
+  test('D6: the orphan reaper runs (pane.list) before any pane is allocated', async () => {
+    const fake = await startFakeHerdr();
+    try {
+      await R().runLaunchFromMeta({
+        meta: metaFor([mkRun()]), agent: 'coder', timeoutMs: 1500, env: launchEnv(fake),
+        lockDir: path.join(tmp, 'lock-d6c'), client: createClient({ socketPath: fake.socketPath }),
+        spawner: () => ({ unref() {} }),
+      });
+      const ms = fake.calls.map((c) => c.method);
+      expect(ms).toContain('pane.list');
+      expect(ms.indexOf('pane.list')).toBeLessThan(Math.min(...['tab.create', 'pane.split'].map((m) => (ms.includes(m) ? ms.indexOf(m) : Infinity))));
+    } finally {
+      await fake.stop();
+    }
+  });
+
+  test('m2: --pane-state and --close refuse a --sid that escapes the runs root', async () => {
+    const run = mkRun();
+    const evil = path.join(tmp, 'runs-evil');
+    fs.mkdirSync(evil, { recursive: true });
+    const fake = await startFakeHerdr({ panes: [{ pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: '../runs-evil' } }] });
+    try {
+      fs.writeFileSync(path.join(evil, 'runner.json'), JSON.stringify({ pid: 1, backend: 'herdr', pane_id: 'w1:p1', socket_path: fake.socketPath }));
+      const env = { HERDR_SOCKET_PATH: fake.socketPath, ADVISOR_RUNS_ROOT: path.dirname(run.runDir) };
+      const st = await runCli(['--pane-state', '--sid', '../runs-evil'], { env });
+      expect(st.code).toBe(0);
+      expect(JSON.parse(st.stdout.trim().split('\n').pop())).toEqual({ state: 'no-record', pane_id: null });
+      const cl = await runCli(['--close', '--sid', '../runs-evil'], { env });
+      expect(cl.code).toBe(0);
+      expect(JSON.parse(cl.stdout.trim().split('\n').pop())).toEqual({ closed: [], refused: [{ paneId: '', reason: 'invalid-sid' }] });
+      expect(fake.calls.filter((c) => c.method === 'pane.close')).toHaveLength(0);
+    } finally {
+      await fake.stop();
+    }
+  }, 20000);
+
+  test('m2: --close refuses every malformed --sid form (dot, empty, embedded slash, absolute)', async () => {
+    const run = mkRun();
+    const fake = await startFakeHerdr({ panes: [{ pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: '.' } }] });
+    try {
+      const env = { HERDR_SOCKET_PATH: fake.socketPath, ADVISOR_RUNS_ROOT: path.dirname(run.runDir) };
+      for (const bad of ['.', '..', '', 'a/b', '/abs/sid']) {
+        const res = await runCli(['--close', '--sid', bad], { env });
+        expect(res.code).toBe(0);
+        expect(JSON.parse(res.stdout.trim().split('\n').pop())).toEqual({ closed: [], refused: [{ paneId: '', reason: 'invalid-sid' }] });
+      }
+      expect(fake.calls.filter((c) => c.method === 'pane.close')).toHaveLength(0);
+    } finally {
+      await fake.stop();
+    }
+  }, 30000);
+
+  test('m4: the usage text documents that --agent and --tui have no effect on placement', async () => {
+    const res = await runCli([]);
+    expect(res.code).toBe(2);
+    expect(res.stderr).toContain('--tui');
+    expect(res.stderr).toMatch(/--agent and --tui .*no effect/);
+  });
+
+  test('m5: the live test derives its default socket from HOME, not a hard-coded user path', () => {
+    const src = fs.readFileSync(path.join(import.meta.dir, 'herdr-live.test.js'), 'utf8');
+    const line = src.split('\n').find((l) => l.startsWith('const DEFAULT_SOCK'));
+    expect(line).toBeDefined();
+    expect(line).not.toContain('/Users/');
+    expect(line).toContain('HOME');
+  });
 });
 
 describe('CLAUDE_READY_RE', () => {
