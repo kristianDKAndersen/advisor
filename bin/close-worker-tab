@@ -37,10 +37,32 @@ ps -ax -o pid=,comm=,args= 2>/dev/null \
   | awk -v sid="$sid" '$2=="claude" && index($0, sid) {print $1}' \
   | xargs -r kill -KILL 2>/dev/null || true
 
+# ── Herdr path ────────────────────────────────────────────────────────────────
+# runner.json .backend decides; the env flags only when runner.json is gone.
+# Panes are closed by herdr-runner.js --close (token-checked), never by tab.
+_HERDR_HANDLED=0
+_herdr_backend=tmux
+if [[ -f "$runDir/runner.json" ]]; then
+  _herdr_backend=$(node -e '
+    try {
+      const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      process.stdout.write(m && m.backend === "herdr" ? "herdr" : "tmux");
+    } catch (_) { process.stdout.write("tmux"); }
+  ' "$runDir/runner.json" 2>/dev/null)
+elif [[ "${ADVISOR_HERDR:-}" == "1" && "${HERDR_ENV:-}" == "1" ]]; then
+  _herdr_backend=herdr
+fi
+if [[ "$_herdr_backend" == "herdr" ]]; then
+  _HERDR_HANDLED=1
+  _tab_trace herdr-close -
+  ADVISOR_RUNS_ROOT="$(dirname "$runDir")" \
+    node "$(dirname "${BASH_SOURCE[0]}")/../lib/herdr-runner.js" --close --sid "$sid" >/dev/null 2>&1 || true
+fi
+
 # ── Headless tmux path ────────────────────────────────────────────────────────
 # Look for any tmux session whose name starts with "advisor-<sid>" (covers
 # both the old "advisor-<sid>" format and the new "advisor-<sid>-<agent>" format).
-if command -v tmux >/dev/null 2>&1; then
+if [[ "$_HERDR_HANDLED" != "1" ]] && command -v tmux >/dev/null 2>&1; then
   # In multiplex mode, first try to kill by the @advisor_sid pane option (covers
   # tui-shared workers and any pane-tagged worker). The pane title is NOT used —
   # the claude TUI overwrites it; @advisor_sid is app-immune. kill-pane cascade
@@ -84,7 +106,7 @@ if [[ -f "$runnerJson" ]]; then
   ' "$runnerJson" 2>/dev/null)
   if [[ -n "$RUNNER_PID" ]] && kill -0 "$RUNNER_PID" 2>/dev/null; then
     RUNNER_ARGV=$(ps -p "$RUNNER_PID" -o args= 2>/dev/null)
-    if [[ "$RUNNER_ARGV" == *"tmux-runner.js --sid ${sid}"* ]]; then
+    if [[ "$RUNNER_ARGV" == *"tmux-runner.js --sid ${sid}"* || "$RUNNER_ARGV" == *"herdr-runner.js --sid ${sid}"* ]]; then
       _tab_trace runner-kill "$RUNNER_PID"
       kill -TERM "$RUNNER_PID" 2>/dev/null || true
     fi
@@ -92,6 +114,8 @@ if [[ -f "$runnerJson" ]]; then
 fi
 
 # ── Apple Terminal (TUI) path ─────────────────────────────────────────────────
+# Skipped in herdr mode (no tty); its early exits would also skip worktree cleanup.
+if [[ "$_HERDR_HANDLED" != "1" ]]; then
 ttyFile="$runDir/tty.txt"
 if [[ ! -f "$ttyFile" ]]; then _tab_trace no-match -; exit 0; fi
 
@@ -132,6 +156,7 @@ on run argv
   end tell
 end run
 EOF
+fi
 
 # ── Worktree cleanup ─────────────────────────────────────────────────────────
 # Remove the per-worker git worktree (provisioned by lib/summon.js for coder
