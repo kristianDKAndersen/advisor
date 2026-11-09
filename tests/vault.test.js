@@ -295,11 +295,13 @@ test('searchNotes excludes superseded notes by default, includes with legacy:tru
   expect(legacyResults.find(r => r.path === 'synthesis/superseded-old.md')).toBeDefined();
 });
 
-test('searchNotes halves score for status=stale notes', () => {
+test('searchNotes excludes status=stale by default; includeInactive halves its score', () => {
   vault.writeNote('synthesis/stale-score-a.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'Stale scoring token WPQR fresh.');
   vault.writeNote('synthesis/stale-score-b.md', { type: 'synthesis', created_at: new Date().toISOString() }, 'Stale scoring token WPQR fresh.');
   vault.setStatus('synthesis/stale-score-b.md', 'stale');
-  const results = vault.searchNotes('WPQR');
+  const defaults = vault.searchNotes('WPQR');
+  expect(defaults.find(r => r.path === 'synthesis/stale-score-b.md')).toBeUndefined();
+  const results = vault.searchNotes('WPQR', 10, { includeInactive: true });
   const a = results.find(r => r.path === 'synthesis/stale-score-a.md');
   const b = results.find(r => r.path === 'synthesis/stale-score-b.md');
   expect(a).toBeDefined();
