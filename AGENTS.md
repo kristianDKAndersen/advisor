@@ -1,7 +1,7 @@
 ---
 scope: "Root of the advisor repo — overall architecture, entrypoints, and cross-cutting rules"
-last_updated_by: "sid:1793109359-991d3b seq:1"
-last_updated_ts: "2026-10-27T13:56:13Z"
+last_updated_by: "sid:1794231866-469924 seq:1"
+last_updated_ts: "2026-11-09T13:45:06Z"
 ---
 
 # Advisor — Root
@@ -37,3 +37,12 @@ CLIs in `bin/` that check a branch before anything outward-facing. Workers may d
 - `bin/advisor-matrix-lint` — validates the `### Guard matrix` table in a `changes.md` or `plan.md`: no empty cells, test IDs found by `git grep -F`, `N/A` / `OUT OF SCOPE` with a reason; read-only (lines 2-17)
 - `bin/advisor-revert-check` — hunk-revert mutation check: reverse-applies each non-test, non-doc hunk of `git diff -U0 <base> <head>` in a scratch worktree, runs `--test-cmd`, classifies KILLED / ERROR / SURVIVED / TIMEOUT / NOT_RUN (lines 2-16)
 - `bin/advisor-repo-hygiene` — finds what advisor runs leave in a target repo (`TRACKED_RESIDUE`, `STALE_WORKTREE`, ...); read-only unless `--execute` (lines 2-7)
+
+## Herdr worker backend
+
+Opt-in native backend that runs workers as panes in the user's herdr session instead of tmux. Setup, safety rules and the accepted crash risk are in `README.md` ("Watching workers live (herdr)").
+
+- gate: `ADVISOR_HERDR=1` and `HERDR_ENV=1`; otherwise the tmux path runs unchanged
+- `lib/worker-backend.js`, `lib/herdr-client.js`, `lib/herdr-panes.js`, `lib/herdr-runner.js` - see `lib/AGENTS.md`; tests in `tests/AGENTS.md`
+- a pane is closed only on a matching `advisor_sid` token; product code never closes a tab or workspace and never stops the herdr server
+- `bin/summon` exits 1 when the gate is set and herdr is unreachable; there is no tmux fallback

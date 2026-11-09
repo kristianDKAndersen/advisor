@@ -363,6 +363,40 @@ Ctrl-b w                                      # interactive window picker
 
 Workers self-terminate on completion. `bin/close-worker-tab <sid>` (called automatically by synthesize) kills the worker's pane (located via the `@advisor_sid` pane tag) or window; the window collapses when its last pane exits. A reaper sweeps stale orphan windows and sessions (>24h, no live process) at module load, intentionally skipping `ensemble-*` and `tui` windows whose lifecycle is managed separately. A second reaper (`reaperSweepOrphanSessions`) kills orphaned `advisor-*` tmux sessions whose `session.json` is missing/stale (>24h) and has no live process — but never touches a session younger than 2h, since `session.json` may not exist yet for a session still mid-provision. A third module-load reaper captures-then-removes leaked coder worktrees (see Worktree durability below); all reapers are disabled by `ADVISOR_NO_REAPER=1`.
 
+## Watching workers live (herdr)
+
+An opt-in alternative to tmux: workers run as panes in your [herdr](https://herdr.dev/tui/docs/) session. Docs for herdr itself are at that link; this section covers only what the advisor does with it. Tested against herdr 0.9.5.
+
+**Enable.** Set `ADVISOR_HERDR=1` (e.g. in `~/.zshrc`). It takes effect only inside herdr, where `HERDR_ENV=1` is set; with either one missing, the tmux path runs unchanged. If `ADVISOR_HERDR=1` is set and herdr is unreachable, `bin/summon` exits 1 instead of falling back to tmux.
+
+A run keeps the backend it started with: teardown and observe read it from the run's `runner.json`, so unsetting `ADVISOR_HERDR` later does not strand running herdr workers.
+
+**Where workers appear.** A tab labelled `advisor` in your workspace. Each new worker splits the last pane 50/50, alternating right and down. A tab holds at most 6 panes; the next worker goes to `advisor-2`, then `advisor-3`, and so on. `--ensemble N` gets its own tab `ensemble-<N>-<YYYYMMDD>`. Panes are not equal-sized: there is no safe way to equalise them in 0.9.5, so with many workers some panes are small. Panes are created without taking focus. Renaming the `advisor` tab makes the next worker create a new one.
+
+**Safety rules.**
+- Every worker pane is tagged with an `advisor_sid` token. A pane is closed only when its token matches the worker's sid; pane ids are reused across herdr sessions, so an id alone is never enough.
+- Teardown closes panes only. It never closes a tab or a workspace and never stops the herdr server.
+- A worker's `bin/close-tab` closes only its own pane.
+- Readiness and prompt submission are handled by `lib/herdr-runner.js` using herdr's agent state.
+
+**Accepted risk.** Workers live inside the herdr server. A herdr crash, restart or update kills every running herdr worker: the panes and their claude processes die. The advisor does not prevent this, it detects it. `bin/advisor-observe` reports a worker whose pane is gone and that has no result as dead (exit 3, reason `dead`); if the runner is still alive it instead writes a synthetic result with `reason=herdr-restart` (server lost) or `reason=pane-died`. `herdr update --handoff` may preserve running workers, but that is untested here. tmux mode does not have this coupling.
+
+**Recommended setup.**
+
+```bash
+mkdir -p ~/.claude/skills/herdr
+herdr --skill > ~/.claude/skills/herdr/SKILL.md   # re-run after herdr updates
+herdr integration install claude
+```
+
+**Live test.** The unit tests use a fake herdr server. The gated live test runs against an isolated herdr session and is skipped by default:
+
+```bash
+ADVISOR_HERDR_ITEST=1 bun test tests/herdr-live.test.js
+```
+
+**Not supported in herdr mode.** No `claude.log` (the worker's output lives in its pane), and no exit codes: a worker that exits is judged by its outbox `result`, so a crash cannot be told from a clean exit without one. `bin/advisor-schedule` loops still need tmux.
+
 ## Worktree durability
 
 Coder workspaces are real git worktrees (branch `ws/<sid>`), so uncommitted coder output must survive teardown. Three guarantees:
