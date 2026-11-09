@@ -111,3 +111,34 @@ test('T2b MCP gaps tool returns blocked-without-lesson rows', () => {
   expect(Array.isArray(results)).toBe(true);
   expect(results.some(r => r.sid === 'MCP-BLOCKED-SID')).toBe(true);
 });
+
+test('mcp search hides retired unless include_inactive', () => {
+  vault.writeNote('notes/retired-quokka.md', { type: 'note', status: 'retired', created_at: new Date().toISOString() }, 'Retired quokka note.');
+  vault.writeNote('notes/live-quokka.md', { type: 'note', status: 'active', created_at: new Date().toISOString() }, 'Live quokka note.');
+  const hiddenResp = mcpCall({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'search', arguments: { text: 'quokka', limit: 10 } } });
+  const hidden = JSON.parse(hiddenResp.result.content[0].text).map(r => r.path);
+  expect(hidden).toContain('notes/live-quokka.md');
+  expect(hidden).not.toContain('notes/retired-quokka.md');
+  const allResp = mcpCall({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'search', arguments: { text: 'quokka', limit: 10, include_inactive: true } } });
+  const all = JSON.parse(allResp.result.content[0].text).map(r => r.path);
+  expect(all).toContain('notes/retired-quokka.md');
+});
+
+test('mcp search type param restricts via searchNotes types', () => {
+  for (let i = 0; i < 4; i++) {
+    vault.writeNote(`notes/quokka-dup-${i}.md`, { type: 'note', created_at: new Date().toISOString() }, 'quokka quokka quokka quokka');
+  }
+  vault.writeNote('notes/quokka-lesson.md', { type: 'lesson', status: 'active', created_at: new Date().toISOString() }, 'quokka once');
+  const resp = mcpCall({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'search', arguments: { text: 'quokka', limit: 1, type: 'lesson' } } });
+  const results = JSON.parse(resp.result.content[0].text);
+  expect(results.length).toBe(1);
+  expect(results[0].path).toBe('notes/quokka-lesson.md');
+});
+
+test('mcp search returns status field', () => {
+  vault.writeNote('notes/status-probe.md', { type: 'note', status: 'active', created_at: new Date().toISOString() }, 'statusprobe content');
+  const resp = mcpCall({ jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'search', arguments: { text: 'statusprobe', limit: 5 } } });
+  const results = JSON.parse(resp.result.content[0].text);
+  expect(results.length).toBeGreaterThan(0);
+  expect(results[0].status).toBe('active');
+});

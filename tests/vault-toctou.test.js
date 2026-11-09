@@ -97,12 +97,12 @@ test('withNoteLock: concurrent setStatus calls complete without data corruption'
   vault.writeNote(relPath, { type: 'lesson' }, 'Lock test note.');
 
   // Sequential setStatus calls (simulating what serialised concurrent callers
-  // would do). After the fix both complete; final status is 'done'.
+  // would do). After the fix both complete; final status is 'retired'.
   vault.setStatus(relPath, 'active');
-  vault.setStatus(relPath, 'done');
+  vault.setStatus(relPath, 'retired');
 
   const final = vault.readNote(relPath);
-  expect(final?.fm?.status).toBe('done');
+  expect(final?.fm?.status).toBe('retired');
   // Ensure body integrity
   expect(final?.body?.trim()).toBe('Lock test note.');
 });

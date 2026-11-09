@@ -26,7 +26,8 @@ const TOOLS = [
         limit: { type: 'number', description: 'Max results (default 10)' },
         type: { type: 'string', description: 'Filter by note type' },
         agent: { type: 'string', description: 'Filter by agent name' },
-        material: { type: 'string', description: 'Filter by material (yes|no|partial)' }
+        material: { type: 'string', description: 'Filter by material (yes|no|partial)' },
+        include_inactive: { type: 'boolean', description: 'Include retired/archived/done/stale notes (default false)' }
       },
       required: ['text']
     }
@@ -108,8 +109,9 @@ async function dispatch(name, params) {
   const v = await vault();
   switch (name) {
     case 'search': {
-      let results = v.searchNotes(params.text, params.limit ?? 10);
-      if (params.type) results = results.filter(r => r.type === params.type);
+      const opts = { includeInactive: !!params.include_inactive };
+      if (params.type) opts.types = [params.type];
+      let results = v.searchNotes(params.text, params.limit ?? 10, opts);
       if (params.agent) results = results.filter(r => r.agent === params.agent);
       if (params.material) results = results.filter(r => r.material === params.material);
       return results;

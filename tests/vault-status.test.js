@@ -39,25 +39,25 @@ test('(a) migration idempotency: status column exists and ALTER TABLE does not e
 });
 
 test('(b) setStatus updates frontmatter status field and SQLite status column', () => {
-  vault.writeNote('lessons/foo.md', { type: 'lesson', due_date: '2020-01-01' }, 'Test body.');
-  vault.setStatus('lessons/foo.md', 'done');
-  const { fm } = vault.readNote('lessons/foo.md');
+  vault.writeNote('reminders/foo.md', { type: 'reminder', due_date: '2020-01-01' }, 'Test body.');
+  vault.setStatus('reminders/foo.md', 'done');
+  const { fm } = vault.readNote('reminders/foo.md');
   expect(fm.status).toBe('done');
   const d = openDb();
-  const row = d.prepare("SELECT status FROM notes WHERE path = 'lessons/foo.md'").get();
+  const row = d.prepare("SELECT status FROM notes WHERE path = 'reminders/foo.md'").get();
   d.close();
   expect(row?.status).toBe('done');
 });
 
 test('(c) listDue excludes notes where status=done', () => {
-  vault.writeNote('lessons/due-a.md', { type: 'lesson', due_date: '2020-01-01' }, 'Due A.');
-  vault.writeNote('lessons/due-b.md', { type: 'lesson', due_date: '2020-01-01' }, 'Due B.');
-  vault.setStatus('lessons/due-a.md', 'done');
+  vault.writeNote('reminders/due-a.md', { type: 'reminder', due_date: '2020-01-01' }, 'Due A.');
+  vault.writeNote('reminders/due-b.md', { type: 'reminder', due_date: '2020-01-01' }, 'Due B.');
+  vault.setStatus('reminders/due-a.md', 'done');
   // Use a future "today" so 2020-01-01 is <= windowEnd
   const results = vault.listDue('2030-01-01', 1);
   const paths = results.map(r => r.path);
-  expect(paths).not.toContain('lessons/due-a.md');
-  expect(paths).toContain('lessons/due-b.md');
+  expect(paths).not.toContain('reminders/due-a.md');
+  expect(paths).toContain('reminders/due-b.md');
 });
 
 test('(d) setDueDate updates frontmatter due_date field and SQLite due_date column', () => {
@@ -91,8 +91,45 @@ test('(new-b) listDue window math is timezone-invariant (UTC+12)', () => {
 });
 
 test('(new-c) setStatus throws on multi-line YAML frontmatter', () => {
-  const abs = path.join(tmpDir, 'lessons', 'multiline-fm.md');
+  const abs = path.join(tmpDir, 'reminders', 'multiline-fm.md');
   fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, '---\ntype: lesson\ntags:\n  - foo\n  - bar\n---\n\nBody here.\n');
-  expect(() => vault.setStatus('lessons/multiline-fm.md', 'done')).toThrow(/multi-line frontmatter/);
+  fs.writeFileSync(abs, '---\ntype: reminder\ntags:\n  - foo\n  - bar\n---\n\nBody here.\n');
+  expect(() => vault.setStatus('reminders/multiline-fm.md', 'done')).toThrow(/multi-line frontmatter/);
+});
+
+test('setStatus refuses done on a lesson', () => {
+  vault.writeNote('lessons/guard-done.md', { type: 'lesson', status: 'active', due_date: '2020-01-01' }, 'body');
+  expect(() => vault.setStatus('lessons/guard-done.md', 'done')).toThrow(/lesson lifecycle status/);
+  expect(vault.readNote('lessons/guard-done.md').fm.status).toBe('active');
+});
+
+test('setStatus refuses archived on a lesson', () => {
+  vault.writeNote('lessons/guard-archived.md', { type: 'lesson', status: 'active' }, 'body');
+  expect(() => vault.setStatus('lessons/guard-archived.md', 'archived')).toThrow(/lesson lifecycle status/);
+  expect(vault.readNote('lessons/guard-archived.md').fm.status).toBe('active');
+});
+
+test('setStatus still accepts done on a reminder', () => {
+  vault.writeNote('reminders/accepts-done.md', { type: 'reminder' }, 'body');
+  vault.setStatus('reminders/accepts-done.md', 'done');
+  expect(vault.readNote('reminders/accepts-done.md').fm.status).toBe('done');
+});
+
+test('clearDueDate removes lesson from listDue', () => {
+  vault.writeNote('lessons/clear-due.md', { type: 'lesson', status: 'active', due_date: '2020-01-01' }, 'body');
+  expect(vault.listDue('2030-01-01', 1).map(r => r.path)).toContain('lessons/clear-due.md');
+  vault.clearDueDate('lessons/clear-due.md');
+  expect(vault.listDue('2030-01-01', 1).map(r => r.path)).not.toContain('lessons/clear-due.md');
+  expect(vault.readNote('lessons/clear-due.md').fm.due_date).toBeUndefined();
+});
+
+test('clearDueDate leaves lesson status unchanged', () => {
+  vault.writeNote('lessons/clear-keep.md', { type: 'lesson', status: 'promoted', due_date: '2020-01-01' }, 'body');
+  vault.clearDueDate('lessons/clear-keep.md');
+  expect(vault.readNote('lessons/clear-keep.md').fm.status).toBe('promoted');
+  const d = openDb();
+  const row = d.prepare("SELECT status, due_date FROM notes WHERE path = 'lessons/clear-keep.md'").get();
+  d.close();
+  expect(row?.status).toBe('promoted');
+  expect(row?.due_date ?? null).toBeNull();
 });

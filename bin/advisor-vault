@@ -6,6 +6,7 @@
 //   advisor-vault path
 
 import { searchNotes, backlinks, listDue, listUnresolved, vaultRoot, rebuildIndex, deleteNote, previewDeleteNote, listHubs, listGaps, backfillVerdicts, retroLink, computeCommunities, listCommunities, embedNotes, pruneFixtures, scanStale, supersedeNote } from '../lib/vault.js';
+import { runLessonsCli } from '../lib/vault-lessons-cli.js';
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -17,18 +18,22 @@ function getFlag(flag, fallback) {
 }
 
 if (cmd === 'search') {
-  if (helpMode) { console.log('Usage: advisor-vault search --text <query> [--limit N] [--legacy]'); process.exit(0); }
+  const searchUsage = 'Usage: advisor-vault search --text <query> [--limit N] [--legacy] [--include-inactive] [--type T]';
+  if (helpMode) { console.log(searchUsage); process.exit(0); }
   const text = getFlag('--text', args[1]);
   const limit = parseInt(getFlag('--limit', '10'), 10);
   const legacy = args.includes('--legacy');
-  if (!text) { console.error('Usage: advisor-vault search --text <query> [--limit N] [--legacy]'); process.exit(1); }
-  const results = searchNotes(text, limit, { legacy });
+  const type = getFlag('--type', undefined);
+  if (!text) { console.error(searchUsage); process.exit(1); }
+  const results = searchNotes(text, limit, { legacy, includeInactive: args.includes('--include-inactive'), types: type ? [type] : undefined });
   if (!results.length) { console.log('No results.'); process.exit(0); }
   for (const r of results) {
     const scoreStr = typeof r.score === 'number' ? `  score=${r.score.toFixed(3)}` : '';
-    console.log(`${r.path}  [${r.type}] ${r.created_at}${scoreStr}`);
+    console.log(`${r.path}  [${r.type}] ${r.created_at}${scoreStr}${r.status ? ` status=${r.status}` : ''}`);
     console.log(`  ${r.snippet}`);
   }
+} else if (cmd === 'lessons') {
+  process.exitCode = runLessonsCli(args.slice(1), { stdout: process.stdout, stderr: process.stderr });
 } else if (cmd === 'scan') {
   if (helpMode) { console.log('Usage: advisor-vault scan [--dry-run]'); process.exit(0); }
   const dryRun = args.includes('--dry-run');
@@ -187,6 +192,6 @@ if (cmd === 'search') {
   }
   if (pruned.length > 20) console.log(`  ... and ${pruned.length - 20} more`);
 } else {
-  console.error('Usage: advisor-vault <search|backlinks|path|due|unresolved|rebuild|embed|delete|hubs|gaps|backfill-verdicts|retro-link|communities|prune-fixtures|scan|supersede> [options]');
+  console.error('Usage: advisor-vault <search|backlinks|path|due|unresolved|rebuild|embed|delete|hubs|gaps|backfill-verdicts|retro-link|communities|prune-fixtures|scan|supersede|lessons> [options]');
   process.exit(1);
 }
