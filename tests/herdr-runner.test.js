@@ -1,0 +1,508 @@
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { createRequire } from 'node:module';
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { startFakeHerdr } from './fixtures/herdr-fake-server.js';
+
+const require = createRequire(import.meta.url);
+const SCRIPT = path.join(import.meta.dir, '..', 'lib', 'herdr-runner.js');
+const R = () => require('../lib/herdr-runner.js');
+const { HerdrError, HerdrUnavailableError, createClient } = require('../lib/herdr-client.js');
+
+const HERDR_KEYS = ['ADVISOR_HERDR', 'HERDR_ENV', 'HERDR_SOCKET_PATH', 'HERDR_PANE_ID', 'HERDR_WORKSPACE_ID', 'HERDR_TAB_ID'];
+const STRIP = ['CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDECODE', 'SSE_PORT', 'CHILD_SESSION', 'ENTRYPOINT'];
+
+let tmp;
+let savedHome;
+beforeAll(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-test-'));
+  savedHome = process.env.HOME;
+  process.env.HOME = path.join(tmp, 'home'); // ensureStopHook writes under HOME
+  for (const k of HERDR_KEYS) delete process.env[k];
+});
+afterAll(() => {
+  process.env.HOME = savedHome;
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+let n = 0;
+function mkRun() {
+  const runDir = path.join(tmp, 'runs', `sid-${++n}`);
+  fs.mkdirSync(path.join(runDir, 'channel'), { recursive: true });
+  const outbox = path.join(runDir, 'channel', 'outbox.jsonl');
+  fs.writeFileSync(outbox, '');
+  fs.writeFileSync(path.join(runDir, 'launch.sh'), '#!/bin/bash\n');
+  fs.writeFileSync(path.join(runDir, 'prompt.txt'), 'do the thing');
+  return { sid: path.basename(runDir), runDir, outbox, launchScript: path.join(runDir, 'launch.sh'), promptFile: path.join(runDir, 'prompt.txt') };
+}
+const outboxLines = (run) => fs.readFileSync(run.outbox, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+const methods = (s) => s.calls.map((c) => c.method);
+const closes = (s) => s.calls.filter((c) => c.method === 'pane.close');
+
+function makeStub({ text = '  ? for shortcuts' } = {}) {
+  const s = { calls: [], gone: false, tokens: {}, text, handlers: null, hooks: {}, subClosed: false, sendTexts: 0, snapshots: {} };
+  s.request = async (method, params = {}) => {
+    s.calls.push({ method, params });
+    if (s.hooks[method]) {
+      const r = await s.hooks[method](params, s);
+      if (r !== undefined) return r;
+    }
+    if (method === 'ping') return { type: 'pong', version: '0.9.5', protocol: 22 };
+    if (s.gone) throw new HerdrError('pane_not_found', `pane ${params.pane_id} not found`);
+    switch (method) {
+      case 'pane.report_metadata': s.tokens = { ...s.tokens, ...params.tokens }; return { type: 'ok' };
+      case 'pane.get': return { type: 'pane_info', pane: { pane_id: params.pane_id, tokens: s.tokens } };
+      case 'pane.read': return { type: 'pane_read', read: { text: s.text } };
+      case 'pane.close': s.gone = true; return { type: 'ok' };
+      case 'pane.send_text': s.sendTexts += 1; return { type: 'ok' };
+      default: return { type: 'ok' };
+    }
+  };
+  s.subscribe = (subs, handlers) => {
+    s.calls.push({ method: 'events.subscribe', params: { subscriptions: subs } });
+    s.handlers = handlers;
+    return { ready: Promise.resolve(), close() { s.subClosed = true; } };
+  };
+  s.emitExit = (paneId = 'w1:p1') => s.handlers.onEvent({ event: 'pane_exited', paneId, workspaceId: 'w1', raw: {} });
+  return s;
+}
+
+const sentinelOf = (s) => /CLAUDE_I_SENTINEL='([^']+)'/.exec(s.calls.find((c) => c.method === 'pane.send_text').params.text)[1];
+function writeSentinel(s, run, text = 'final answer') {
+  const sentinel = sentinelOf(s);
+  const transcript = path.join(run.runDir, 'transcript.jsonl');
+  fs.writeFileSync(transcript, JSON.stringify({ message: { role: 'assistant', content: [{ type: 'text', text }] } }) + '\n');
+  fs.writeFileSync(sentinel + '.json', JSON.stringify({ transcript_path: transcript }));
+  fs.writeFileSync(sentinel, '');
+}
+// Runs fn on the Nth pane.send_text (1 = launch command, 2 = prompt).
+const onSend = (s, nth, fn) => {
+  s.hooks['pane.send_text'] = (params) => {
+    if (s.sendTexts + 1 === nth) setTimeout(() => fn(params), 20);
+    return undefined;
+  };
+};
+
+async function runSpawn(run, s, extra = {}) {
+  const chunks = [];
+  const orig = process.stderr.write;
+  process.stderr.write = (c) => { chunks.push(String(c)); return true; };
+  let outcome;
+  try {
+    const value = await R().spawnHeadlessHerdr({
+      sid: run.sid, agent: 'coder', launchScript: run.launchScript, promptFile: run.promptFile,
+      timeoutMs: 5000, paneId: 'w1:p1', tabId: 'w1:t1', workspaceId: 'w1', client: s,
+      env: { HERDR_BIN_PATH: '/x/herdr', HERDR_SOCKET_PATH: '/x/sock' }, ...extra,
+    });
+    outcome = { value };
+  } catch (err) {
+    outcome = { err };
+  } finally {
+    process.stderr.write = orig;
+  }
+  return { ...outcome, log: chunks.join('') };
+}
+
+function runCli(args, { env = {}, input = '' } = {}) {
+  const base = { ...process.env, HOME: path.join(tmp, 'home'), ADVISOR_NO_REAPER: '1' };
+  for (const k of HERDR_KEYS) delete base[k];
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [SCRIPT, ...args], { env: { ...base, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(input);
+  });
+}
+const waitFor = async (fn, ms = 8000) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { const v = fn(); if (v) return v; await new Promise((r) => setTimeout(r, 50)); }
+  return fn();
+};
+
+describe('buildLaunchCommand', () => {
+  test('exports HERDR_STRIP_ENV and exec env -u for each name', () => {
+    expect(R().HERDR_STRIP_ENV).toEqual(STRIP);
+    const cmd = R().buildLaunchCommand({ sid: 's1', sentinel: '/tmp/s.done', launchScript: '/x/launch.sh' });
+    for (const name of STRIP) expect(cmd).toContain(`-u ${name}`);
+    expect(cmd).toContain('exec env -u');
+    expect(cmd.startsWith('ADVISOR_WORKER_BACKEND=herdr ADVISOR_SID=')).toBe(true);
+  });
+
+  test('quotes a path with a space and a single quote, and strips env when executed', () => {
+    const dir = path.join(tmp, "a b'c");
+    fs.mkdirSync(dir, { recursive: true });
+    const script = path.join(dir, "it's.sh");
+    fs.writeFileSync(script, 'echo "$ADVISOR_WORKER_BACKEND|$ADVISOR_SID|$CLAUDE_I_SENTINEL|${CLAUDECODE-unset}|${SSE_PORT-unset}"\n');
+    const cmd = R().buildLaunchCommand({ sid: 'sid x', sentinel: '/tmp/s d.done', launchScript: script });
+    const res = spawnSync('bash', ['-c', cmd], { encoding: 'utf8', env: { ...process.env, CLAUDECODE: '1', SSE_PORT: '9' } });
+    expect(res.stdout.trim()).toBe('herdr|sid x|/tmp/s d.done|unset|unset');
+  });
+});
+
+describe('spawnHeadlessHerdr', () => {
+  test('spawn order and sentinel path: returns transcript text and closes through the checked close', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['pane.send_text'] = (params) => {
+      if (s.sendTexts === 0) s.snapshots.launch = JSON.parse(fs.readFileSync(path.join(run.runDir, 'runner.json'), 'utf8'));
+      if (s.sendTexts === 1) setTimeout(() => writeSentinel(s, run), 20);
+      return undefined;
+    };
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeUndefined();
+    expect(res.value).toBe('final answer');
+    const seq = methods(s);
+    const idx = (m, from = 0) => seq.indexOf(m, from);
+    const sub = idx('events.subscribe');
+    expect(idx('ping')).toBeLessThan(sub);
+    const tag = idx('pane.report_metadata');
+    expect(sub).toBeLessThan(tag);
+    const launch = idx('pane.send_text');
+    expect(tag).toBeLessThan(launch);
+    expect(seq[launch + 1]).toBe('pane.send_keys');
+    const read = idx('pane.read');
+    expect(read).toBeGreaterThan(launch);
+    const prompt = idx('pane.send_text', launch + 1);
+    expect(prompt).toBeGreaterThan(read);
+    expect(seq[prompt + 1]).toBe('pane.send_keys');
+    const textCalls = s.calls.filter((c) => c.method === 'pane.send_text');
+    expect(textCalls[0].params.text).toContain('exec env -u');
+    expect(textCalls[1].params.text).toBe('do the thing');
+    const keys = s.calls.filter((c) => c.method === 'pane.send_keys');
+    expect(keys).toHaveLength(2);
+    expect(keys[0].params).toEqual({ pane_id: 'w1:p1', keys: [R().ENTER_KEY] });
+    expect(s.calls[tag].params).toMatchObject({ pane_id: 'w1:p1', source: 'advisor', tokens: { advisor_sid: run.sid } });
+    expect(s.snapshots.launch).toMatchObject({ pid: process.pid, mode: 'herdr', backend: 'herdr', pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1', socket_path: '/x/sock', herdr_bin: '/x/herdr' });
+    expect(closes(s)).toHaveLength(1);
+    expect(closes(s)[0].params).toEqual({ pane_id: 'w1:p1' });
+    expect(fs.existsSync(path.join(run.runDir, 'runner.json'))).toBe(false);
+    expect(fs.existsSync(sentinelOf(s))).toBe(false);
+    expect(res.log).toContain(`[herdr-runner] spawn sid=${run.sid} pane=w1:p1 tab=w1:t1 ws=w1`);
+    expect(res.log).toContain('[herdr-runner] herdr_bin=/x/herdr protocol=22');
+    expect(s.subClosed).toBe(true);
+  });
+
+  test('pane_exited with a result already in the outbox resolves without a synthetic line', async () => {
+    const run = mkRun();
+    fs.writeFileSync(run.outbox, JSON.stringify({ seq: 1, type: 'result', body: 'worker done', from: 'worker' }) + '\n');
+    const s = makeStub();
+    onSend(s, 2, () => s.emitExit());
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeUndefined();
+    expect(res.value).toBe('worker done');
+    expect(outboxLines(run)).toHaveLength(1);
+    expect(fs.existsSync(path.join(run.runDir, 'runner.json'))).toBe(false);
+    expect(res.log).toContain(`[herdr-runner] pane_exited sid=${run.sid} pane=w1:p1 result_in_outbox=true`);
+    expect(closes(s)).toHaveLength(0);
+  });
+
+  test('pane_exited without a result seals pane-died and rejects', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => s.emitExit());
+    const res = await runSpawn(run, s);
+    expect(String(res.err && res.err.message)).toMatch(/spawnHeadless timed out after \d+ms \(sid=.*, pane=w1:p1, reason=pane-died\)/);
+    const lines = outboxLines(run);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].type).toBe('result');
+    expect(JSON.stringify(lines[0].body)).toContain('reason=pane-died');
+    expect(res.log).toContain(`[herdr-runner] pane_exited sid=${run.sid} pane=w1:p1 result_in_outbox=false`);
+    expect(fs.existsSync(path.join(run.runDir, 'runner.json'))).toBe(false);
+    expect(closes(s)).toHaveLength(0);
+  });
+
+  test('a pane_exited buffered before the launch steps still seals pane-died and aborts the launch', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['pane.report_metadata'] = () => { s.emitExit(); return undefined; };
+    const res = await runSpawn(run, s);
+    expect(String(res.err && res.err.message)).toContain('reason=pane-died');
+    expect(s.sendTexts).toBe(0);
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=pane-died');
+  });
+
+  test('an event for a different pane is ignored', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => { s.emitExit('w1:p9'); setTimeout(() => writeSentinel(s, run), 60); });
+    const res = await runSpawn(run, s);
+    expect(res.value).toBe('final answer');
+  });
+
+  test('subscriber outage plus pane_not_found seals pane-died', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => { s.gone = true; s.handlers.onClose(new HerdrUnavailableError('down')); });
+    const res = await runSpawn(run, s);
+    expect(String(res.err && res.err.message)).toContain('reason=pane-died');
+    expect(res.log).toMatch(/\[herdr-runner\] subscriber down \d+ms, reconciling/);
+    expect(res.log).toContain('Command failed: herdr pane.get pane_not_found');
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=pane-died');
+  });
+
+  test('subscriber outage with the pane alive keeps waiting for the sentinel', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => { s.handlers.onClose(new HerdrUnavailableError('down')); setTimeout(() => writeSentinel(s, run), 80); });
+    const res = await runSpawn(run, s);
+    expect(res.value).toBe('final answer');
+    expect(res.log).toContain('subscriber down');
+  });
+
+  test('reconnect with the token gone seals herdr-restart and never closes the pane', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => { s.tokens = {}; s.handlers.onOpen(); });
+    const res = await runSpawn(run, s);
+    expect(String(res.err && res.err.message)).toContain('reason=herdr-restart');
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=herdr-restart');
+    expect(closes(s)).toHaveLength(0);
+    expect(fs.existsSync(path.join(run.runDir, 'runner.json'))).toBe(false);
+  });
+
+  test('reconnect with the token intact keeps waiting', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    onSend(s, 2, () => { s.handlers.onOpen(); setTimeout(() => writeSentinel(s, run), 100); });
+    const res = await runSpawn(run, s);
+    expect(res.value).toBe('final answer');
+    expect(outboxLines(run).filter((l) => JSON.stringify(l.body).includes('herdr-restart'))).toHaveLength(0);
+  });
+
+  test('hard timeout seals timeout, logs the timeout line and closes through the checked close', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    const res = await runSpawn(run, s, { timeoutMs: 400 });
+    expect(String(res.err && res.err.message)).toMatch(/spawnHeadless timed out after \d+ms \(sid=.*, pane=w1:p1, reason=timeout\)/);
+    expect(res.log).toContain('spawnHeadless timed out after');
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=timeout');
+    expect(closes(s)).toHaveLength(1);
+    expect(fs.existsSync(path.join(run.runDir, 'runner.json'))).toBe(false);
+  });
+
+  test('timeout with a foreign token on the pane logs token-mismatch and does not close', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['pane.get'] = () => ({ type: 'pane_info', pane: { pane_id: 'w1:p1', tokens: { advisor_sid: 'someone-else' } } });
+    const res = await runSpawn(run, s, { timeoutMs: 400 });
+    expect(res.err).toBeDefined();
+    expect(closes(s)).toHaveLength(0);
+  });
+
+  test('a failed socket call logs "Command failed: herdr <method> <code>" and seals unexpected', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks['pane.send_text'] = () => { throw new HerdrError('boom_code', 'x'); };
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeDefined();
+    expect(res.log).toContain('Command failed: herdr pane.send_text boom_code');
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=unexpected');
+  });
+
+  test('a failed ping logs unavailable, aborts before subscribing and seals unexpected', async () => {
+    const run = mkRun();
+    const s = makeStub();
+    s.hooks.ping = () => { throw new HerdrUnavailableError('no socket'); };
+    const res = await runSpawn(run, s);
+    expect(res.err).toBeDefined();
+    expect(res.log).toContain('Command failed: herdr ping unavailable');
+    expect(methods(s)).not.toContain('events.subscribe');
+    expect(JSON.stringify(outboxLines(run)[0].body)).toContain('reason=unexpected');
+  });
+});
+
+describe('CLI --run SIGTERM', () => {
+  test('clears runner.json and leaves the pane open', async () => {
+    const fake = await startFakeHerdr({ panes: [{ pane_id: 'w1:p1', tab_id: 'w1:t1' }], tabs: [{ tab_id: 'w1:t1', label: 'advisor', number: 1 }] });
+    try {
+      const run = mkRun();
+      const child = spawn(process.execPath, [SCRIPT, '--sid', run.sid, '--run', '--agent', 'coder', '--launch-script', run.launchScript, '--prompt-file', run.promptFile, '--timeout-ms', '60000', '--pane-id', 'w1:p1', '--tab-id', 'w1:t1', '--workspace-id', 'w1'], {
+        env: { ...process.env, HOME: path.join(tmp, 'home'), ADVISOR_NO_REAPER: '1', HERDR_SOCKET_PATH: fake.socketPath, ADVISOR_CAPTURE_TIMEOUT_MS: '300' },
+        stdio: 'ignore',
+      });
+      const exited = new Promise((resolve) => child.on('close', (code, sig) => resolve({ code, sig })));
+      const rec = path.join(run.runDir, 'runner.json');
+      expect(await waitFor(() => fs.existsSync(rec))).toBe(true);
+      child.kill('SIGTERM');
+      await exited;
+      expect(fs.existsSync(rec)).toBe(false);
+      expect(fake.calls.filter((c) => c.method === 'pane.close')).toHaveLength(0);
+      const alive = await createClient({ socketPath: fake.socketPath }).request('pane.get', { pane_id: 'w1:p1' });
+      expect(alive.pane.pane_id).toBe('w1:p1');
+    } finally {
+      await fake.stop();
+    }
+  }, 20000);
+});
+
+describe('--launch-from-meta', () => {
+  const metaFor = (runs) => ({ sessions: runs.map((r) => ({ sid: r.sid, launchScript: r.launchScript, promptFile: r.promptFile })) });
+
+  test('env strip: the detached child env lacks the stripped names', async () => {
+    const fake = await startFakeHerdr();
+    try {
+      const run = mkRun();
+      const spawned = [];
+      const env = { HERDR_SOCKET_PATH: fake.socketPath, HERDR_WORKSPACE_ID: 'w1', PATH: process.env.PATH };
+      for (const k of STRIP) env[k] = 'leak';
+      await R().runLaunchFromMeta({
+        meta: metaFor([run]), agent: 'coder', timeoutMs: 1000, env, lockDir: path.join(tmp, 'lock-env'),
+        client: createClient({ socketPath: fake.socketPath }),
+        spawner: (cmd, args, opts) => { spawned.push({ cmd, args, opts }); return { unref() {} }; },
+      });
+      expect(spawned).toHaveLength(1);
+      for (const k of STRIP) expect(spawned[0].opts.env[k]).toBeUndefined();
+      expect(spawned[0].opts.env.HERDR_SOCKET_PATH).toBe(fake.socketPath);
+      expect(spawned[0].opts.env.ADVISOR_NO_REAPER).toBe('1');
+      expect(spawned[0].opts.detached).toBe(true);
+    } finally {
+      await fake.stop();
+    }
+  });
+
+  test('a 3-session META allocates one ensemble tab and spawns 3 --run children with argv starting --sid', async () => {
+    const fake = await startFakeHerdr();
+    try {
+      const runs = [mkRun(), mkRun(), mkRun()];
+      const spawned = [];
+      await R().runLaunchFromMeta({
+        meta: metaFor(runs), agent: 'coder', timeoutMs: 1500,
+        env: { HERDR_SOCKET_PATH: fake.socketPath, HERDR_WORKSPACE_ID: 'w1', PATH: process.env.PATH },
+        lockDir: path.join(tmp, 'lock-ens'), client: createClient({ socketPath: fake.socketPath }),
+        spawner: (cmd, args, opts) => { spawned.push({ cmd, args, opts }); return { unref() {} }; },
+      });
+      const creates = fake.calls.filter((c) => c.method === 'tab.create');
+      expect(creates).toHaveLength(1);
+      expect(creates[0].params.label).toMatch(/^ensemble-3-\d{8}$/);
+      expect(fake.calls.filter((c) => c.method === 'pane.split')).toHaveLength(2);
+      expect(spawned).toHaveLength(3);
+      const panes = new Set();
+      spawned.forEach((sp, i) => {
+        expect(sp.args[0]).toBe(SCRIPT);
+        expect(sp.args.slice(1, 4)).toEqual(['--sid', runs[i].sid, '--run']);
+        const get = (f) => sp.args[sp.args.indexOf(f) + 1];
+        expect(get('--launch-script')).toBe(runs[i].launchScript);
+        expect(get('--prompt-file')).toBe(runs[i].promptFile);
+        expect(get('--timeout-ms')).toBe('1500');
+        expect(get('--workspace-id')).toBe('w1');
+        panes.add(get('--pane-id'));
+      });
+      expect(panes.size).toBe(3);
+    } finally {
+      await fake.stop();
+    }
+  });
+
+  test('CLI: spawns detached children that log to herdr-runner.log and exits 0', async () => {
+    const fake = await startFakeHerdr();
+    try {
+      const runs = [mkRun(), mkRun()];
+      const res = await runCli(['--launch-from-meta', '--agent', 'coder', '--timeout-ms', '1500'], {
+        input: JSON.stringify(metaFor(runs)),
+        env: { HERDR_SOCKET_PATH: fake.socketPath, HERDR_WORKSPACE_ID: 'w1', ADVISOR_CAPTURE_TIMEOUT_MS: '200' },
+      });
+      expect(res.code).toBe(0);
+      for (const r of runs) {
+        const log = path.join(r.runDir, 'herdr-runner.log');
+        const ok = await waitFor(() => fs.existsSync(log) && fs.readFileSync(log, 'utf8').includes(`[herdr-runner] spawn sid=${r.sid} pane=`));
+        expect(ok).toBe(true);
+      }
+      await waitFor(() => runs.every((r) => fs.readFileSync(path.join(r.runDir, 'herdr-runner.log'), 'utf8').includes('timed out after')), 10000);
+    } finally {
+      await fake.stop();
+    }
+  }, 30000);
+});
+
+describe('CLI --close, --close-self, --pane-state', () => {
+  test('--close closes only the token-matching pane, prints JSON, exits 0', async () => {
+    const run = mkRun();
+    const fake = await startFakeHerdr({ panes: [
+      { pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: run.sid } },
+      { pane_id: 'w1:p2', tab_id: 'w1:t1', tokens: { advisor_sid: 'other' } },
+      { pane_id: 'w1:p3', tab_id: 'w1:t1' },
+    ] });
+    try {
+      const env = { HERDR_SOCKET_PATH: fake.socketPath, ADVISOR_RUNS_ROOT: path.dirname(run.runDir) };
+      const res = await runCli(['--close', '--sid', run.sid], { env });
+      expect(res.code).toBe(0);
+      expect(JSON.parse(res.stdout.trim().split('\n').pop())).toEqual({ closed: ['w1:p1'], refused: [] });
+      expect(fake.calls.filter((c) => c.method === 'pane.close').map((c) => c.params.pane_id)).toEqual(['w1:p1']);
+    } finally {
+      await fake.stop();
+    }
+  }, 20000);
+
+  test('--close exits 0 with nothing closed when the socket is unreachable', async () => {
+    const run = mkRun();
+    const res = await runCli(['--close', '--sid', run.sid], { env: { HERDR_SOCKET_PATH: path.join(tmp, 'nope.sock'), ADVISOR_RUNS_ROOT: path.dirname(run.runDir) } });
+    expect(res.code).toBe(0);
+    expect(JSON.parse(res.stdout.trim().split('\n').pop()).closed).toEqual([]);
+  }, 20000);
+
+  test('--close falls back to runner.json socket_path when HERDR_SOCKET_PATH is unset', async () => {
+    const run = mkRun();
+    const fake = await startFakeHerdr({ panes: [{ pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: run.sid } }] });
+    try {
+      fs.writeFileSync(path.join(run.runDir, 'runner.json'), JSON.stringify({ pid: 0, backend: 'herdr', pane_id: 'w1:p1', socket_path: fake.socketPath }));
+      const res = await runCli(['--close', '--sid', run.sid], { env: { ADVISOR_RUNS_ROOT: path.dirname(run.runDir) } });
+      expect(res.code).toBe(0);
+      expect(JSON.parse(res.stdout.trim().split('\n').pop()).closed).toEqual(['w1:p1']);
+    } finally {
+      await fake.stop();
+    }
+  }, 20000);
+
+  test('--close-self closes only the own tokened pane; mismatch and missing env close nothing; exit 0 always', async () => {
+    const fake = await startFakeHerdr({ panes: [
+      { pane_id: 'w1:p1', tab_id: 'w1:t1', tokens: { advisor_sid: 'mine' } },
+      { pane_id: 'w1:p2', tab_id: 'w1:t1', tokens: { advisor_sid: 'other' } },
+    ] });
+    try {
+      const base = { HERDR_SOCKET_PATH: fake.socketPath };
+      const bad = await runCli(['--close-self'], { env: { ...base, HERDR_PANE_ID: 'w1:p2', ADVISOR_SID: 'mine' } });
+      const none = await runCli(['--close-self'], { env: base });
+      expect([bad.code, none.code]).toEqual([0, 0]);
+      expect(fake.calls.filter((c) => c.method === 'pane.close')).toHaveLength(0);
+      const ok = await runCli(['--close-self'], { env: { ...base, HERDR_PANE_ID: 'w1:p1', ADVISOR_SID: 'mine' } });
+      expect(ok.code).toBe(0);
+      expect(fake.calls.filter((c) => c.method === 'pane.close').map((c) => c.params.pane_id)).toEqual(['w1:p1']);
+    } finally {
+      await fake.stop();
+    }
+  }, 20000);
+
+  test('--pane-state prints alive, gone, no-record and unknown', async () => {
+    const fake = await startFakeHerdr({ panes: [{ pane_id: 'w1:p1', tab_id: 'w1:t1' }] });
+    try {
+      const state = async (paneId, socket) => {
+        const run = mkRun();
+        if (paneId) fs.writeFileSync(path.join(run.runDir, 'runner.json'), JSON.stringify({ pid: 1, backend: 'herdr', pane_id: paneId, socket_path: socket }));
+        const res = await runCli(['--pane-state', '--sid', run.sid], { env: { HERDR_SOCKET_PATH: socket, ADVISOR_RUNS_ROOT: path.dirname(run.runDir) } });
+        expect(res.code).toBe(0);
+        return JSON.parse(res.stdout.trim().split('\n').pop());
+      };
+      expect(await state('w1:p1', fake.socketPath)).toEqual({ state: 'alive', pane_id: 'w1:p1' });
+      expect(await state('w1:p9', fake.socketPath)).toEqual({ state: 'gone', pane_id: 'w1:p9' });
+      expect((await state(null, fake.socketPath)).state).toBe('no-record');
+      expect(await state('w1:p1', path.join(tmp, 'nope.sock'))).toEqual({ state: 'unknown', pane_id: 'w1:p1' });
+    } finally {
+      await fake.stop();
+    }
+  }, 30000);
+});
+
+describe('CLAUDE_READY_RE', () => {
+  test('matches claude idle footer, not a bare shell prompt', () => {
+    const { CLAUDE_READY_RE } = require('../lib/herdr-runner.js');
+    expect(CLAUDE_READY_RE.test('  ? for shortcuts')).toBe(true);
+    expect(CLAUDE_READY_RE.test('> Try "fix lint errors"')).toBe(true);
+    expect(CLAUDE_READY_RE.test('awesome@host ~/repo % ')).toBe(false);
+    expect(CLAUDE_READY_RE.test('')).toBe(false);
+  });
+});
