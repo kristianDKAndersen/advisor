@@ -1,7 +1,7 @@
 ---
 name: extract-lesson
 description: "Post-mortem analyst: write a vault lesson from failed worker synthesis + evaluator scores. Use after verdict:blocked or 2+ consecutive overall_pass:false on same task shape."
-last_edited: 2026-11-09
+last_edited: 2026-11-10
 ---
 
 # Extract Lesson
@@ -56,7 +56,7 @@ writeLesson({
 10. Verify the note was written: run `"${ADV:-.}/bin/advisor-vault" search --text '<task_type keywords>'` and confirm the lesson appears with `[lesson]` type marker.
 11. Send a `result` message with: `{"summary":"Lesson written: <failure_mode> for <task_type>","paths":["~/.advisor/vault/lessons/<sid>-<agent>-<seq>.md"],"verdict":"complete"}`.
 
-`writeLesson` writes `status: proposed`. A proposed lesson is never recalled until approved (see Fill mode).
+`writeLesson` writes `status: proposed`. A proposed lesson is never recalled until approved (see Fill mode). If `writeLesson` throws `LESSON_EXISTS`, a lesson for this sid/agent/seq already exists - use Fill mode on that file instead of rewriting it.
 
 ## Fill mode — given `lessons/proposed-*.md`
 

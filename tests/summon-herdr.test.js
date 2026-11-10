@@ -104,5 +104,5 @@ for (const [label, envOver] of [['ADVISOR_HERDR=1 alone', { ADVISOR_HERDR: '1' }
 test('H7: ADVISOR_NO_REAPER=1 is still exported before provisioning', () => {
   const src = fs.readFileSync(SUMMON, 'utf8');
   expect(src).toMatch(/^export ADVISOR_NO_REAPER=1$/m);
-  expect(src.indexOf('export ADVISOR_NO_REAPER=1')).toBeLessThan(src.indexOf('META=$(node'));
+  expect(src.indexOf('export ADVISOR_NO_REAPER=1')).toBeLessThan(src.indexOf('META=$(bun'));
 });

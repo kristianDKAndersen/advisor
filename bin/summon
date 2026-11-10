@@ -119,7 +119,8 @@ NODE_ARGS=(--agent "$AGENT" --task "$TASK" --goal "$GOAL")
 [[ -n "$SUB_TEAM"       ]] && NODE_ARGS+=(--sub-team)
 [[ -n "$SUB_TEAM_MODEL" ]] && NODE_ARGS+=(--sub-team-model "$SUB_TEAM_MODEL")
 [[ -n "$CONTINUES"      ]] && NODE_ARGS+=(--continues      "$CONTINUES")
-META=$(node "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
+# bun, not node: vault recall needs bun:sqlite and silently no-ops under node.
+META=$(bun "$ROOT/lib/summon.js" "${NODE_ARGS[@]}")
 TIMEOUT_SEC=$(echo "$META" | node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8')); const s=m.sessions?m.sessions[0]:m; console.log(s.timeoutSec ?? 1500)")
 
 # Parse paths out of the JSON (node one-liner, no deps).

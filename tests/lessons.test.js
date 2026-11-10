@@ -9,6 +9,11 @@ const iso = ms => new Date(ms).toISOString();
 const abs = rel => path.join(tmpDir, rel);
 const bytes = rel => fs.readFileSync(abs(rel));
 const countFiles = dir => fs.readdirSync(abs(dir), { recursive: true }).filter(f => f.endsWith('.md')).length;
+const recallFile = () => path.join(tmpDir, '.cache', 'recall.jsonl');
+function seedTelemetry(ms) {
+  fs.mkdirSync(path.dirname(recallFile()), { recursive: true });
+  fs.writeFileSync(recallFile(), JSON.stringify({ v: 1, ts: Math.floor(ms / 1000), sid: 'seed', lessons: [], notes: [] }) + '\n');
+}
 const HEUR = '## Heuristic\nAlways check the branch first.\n';
 
 function lesson(name, fm = {}, body = HEUR) {
@@ -162,6 +167,7 @@ test('keep sets reviewed_at', () => {
 });
 
 test('reviewQueue lists zero-recall-90d scan-stale proposed anchor-missing legacy-archived', () => {
+  seedTelemetry(Date.now() - 200 * DAY);
   const old = iso(Date.now() - 120 * DAY);
   lesson('rq-zero', { status: 'active', audience: 'both', created_at: old });
   lesson('rq-kept', { status: 'active', audience: 'both', created_at: old, reviewed_at: iso(Date.now() - 10 * DAY) });
@@ -184,12 +190,51 @@ test('reviewQueue lists zero-recall-90d scan-stale proposed anchor-missing legac
 });
 
 test('reviewQueue honours recalls inside the 90d window', () => {
+  seedTelemetry(Date.now() - 200 * DAY);
   const old = iso(Date.now() - 120 * DAY);
   lesson('rq-recalled', { status: 'active', audience: 'both', created_at: old });
   const { appendRecall } = require('../lib/recall-telemetry.js');
   appendRecall({ sid: 's1', agent: 'coder', queryHash: 'h', lessons: [{ path: 'lessons/rq-recalled.md' }] });
   const q = lessons.reviewQueue({ doctrinePath: doctrine });
   expect(q.some(e => e.path === 'lessons/rq-recalled.md' && e.reason === 'zero-recall-90d')).toBe(false);
+});
+
+test('approve sets reviewed_at', () => {
+  const rel = lesson('ap-rev', { status: 'proposed', audience: 'both' });
+  lessons.approveLesson(rel);
+  expect(Number.isFinite(Date.parse(vault.readNote(rel).fm.reviewed_at))).toBe(true);
+});
+
+test('promote sets reviewed_at', () => {
+  const rel = lesson('pr-rev', { status: 'active', audience: 'both' });
+  lessons.promoteLesson(rel, { to: 'Rule one: verify the branch.', doctrinePath: doctrine });
+  expect(Number.isFinite(Date.parse(vault.readNote(rel).fm.reviewed_at))).toBe(true);
+});
+
+test('audience sets reviewed_at', () => {
+  const rel = lesson('au-rev', { status: 'active', audience: 'both' });
+  lessons.setAudience(rel, { audience: 'worker' });
+  expect(Number.isFinite(Date.parse(vault.readNote(rel).fm.reviewed_at))).toBe(true);
+});
+
+test('retired lesson never listed as scan-stale', () => {
+  seedTelemetry(Date.now() - 200 * DAY);
+  const old = iso(Date.now() - 120 * DAY);
+  lesson('rq-ret', { status: 'retired', audience: 'both', created_at: old }, `${HEUR}\nSee /Users/nobody/definitely-missing-file.txt\n`);
+  const q = lessons.reviewQueue({ doctrinePath: doctrine });
+  expect(q.some(e => e.path === 'lessons/rq-ret.md' && (e.reason === 'scan-stale' || e.reason === 'zero-recall-90d'))).toBe(false);
+});
+
+test('zero-recall-90d not reported before telemetry is 90 days old', () => {
+  const old = iso(Date.now() - 120 * DAY);
+  lesson('rq-tel', { status: 'active', audience: 'both', created_at: old });
+  const has = () => lessons.reviewQueue({ doctrinePath: doctrine }).some(e => e.path === 'lessons/rq-tel.md' && e.reason === 'zero-recall-90d');
+  fs.rmSync(recallFile(), { force: true });
+  expect(has()).toBe(false);
+  seedTelemetry(Date.now() - 10 * DAY);
+  expect(has()).toBe(false);
+  seedTelemetry(Date.now() - 100 * DAY);
+  expect(has()).toBe(true);
 });
 
 test('reviewQueue lists audience-missing', () => {
@@ -269,6 +314,7 @@ test('promote accepts legacy status-less lesson with heuristic', () => {
 });
 
 test('reviewQueue lists status-less lesson as legacy-unstatused and audience-missing', () => {
+  seedTelemetry(Date.now() - 200 * DAY);
   const old = iso(Date.now() - 120 * DAY);
   lesson('rq-nostatus', { created_at: old });
   lesson('rq-blankstatus', { status: '', created_at: old });
