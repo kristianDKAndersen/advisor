@@ -125,17 +125,11 @@ test('lesson recalled on a 1-note vault', () => {
 
 test('heuristic section extracted and capped at 600 chars', () => {
   mkLesson('l-long', { heuristic: 'word '.repeat(300) });
-  mkLesson('l-fallback', {
-    body: 'Tags: payment gateway migration\n\n## Root cause\n' + 'fallback '.repeat(200),
-  });
   const r = recallForTask(TASK, { lessonLimit: 10 });
   const long = r.lessons.find(l => l.name === 'l-long');
   expect(long.heuristic.length).toBe(600);
   expect(long.heuristic.startsWith('word word')).toBe(true);
   expect(long.heuristic).not.toContain('Synthesis seq');
-  const fb = r.lessons.find(l => l.name === 'l-fallback');
-  expect(fb.heuristic.length).toBe(600);
-  expect(fb.heuristic.startsWith('Tags: payment gateway migration')).toBe(true);
 });
 
 test('non-ASCII task text does not throw and still matches ASCII tags', () => {
@@ -159,6 +153,38 @@ test('missing audience treated as both', () => {
   mkLesson('l-legacy');
   expect(names(recallForTask(TASK).lessons)).toEqual(['l-legacy']);
   expect(names(recallLessonsForAdvisor(TASK))).toEqual(['l-legacy']);
+});
+
+test('unknown audience value is excluded from both lanes', () => {
+  mkLesson('l-typo', { audience: 'advisors' });
+  mkLesson('l-none', { audience: 'none' });
+  mkLesson('l-both', { audience: 'both' });
+  expect(names(recallForTask(TASK, { lessonLimit: 10 }).lessons)).toEqual(['l-both']);
+  expect(names(recallLessonsForAdvisor(TASK, { limit: 10 }))).toEqual(['l-both']);
+});
+
+test('lesson with empty heuristic is not recalled', () => {
+  mkLesson('l-empty', { heuristic: '' });
+  mkLesson('l-nosection', { body: 'Tags: payment gateway migration\n\n## Root cause\nNo heuristic here.' });
+  mkLesson('l-ok');
+  expect(names(recallForTask(TASK, { lessonLimit: 10 }).lessons)).toEqual(['l-ok']);
+  expect(names(recallLessonsForAdvisor(TASK, { limit: 10 }))).toEqual(['l-ok']);
+});
+
+test('lesson-lane failure logs to stderr and returns notes', () => {
+  mkLesson('l-ok');
+  mkSynthesis(1);
+  expect(recallForTask(TASK).notes.length).toBeGreaterThan(0);
+  const dbFile = path.join(vault.vaultRoot(), '.cache', 'vault.db');
+  fs.chmodSync(dbFile, 0o000);
+  const orig = console.error;
+  const logged = [];
+  console.error = (...a) => { logged.push(a.join(' ')); };
+  let r;
+  try { r = recallForTask(TASK); } finally { console.error = orig; }
+  expect(r.lessons).toEqual([]);
+  expect(r.notes.length).toBeGreaterThan(0);
+  expect(logged.some(l => l.startsWith('[vault] lesson recall failed: '))).toBe(true);
 });
 
 test('recallLessonsForAdvisor returns advisor and both lessons only', () => {

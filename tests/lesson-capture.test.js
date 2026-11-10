@@ -258,3 +258,81 @@ test('null advisor_session never triggers', () => {
   expect(r.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
   expect(lessonFiles().length).toBe(0);
 }, TEST_TIMEOUT);
+
+test('6 concurrent captureBlockedChain processes draft exactly one lesson and one audit line', async () => {
+  const w1 = `${nowSec}-aaa111`, w2 = `${nowSec}-bbb222`;
+  mkRun(w1, { advisorSession: 'adv-race', verdicts: ['blocked'] });
+  mkRun(w2, { advisorSession: 'adv-race', verdicts: ['blocked'] });
+  const startAt = Date.now() + 1500;
+  const script = `
+    const lc = require(process.env.LC_PATH);
+    while (Date.now() < Number(process.env.START_AT)) {}
+    const r = lc.captureBlockedChain({ advisorSession: 'adv-race', workerSid: process.env.W_SID });
+    console.log(JSON.stringify({ proposed: r.proposed.length, skipped: r.skipped.length }));
+  `;
+  const runOne = () => new Promise(resolve => {
+    const p = Bun.spawn(['bun', '-e', script], {
+      stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, ADVISOR_VAULT: tmpVault, ADVISOR_RUNS_ROOT: tmpRuns,
+        LC_PATH: path.resolve(import.meta.dir, '../lib/lesson-capture.js'), START_AT: String(startAt), W_SID: w2 },
+    });
+    new Response(p.stdout).text().then(async out => { await p.exited; resolve({ code: p.exitCode, out: out.trim() }); });
+  });
+  const results = await Promise.all(Array.from({ length: 6 }, runOne));
+  for (const r of results) expect(r.code).toBe(0);
+  const parsed = results.map(r => JSON.parse(r.out.split('\n').pop()));
+  expect(parsed.reduce((n, r) => n + r.proposed, 0)).toBe(1);
+  const files = lessonFiles().filter(f => f.startsWith('proposed-'));
+  expect(files.length).toBe(1);
+  const audit = fs.readFileSync(path.join(tmpVault, '.cache', 'lessons.jsonl'), 'utf8').split('\n').filter(Boolean);
+  expect(audit.length).toBe(1);
+  const { fm } = readLesson('lessons/' + files[0]);
+  expect(fm.status).toBe('proposed');
+  expect(fm.audience).toBe('advisor');
+  expect(fm.sid).toBe(w2);
+  expect(fm.capture_key).toBe(sha('blocked:adv-race'));
+}, TEST_TIMEOUT);
+
+test('LESSON_EXISTS from writeLesson is treated as skipped', () => {
+  const w1 = `${nowSec}-aaa111`, w2 = `${nowSec}-bbb222`;
+  mkRun(w1, { advisorSession: 'adv-exists', verdicts: ['blocked'] });
+  mkRun(w2, { advisorSession: 'adv-exists', verdicts: ['blocked'] });
+  const orig = vault.writeLesson;
+  vault.writeLesson = () => { throw Object.assign(new Error('lesson exists'), { code: 'LESSON_EXISTS' }); };
+  let r;
+  try {
+    r = lc.captureBlockedChain({ advisorSession: 'adv-exists', workerSid: w2, now: NOW });
+  } finally { vault.writeLesson = orig; }
+  expect(r.proposed.length).toBe(0);
+  expect(r.skipped.length).toBe(1);
+  expect(r.skipped[0].reason).toBe('exists');
+  expect(lessonFiles().length).toBe(0);
+});
+
+test('3rd blocked verdict prints already-drafted line', () => {
+  const w1 = `${nowSec}-aaa111`, w2 = `${nowSec}-bbb222`, w3 = `${nowSec}-ccc333`;
+  mkRun(w1, { advisorSession: 'adv-3', verdicts: ['blocked'] });
+  mkRun(w2, { advisorSession: 'adv-3', verdicts: ['blocked'] });
+  const first = runSynthesize(w2);
+  expect(first.stdout).toContain('LESSON EXTRACTION REQUIRED');
+  expect(first.stdout).not.toContain('already drafted');
+  const file = lessonFiles().find(f => f.startsWith('proposed-'));
+  mkRun(w3, { advisorSession: 'adv-3', verdicts: ['blocked'] });
+  const third = runSynthesize(w3);
+  expect(third.status).toBe(0);
+  expect(third.stdout).not.toContain('LESSON EXTRACTION REQUIRED');
+  expect(third.stdout).toContain(`LESSON EXTRACTION: already drafted lessons/${file} (blocked_count=3)`);
+  expect(lessonFiles().filter(f => f.startsWith('proposed-')).length).toBe(1);
+}, TEST_TIMEOUT);
+
+test('capture works with HOME unset', () => {
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, ROOT: process.env.ADVISOR_RUNS_ROOT };
+  delete process.env.HOME; delete process.env.USERPROFILE; delete process.env.ADVISOR_RUNS_ROOT;
+  try {
+    expect(lc.runsRoot()).toBe(path.join(os.homedir(), '.advisor', 'runs'));
+  } finally {
+    for (const [k, v] of [['HOME', saved.HOME], ['USERPROFILE', saved.USERPROFILE], ['ADVISOR_RUNS_ROOT', saved.ROOT]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});

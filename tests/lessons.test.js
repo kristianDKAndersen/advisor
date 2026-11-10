@@ -230,7 +230,7 @@ const dryCases = {
 };
 for (const [name, call] of Object.entries(dryCases)) {
   test(`dry-run ${name} leaves files byte-identical`, () => {
-    const rel = lesson(`dry-${name}`, { status: 'proposed' });
+    const rel = lesson(`dry-${name}`, { status: name === 'promoteLesson' ? 'active' : 'proposed' });
     const before = bytes(rel);
     const count = countFiles('lessons');
     const r = call(rel);
@@ -240,3 +240,79 @@ for (const [name, call] of Object.entries(dryCases)) {
     expect(countFiles('lessons')).toBe(count);
   });
 }
+
+test('promote refuses retired', () => {
+  const rel = lesson('pr-retired', { status: 'retired', audience: 'both' });
+  expect(() => lessons.promoteLesson(rel, { to: 'Rule two: run the suite.', doctrinePath: doctrine })).toThrow(/retired/);
+  expect(vault.readNote(rel).fm.status).toBe('retired');
+});
+
+test('promote refuses proposed', () => {
+  const rel = lesson('pr-proposed', { status: 'proposed', audience: 'both' });
+  expect(() => lessons.promoteLesson(rel, { to: 'Rule two: run the suite.', doctrinePath: doctrine })).toThrow(/proposed/);
+  expect(vault.readNote(rel).fm.status).toBe('proposed');
+});
+
+test('promote refuses empty heuristic', () => {
+  const rel = lesson('pr-emptyheur', { status: 'active', audience: 'both' }, '## Heuristic\n\n## Evidence\nx\n');
+  expect(() => lessons.promoteLesson(rel, { to: 'Rule two: run the suite.', doctrinePath: doctrine })).toThrow(/Heuristic/);
+  expect(vault.readNote(rel).fm.status).toBe('active');
+});
+
+test('promote accepts legacy status-less lesson with heuristic', () => {
+  const rel = lesson('pr-legacy', { audience: 'both' });
+  lessons.promoteLesson(rel, { to: 'Rule two: run the suite.', doctrinePath: doctrine });
+  expect(vault.readNote(rel).fm.status).toBe('promoted');
+  const arch = lesson('pr-legacy-arch', { status: 'archived', audience: 'both' });
+  lessons.promoteLesson(arch, { to: 'Rule two: run the suite.', doctrinePath: doctrine });
+  expect(vault.readNote(arch).fm.status).toBe('promoted');
+});
+
+test('reviewQueue lists status-less lesson as legacy-unstatused and audience-missing', () => {
+  const old = iso(Date.now() - 120 * DAY);
+  lesson('rq-nostatus', { created_at: old });
+  lesson('rq-blankstatus', { status: '', created_at: old });
+  const q = lessons.reviewQueue({ doctrinePath: doctrine });
+  for (const name of ['rq-nostatus', 'rq-blankstatus']) {
+    const has = reason => q.some(e => e.path === `lessons/${name}.md` && e.reason === reason);
+    expect(has('legacy-unstatused')).toBe(true);
+    expect(has('audience-missing')).toBe(true);
+    expect(has('zero-recall-90d')).toBe(true);
+  }
+});
+
+test('mutators refuse non-lesson note', () => {
+  const rel = 'lessons/not-a-lesson.md';
+  vault.writeNote(rel, { type: 'synthesis', status: 'proposed', audience: 'both' }, HEUR);
+  const before = bytes(rel);
+  const calls = [
+    () => lessons.approveLesson(rel, { audience: 'both' }),
+    () => lessons.setAudience(rel, { audience: 'worker' }),
+    () => lessons.promoteLesson(rel, { to: 'Rule two: run the suite.', doctrinePath: doctrine }),
+    () => lessons.keepLesson(rel),
+    () => lessons.retireLesson(rel, { reason: 'x' }),
+  ];
+  for (const call of calls) expect(call).toThrow(/not a lesson/);
+  expect(bytes(rel).equals(before)).toBe(true);
+});
+
+test('retire of missing subdir ref is not found even if archive has same basename', () => {
+  vault.writeNote('lessons/archive/rt-dup.md', { type: 'lesson', status: 'retired', created_at: iso(Date.now()) }, HEUR);
+  expect(() => lessons.retireLesson('lessons/sub/rt-dup.md')).toThrow(/not found/);
+  expect(() => lessons.retireLesson('lessons/archive/nope/rt-dup.md')).toThrow(/not found/);
+  expect(lessons.retireLesson('rt-dup.md').changed).toEqual([]);
+  expect(lessons.retireLesson('lessons/rt-dup.md').changed).toEqual([]);
+});
+
+test('ref that is a symlink is refused', () => {
+  const rel = lesson('sl-target', { status: 'active', audience: 'both' });
+  const alias = abs('lessons/sl-alias.md');
+  fs.symlinkSync(abs(rel), alias);
+  try {
+    expect(() => lessons.resolveLessonRef('sl-alias.md')).toThrow(/symlink/);
+    expect(() => lessons.retireLesson('sl-alias.md')).toThrow(/symlink/);
+    expect(fs.existsSync(abs(rel))).toBe(true);
+  } finally {
+    fs.unlinkSync(alias);
+  }
+});

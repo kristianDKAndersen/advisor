@@ -165,3 +165,102 @@ test('writeLesson accepts body override and capture_key', () => {
   expect(body).toContain('Custom body token ZBOD.');
   expect(body).not.toContain('## Root cause');
 });
+
+const lessonAbs = rel => path.join(tmpDir, rel);
+const auditLines = () => {
+  try { return fs.readFileSync(path.join(tmpDir, '.cache', 'lessons.jsonl'), 'utf8').split('\n').filter(Boolean).length; } catch (_) { return 0; }
+};
+
+test('moveNote refuses symlinked target dir escaping the vault', () => {
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-outside-'));
+  try {
+    fs.symlinkSync(outside, lessonAbs('lessons/esc-archive'));
+    vault.writeNote('lessons/esc-src.md', { type: 'lesson', status: 'active', created_at: now() }, 'Escape token ZESC.');
+    expect(() => vault.moveNote('lessons/esc-src.md', 'lessons/esc-archive/esc-src.md')).toThrow();
+    expect(() => vault.moveNote('lessons/esc-src.md', 'lessons/esc-archive/nested/esc-src.md')).toThrow();
+    expect(fs.existsSync(lessonAbs('lessons/esc-src.md'))).toBe(true);
+    expect(fs.readdirSync(outside)).toEqual([]);
+  } finally {
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('moveNote never replaces an existing target under concurrent movers', async () => {
+  // Window between the existence check and the move: another mover lands the target.
+  vault.writeNote('lessons/race-a.md', { type: 'lesson', created_at: now() }, 'Loser A body.');
+  fs.mkdirSync(lessonAbs('lessons/race-archive'), { recursive: true });
+  fs.writeFileSync(lessonAbs('lessons/race-archive/keep.md'), 'keep');
+  const target = lessonAbs('lessons/race-archive/race.md');
+  const realReaddir = fs.readdirSync;
+  let injected = false;
+  fs.readdirSync = (...args) => {
+    const res = realReaddir(...args);
+    if (!injected && String(args[0]).endsWith('race-archive')) {
+      injected = true;
+      fs.writeFileSync(target, 'WINNER');
+    }
+    return res;
+  };
+  try {
+    expect(() => vault.moveNote('lessons/race-a.md', 'lessons/race-archive/race.md')).toThrow();
+  } finally {
+    fs.readdirSync = realReaddir;
+  }
+  expect(fs.readFileSync(target, 'utf8')).toBe('WINNER');
+  expect(fs.existsSync(lessonAbs('lessons/race-a.md'))).toBe(true);
+
+  // Real processes racing for one target from different sources.
+  const vaultJs = path.resolve(import.meta.dir, '../lib/vault.js');
+  for (let round = 0; round < 3; round++) {
+    const dest = `lessons/race-archive/round-${round}.md`;
+    const srcs = ['p', 'q'].map(n => `lessons/race-${n}-${round}.md`);
+    srcs.forEach((s, i) => vault.writeNote(s, { type: 'lesson', created_at: now() }, `Mover ${i} body.`));
+    const startAt = Date.now() + 400;
+    const procs = srcs.map(s => Bun.spawn([process.execPath, '-e',
+      `const v=require(${JSON.stringify(vaultJs)});while(Date.now()<${startAt});try{v.moveNote(${JSON.stringify(s)},${JSON.stringify(dest)});process.exit(0)}catch(e){process.exit(3)}`],
+      { env: { ...process.env, ADVISOR_VAULT: tmpDir, ADVISOR_RUNS_ROOT: path.join(tmpDir, 'runs') }, stdout: 'ignore', stderr: 'ignore' }));
+    const codes = await Promise.all(procs.map(p => p.exited));
+    expect(codes.filter(c => c === 0).length).toBe(1);
+    const left = srcs.filter(s => fs.existsSync(lessonAbs(s)));
+    expect(left.length).toBe(1);
+    const winnerIdx = srcs.findIndex(s => !fs.existsSync(lessonAbs(s)));
+    expect(fs.readFileSync(lessonAbs(dest), 'utf8')).toContain(`Mover ${winnerIdx} body.`);
+  }
+});
+
+test('writeLesson refuses to overwrite an existing lesson with LESSON_EXISTS', () => {
+  const rec = baseRecord({ synthesis_seq: 21 });
+  const rel = 'lessons/1794256324-abcdef-coder-21.md';
+  vault.writeLesson(rec);
+  const before = fs.readFileSync(lessonAbs(rel), 'utf8');
+  const auditBefore = auditLines();
+  let err;
+  try { vault.writeLesson({ ...rec, heuristic: 'CHANGED heuristic' }); } catch (e) { err = e; }
+  expect(err).toBeInstanceOf(Error);
+  expect(err.code).toBe('LESSON_EXISTS');
+  expect(fs.readFileSync(lessonAbs(rel), 'utf8')).toBe(before);
+  expect(auditLines()).toBe(auditBefore);
+});
+
+test('writeLesson existing lesson keeps status and audience', () => {
+  const rec = baseRecord({ synthesis_seq: 22 });
+  const rel = 'lessons/1794256324-abcdef-coder-22.md';
+  vault.writeLesson(rec);
+  const { fm, body } = vault.readNote(rel);
+  vault.writeNote(rel, { ...fm, status: 'active', audience: 'coder' }, body);
+  expect(() => vault.writeLesson({ ...rec, heuristic: 'CHANGED heuristic' })).toThrow();
+  const after = vault.readNote(rel);
+  expect(after.fm.status).toBe('active');
+  expect(after.fm.audience).toBe('coder');
+  expect(after.body).toContain('H text');
+  expect(after.body).not.toContain('CHANGED heuristic');
+});
+
+test('legacy search honours types and hides retired by default', () => {
+  vault.writeNote('lessons/lg-active.md', { type: 'lesson', status: 'active', created_at: now() }, 'Legacy token YLGC active.');
+  vault.writeNote('lessons/lg-retired.md', { type: 'lesson', status: 'retired', created_at: now() }, 'Legacy token YLGC retired.');
+  vault.writeNote('synthesis/lg-syn.md', { type: 'synthesis', created_at: now() }, 'Legacy token YLGC synthesis.');
+  expect(paths(vault.searchNotes('YLGC', 10, { legacy: true })).sort()).toEqual(['lessons/lg-active.md', 'synthesis/lg-syn.md']);
+  expect(paths(vault.searchNotes('YLGC', 10, { legacy: true, types: ['lesson'] }))).toEqual(['lessons/lg-active.md']);
+  expect(paths(vault.searchNotes('YLGC', 10, { legacy: true, includeInactive: true }))).toContain('lessons/lg-retired.md');
+});

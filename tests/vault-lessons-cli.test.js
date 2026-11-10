@@ -203,3 +203,35 @@ test('search prints status marker', () => {
   const r = run(['search', '--text', 'zebra', '--type', 'lesson']);
   expect(r.stdout).toMatch(/active-both\.md.*status=active/);
 });
+
+const VALUE_FLAGS = [
+  ['--lesson', ['keep'], '--dry-run'], ['--audience', ['approve', 'proposed-one.md'], '--dry-run'], ['--set', ['audience', 'active-adv.md'], '--dry-run'],
+  ['--to', ['promote', 'active-adv.md'], '--dry-run'], ['--reason', ['retire', 'active-adv.md'], '--dry-run'], ['--status', ['list'], '--json'],
+  ['--text', ['recall'], '--json'], ['--limit', ['recall', '--text', 'zebra'], '--json'], ['--source', ['capture'], '--dry-run'],
+  ['--since-days', ['capture'], '--dry-run'],
+];
+
+test('retire --reason --dry-run exits 1 and leaves files byte-identical', () => {
+  const before = snapshot();
+  const r = run(['lessons', 'retire', '--lesson', 'active-adv.md', '--reason', '--dry-run']);
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain('--reason requires a value');
+  expect(snapshot()).toEqual(before);
+});
+
+for (const [flag, pre, next] of VALUE_FLAGS) {
+  test(`${flag} followed by ${next} is treated as missing value`, () => {
+    const before = snapshot();
+    const r = run(['lessons', ...pre, flag, next]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`${flag} requires a value`);
+    expect(r.stderr.toLowerCase()).toContain('usage');
+    expect(snapshot()).toEqual(before);
+  });
+}
+
+test('--reason=value form works, including values starting with --', () => {
+  const r = run(['lessons', 'retire', '--lesson', 'active-adv.md', '--reason=--weird reason', '--dry-run']);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain('retired_reason=--weird reason');
+});
