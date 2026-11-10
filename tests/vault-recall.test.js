@@ -276,3 +276,34 @@ test('meta.json records advisor_session and continues', () => {
   expect(without.advisor_session).toBeNull();
   expect(without.continues).toBeNull();
 }, 60000);
+
+const { sanitizeRecallQuery } = require('../lib/vault-recall');
+const queryWords = text => sanitizeRecallQuery(text).split(' OR ').filter(Boolean);
+
+test('path segments do not consume query budget', () => {
+  const text = 'Check /Users/someone/dev/team/project/lib/a.js and ./src/deep/b.ts and ~/notes/c.md then audit merge origin branch state';
+  const words = queryWords(text).map(w => w.toLowerCase());
+  expect(words).toEqual(['check', 'audit', 'merge', 'origin', 'branch', 'state']);
+});
+
+test('urls and shas are stripped from query', () => {
+  const text = 'Review https://example.com/a/b?x=1 at commit 9fceb02d0ae598e95dc970b74767f19372d61af8 sid 1794293886-8ef770 using $ADV and ${OUTPUT_DIR} <objective>alpha</objective> beta';
+  const words = queryWords(text).map(w => w.toLowerCase());
+  expect(words).toEqual(['review', 'commit', 'sid', 'using', 'alpha', 'beta']);
+  expect(queryWords('a decade defaced cafe')).toEqual(['decade', 'defaced', 'cafe']);
+});
+
+test('duplicate tokens counted once', () => {
+  expect(queryWords('Merge merge MERGE origin Origin branch')).toEqual(['Merge', 'origin', 'branch']);
+  const words = queryWords(Array.from({ length: 40 }, (_, i) => `word${i}`).join(' '));
+  expect(words.length).toBeLessThanOrEqual(30);
+  expect(words.length).toBeGreaterThanOrEqual(15);
+});
+
+test('brief with absolute path still recalls matching lesson', () => {
+  mkLesson('l-merge', { tags: 'merge origin branch stale' });
+  const brief = '<objective>Report whether local branch feat/vault-lessons in /Users/someone/dev/devtest/advisor is ahead of master and the git merge state versus origin, stale or not</objective>';
+  const r = recallForTask(brief);
+  expect(names(r.lessons)).toEqual(['l-merge']);
+  expect(Array.isArray(r.notes)).toBe(true);
+});
