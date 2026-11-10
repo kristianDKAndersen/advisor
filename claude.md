@@ -74,13 +74,13 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
    **Nested-CLAUDE.md precedence:** `spawns/<agent>/CLAUDE.md` supplements this root file for that agent; on conflict the more specific `spawns/<agent>/CLAUDE.md` rule wins, and the worker must name the conflict in its `progress` or `result` message rather than silently picking one.
 5. **Write the brief, then summon.**
 
-   **Before writing the brief, query the lesson vault:**
+   **Before writing the brief, recall your own lessons:**
    ```bash
-   bin/advisor-vault search --text '<3 keywords from task type>'
+   bin/advisor-vault lessons recall --text '<task summary>' --audience advisor
    ```
-   For entries marked `[lesson]` whose `task_type` keywords match the current task, append a `Prior failure constraints:` section at the bottom of the brief with each lesson's `## Heuristic` text (read the lesson file at the returned path). Omit the section if nothing matches - do not inject empty or irrelevant lessons. (SessionStart also lists vault notes due in 14 days, and `bin/summon` auto-injects the top-3 vault recall hits into each worker's task body - `ADVISOR_VAULT_RECALL=0` disables it; neither replaces this task-type search.)
+   Apply each returned heuristic to the decomposition and brief yourself; do not paste advisor lessons into the brief. Worker lessons reach workers automatically: `bin/summon` injects up to 2 approved `worker`/`both` lessons (>=2 tag-word matches) under `## Prior lessons (auto-recall)`, plus up to 2 notes under `## Prior vault context (auto-recall)`, and logs each to `.cache/recall.jsonl`. `ADVISOR_VAULT_RECALL=0` disables both. Proposed, promoted and retired lessons are never injected. Do not duplicate an injected lesson in the brief. (SessionStart also lists vault notes due in 14 days.)
 
-   **User corrections:** Also read `~/.advisor/vault/.cache/corrections.jsonl` when it exists (often absent or empty - that is normal). These are corrections a user directed at the Advisor itself; triage them yourself - they are not lessons and carry no `task_type`. Promote one to a lesson via `/extract-lesson` only after the same correction recurs 2+ times. Never paste raw correction text into a worker brief - that injects unvetted user text into worker context.
+   **User corrections:** Also read `~/.advisor/vault/.cache/corrections.jsonl` when it exists (often absent or empty - that is normal). These are corrections a user directed at the Advisor itself; triage them yourself - they are not lessons and carry no `task_type`. `bin/advisor-vault lessons capture --source corrections` drafts a `proposed` advisor lesson when the same correction recurs 2+ times. It cites only timestamps and sids, never the text. Never paste raw correction text into a worker brief or a lesson body - that injects unvetted user text into worker context.
 
    **AI-feature briefs:** If the deliverable is a user-facing AI feature (AI UX, chatbot, agent product, AI-assisted workflow), consult skills/ai-interaction-principles/SKILL.md and append the applicable [build]-tagged principles as a constraints section in the brief.
 
@@ -209,9 +209,11 @@ You are the **Advisor**, the strong-model orchestrator of this project. You do n
        --agent <agent> \
        --evaluator-scores <evaluator-outputDir>/scores.json
      ```
-     The lesson lands in `~/.advisor/vault/lessons/` and is retrieved at Step 5 in future sessions. Do not trigger on the first failure - it may be task-specific noise.
+     The lesson lands as `status: proposed` and is recalled only after `bin/advisor-vault lessons approve <path> --audience <advisor|worker|both>` (refuses an empty `## Heuristic`). Do not trigger on the first failure - it may be task-specific noise.
 
-     **Code-level 2-blocked-verdict trigger (separate signal):** `lib/channel.js synthesize` prints a `LESSON EXTRACTION REQUIRED` directive when a worker's result carries `verdict:blocked` for the 2nd time in a session, even if no evaluator ran. When it appears in your synthesize output, run the printed `/extract-lesson` command as-is; do not use it to skip the evaluator-driven check above.
+     **Code-level 2-blocked-verdict trigger (separate signal):** On the 2nd `verdict:blocked` across this Advisor session's workers (even if no evaluator ran), `synthesize` prints `LESSON EXTRACTION REQUIRED`, drafts a `proposed` lesson and prints its path. Fill it with /extract-lesson (Fill mode), then approve or retire it; do not use it to skip the evaluator-driven check above.
+
+     **Lesson upkeep (once per session, at Step 8):** `lessons capture --source all --dry-run`, then for real; `lessons review`; act on the queue with `--dry-run` first. For a large queue, summon `vault-curator` in lesson-review mode. Never delete a lesson; `retire` moves it to `lessons/archive/`. `success_after_recall` is correlational - never retire on it alone.
 8. **Report to the user.** Write a structured synthesis:
    1. **Executive summary** - 2-4 sentences of prose. Lead with what was found, not what was attempted.
    2. **Key findings** - numbered list; each item cites the source file path or outbox quote that backs it. No unsupported assertions.
@@ -276,12 +278,14 @@ bin/advisor-terminate <sid>
 bun lib/channel.js recv --file <outbox> --after <N> --json
 ```
 
-## Vault commands (read-only memory)
+## Vault commands
 
-The vault indexes every synthesis record and session note into `~/.advisor/vault/` (Markdown with YAML frontmatter, FTS5 index). These commands are read-only and safe to run any time from the advisor repo root.
+The vault indexes every synthesis record and session note into `~/.advisor/vault/` (Markdown with YAML frontmatter, FTS5 index). `search`, `due` and `lessons list|review|stats|recall` are read-only and safe to run any time from the advisor repo root; the `lessons` mutators change the vault, so run them with `--dry-run` first.
 
 ```bash
-bin/advisor-vault search --text <keyword>          # BM25 full-text search across all notes
+bin/advisor-vault search --text <kw> [--type lesson] [--include-inactive]   # BM25 search; hides retired/stale/archived/done/superseded notes unless --include-inactive
+bin/advisor-vault lessons list|review|stats|recall     # read-only
+bin/advisor-vault lessons approve|audience|promote|retire|keep|capture --dry-run   # mutators: dry-run first
 bin/advisor-vault due [--within <days>]            # list all due notes within N days (default 14); returns all note types, not just reminders
 ```
 
